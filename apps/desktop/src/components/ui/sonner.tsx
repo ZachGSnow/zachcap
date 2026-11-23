@@ -1,15 +1,18 @@
 "use client"
 
-import { useTheme } from "next-themes"
+import { useSyncExternalStore } from "react"
 import { Toaster as Sonner, type ToasterProps } from "sonner"
 import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon } from "lucide-react"
 
+import { resolvedTheme, subscribeTheme } from "@/lib/theme"
+
 const Toaster = ({ ...props }: ToasterProps) => {
-  const { theme = "system" } = useTheme()
+  // The theme chosen in Settings, not just Windows' (which Sonner's "system" would follow).
+  const theme = useSyncExternalStore(subscribeTheme, resolvedTheme)
 
   return (
     <Sonner
-      theme={theme as ToasterProps["theme"]}
+      theme={theme}
       className="toaster group"
       icons={{
         success: (

@@ -1,5 +1,5 @@
 import { Loader2, Pencil, Plus, RotateCcw, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { api, type Prompt, type PromptKind } from "@/lib/engine";
+import { useReturnFocus } from "@/hooks/useReturnFocus";
 import { attempt } from "@/lib/feedback";
 
 type Limits = { label: number; instructions: number };
@@ -54,6 +55,7 @@ function PromptDialog({
   limits,
   onClose,
   onSaved,
+  onCloseAutoFocus,
 }: {
   kind: PromptKind;
   /** null: a new one. */
@@ -62,6 +64,8 @@ function PromptDialog({
   limits: Limits;
   onClose: () => void;
   onSaved: () => void;
+  /** Where focus goes when it closes (it opens from state, not from a trigger). */
+  onCloseAutoFocus: (event: Event) => void;
 }) {
   const copy = COPY[kind];
   const [label, setLabel] = useState("");
@@ -94,7 +98,7 @@ function PromptDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className="sm:max-w-xl" onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>{editing ? `Edit ${editing.label}` : `Add a ${copy.noun}`}</DialogTitle>
           <DialogDescription>{copy.hint}</DialogDescription>
@@ -156,11 +160,21 @@ function PromptDialog({
 type Ask = { title: string; body: string; action: string; run: () => Promise<void> };
 
 /** Asks before something that throws away the user's own text. */
-function Confirm({ open, ask, onCancel }: { open: boolean; ask: Ask | null; onCancel: () => void }) {
+function Confirm({
+  open,
+  ask,
+  onCancel,
+  onCloseAutoFocus,
+}: {
+  open: boolean;
+  ask: Ask | null;
+  onCancel: () => void;
+  onCloseAutoFocus: (event: Event) => void;
+}) {
   const [busy, setBusy] = useState(false);
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
-      <DialogContent className="sm:max-w-sm">
+      <DialogContent className="sm:max-w-sm" onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>{ask?.title}</DialogTitle>
           <DialogDescription>{ask?.body}</DialogDescription>
@@ -207,6 +221,10 @@ export function PromptList({
   const [dialog, setDialog] = useState<{ open: boolean; editing: Prompt | null }>({ open: false, editing: null });
   const [confirm, setConfirm] = useState<{ open: boolean; ask: Ask | null }>({ open: false, ask: null });
   const ask = (next: Ask) => setConfirm({ open: true, ask: next });
+  // Focus goes back to the button that opened a dialog, or to Add when that button is gone
+  // (the item was deleted, or reset and no longer has a Reset button).
+  const addButton = useRef<HTMLButtonElement>(null);
+  const returnFocus = useReturnFocus(() => addButton.current);
 
   const reset = (item: Prompt) =>
     ask({
@@ -244,7 +262,15 @@ export function PromptList({
           <div className="text-sm font-medium">{copy.title}</div>
           <p className="mt-0.5 text-xs text-muted-foreground">{copy.help}</p>
         </div>
-        <Button size="sm" variant="outline" onClick={() => setDialog({ open: true, editing: null })}>
+        <Button
+          ref={addButton}
+          size="sm"
+          variant="outline"
+          onClick={(event) => {
+            returnFocus.remember(event.currentTarget);
+            setDialog({ open: true, editing: null });
+          }}
+        >
           <Plus className="size-3.5" />
           Add
         </Button>
@@ -276,7 +302,10 @@ export function PromptList({
               className="size-7 shrink-0"
               aria-label={`Edit ${item.label}`}
               title="Edit"
-              onClick={() => setDialog({ open: true, editing: item })}
+              onClick={(event) => {
+                returnFocus.remember(event.currentTarget);
+                setDialog({ open: true, editing: item });
+              }}
             >
               <Pencil className="size-3.5" />
             </Button>
@@ -288,7 +317,10 @@ export function PromptList({
                   className="size-7 shrink-0"
                   aria-label={`Reset ${item.label}`}
                   title="Reset to how ZachCap ships it"
-                  onClick={() => reset(item)}
+                  onClick={(event) => {
+                    returnFocus.remember(event.currentTarget);
+                    reset(item);
+                  }}
                 >
                   <RotateCcw className="size-3.5" />
                 </Button>
@@ -300,7 +332,10 @@ export function PromptList({
                 className="size-7 shrink-0"
                 aria-label={`Delete ${item.label}`}
                 title="Delete"
-                onClick={() => remove(item)}
+                onClick={(event) => {
+                  returnFocus.remember(event.currentTarget);
+                  remove(item);
+                }}
               >
                 <Trash2 className="size-3.5" />
               </Button>
@@ -315,8 +350,14 @@ export function PromptList({
         limits={limits}
         onClose={() => setDialog((d) => ({ ...d, open: false }))}
         onSaved={onChanged}
+        onCloseAutoFocus={returnFocus.onCloseAutoFocus}
       />
-      <Confirm open={confirm.open} ask={confirm.ask} onCancel={() => setConfirm((c) => ({ ...c, open: false }))} />
+      <Confirm
+        open={confirm.open}
+        ask={confirm.ask}
+        onCancel={() => setConfirm((c) => ({ ...c, open: false }))}
+        onCloseAutoFocus={returnFocus.onCloseAutoFocus}
+      />
     </div>
   );
 }

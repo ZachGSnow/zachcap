@@ -61,6 +61,7 @@ export function RedactDialog({
   audioRemoved,
   onCancel,
   onConfirm,
+  onCloseAutoFocus,
 }: {
   line: Segment | null;
   segments: Segment[];
@@ -70,6 +71,8 @@ export function RedactDialog({
   onCancel: () => void;
   /** Resolves when the redaction finished (or failed: the dialog stays open then). */
   onConfirm: (start: number, end: number) => Promise<boolean>;
+  /** Where focus goes when it closes: it opens from the line's menu, not from a trigger. */
+  onCloseAutoFocus?: (event: Event) => void;
 }) {
   const [start, setStart] = useState(0);
   const [end, setEnd] = useState(0);
@@ -90,7 +93,7 @@ export function RedactDialog({
 
   return (
     <Dialog open={line !== null} onOpenChange={(open) => !open && !busy && onCancel()}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-lg" onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>Redact this moment</DialogTitle>
           <DialogDescription>
@@ -131,8 +134,9 @@ export function RedactDialog({
         </div>
         <p className="text-xs text-muted-foreground">
           A line that reaches into the stretch loses all its words, since ZachCap can't tell which of them fall inside it.
+          Notes and snapshots taken during the stretch are removed too.
           {hasSummary &&
-            " The summary and action items were written before this and may mention it: regenerate them afterwards."}
+            " So are the summary and action items, since they may repeat it: summarize again afterwards for new ones."}
         </p>
 
         <DialogFooter>

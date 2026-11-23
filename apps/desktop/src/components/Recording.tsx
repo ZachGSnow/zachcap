@@ -29,6 +29,27 @@ const QUIET_CHECK_IN = 600;
 /** A countdown to stop: the call ended, or it has been quiet for ten minutes. */
 type AutoStop = { reason: "call" | "quiet"; deadline: number };
 
+/** Why the recording should stop on its own now, if it should: the engine's latest word on
+ * the call and on quiet, minus what Keep recording put on hold. */
+function dueToStop(state: RecordState, kept: { call: boolean; quiet: boolean }): AutoStop["reason"] | null {
+  if (!state.recording || state.paused) return null;
+  const ended = state.call?.ended_for ?? null;
+  const quiet = state.quiet_for ?? 0;
+  if (ended !== null && ended >= CALL_END_SETTLE && quiet >= CALL_END_SETTLE && !kept.call) return "call";
+  if (!state.call?.apps.length && quiet >= QUIET_CHECK_IN && !kept.quiet) return "quiet";
+  return null;
+}
+
+/** Settings tells the recorder when something it reads changed (Stop when the call ends). */
+export const SETTINGS_CHANGED = "zachcap:settings-changed";
+
+/** Whether the user is in the middle of something on screen: a dialog, or typing (a line
+ * being fixed, a note). A recording that stops on its own doesn't take them away from it. */
+function busyOnScreen(): boolean {
+  if (document.querySelector("[role=dialog], [role=alertdialog]")) return true;
+  return document.activeElement?.matches("input, textarea, select, [contenteditable=true]") ?? false;
+}
+
 /** To paste in the meeting chat: recording laws differ, and people should know. */
 const HEADS_UP =
   "Heads-up: I'm recording this call to take notes. The recording stays on my computer and isn't shared.";
@@ -36,7 +57,9 @@ const HEADS_UP =
 type RecordingContext = {
   state: RecordState | undefined;
   start: (title: string) => Promise<void>;
-  stop: () => Promise<number | undefined>;
+  /** Stops and saves. ``automatic``: stopped on its own (the call ended), so the meeting
+   * only opens if that doesn't interrupt anything on screen. */
+  stop: (options?: { automatic?: boolean }) => Promise<number | undefined>;
   toggle: () => Promise<void>;
   /** A note, or with no text a bookmark, at this moment of the recording. */
   note: (text?: string) => Promise<boolean>;
@@ -81,7 +104,7 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     setDraftState(text);
   }, []);
 
-  const stop = useCallback(async () => {
+  const stop = useCallback(async ({ automatic = false }: { automatic?: boolean } = {}) => {
     // A note typed but not sent yet belongs to this meeting, not the next one.
     const typed = draftNow.current.trim();
     if (typed) {
@@ -94,7 +117,20 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     }
     const { meeting_id } = await api<{ meeting_id: number }>("/api/record/stop", { method: "POST" });
     await refresh();
-    void announce("Recording saved", "Transcribing and finding speakers...", "success");
+    if (automatic && busyOnScreen()) {
+      // Stopped on its own while a dialog is open or a line is being fixed: stay, offer it.
+      toast.success("Recording saved", {
+        description: "It stopped when the call ended. Transcribing and finding speakers...",
+        duration: 20_000,
+        action: { label: "Open", onClick: () => onSaved(meeting_id) },
+      });
+      return meeting_id;
+    }
+    void announce(
+      "Recording saved",
+      automatic ? "It stopped when the call ended. Transcribing and finding speakers..." : "Transcribing and finding speakers...",
+      "success",
+    );
     onSaved(meeting_id);
     return meeting_id;
   }, [refresh, onSaved, setDraft]);
@@ -187,12 +223,25 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
   // quiet minutes with no call app (an in-room meeting). Always a countdown that Keep
   // recording cancels, so a lull in the conversation never ends a meeting.
   const [stopWhenCallEnds, setStopWhenCallEnds] = useState(true);
+  const readStopSetting = useCallback(
+    () =>
+      api<Settings>("/api/settings")
+        .then((settings) => {
+          setStopWhenCallEnds(settings.stop_when_call_ends);
+          return settings.stop_when_call_ends;
+        })
+        .catch(() => true),
+    [],
+  );
   useEffect(() => {
-    if (!recording) return;
-    void api<Settings>("/api/settings")
-      .then((settings) => setStopWhenCallEnds(settings.stop_when_call_ends))
-      .catch(() => undefined);
-  }, [recording]);
+    if (recording) void readStopSetting();
+  }, [recording, readStopSetting]);
+  // Turned off (or on) in Settings mid-recording: takes effect at once.
+  useEffect(() => {
+    const changed = () => void readStopSetting();
+    window.addEventListener(SETTINGS_CHANGED, changed);
+    return () => window.removeEventListener(SETTINGS_CHANGED, changed);
+  }, [readStopSetting]);
   const [autoStop, setAutoStop] = useState<AutoStop | null>(null);
   // "Keep recording" holds until things change: the call app is back, or someone spoke.
   const kept = useRef({ call: false, quiet: false });
@@ -202,15 +251,9 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
       setAutoStop(null);
       return;
     }
-    const ended = state.call?.ended_for ?? null;
-    const quiet = state.quiet_for ?? 0;
-    if (ended === null) kept.current.call = false;
-    if (quiet < QUIET_CHECK_IN) kept.current.quiet = false;
-    let reason: AutoStop["reason"] | null = null;
-    if (stopWhenCallEnds && !state.paused) {
-      if (ended !== null && ended >= CALL_END_SETTLE && quiet >= CALL_END_SETTLE && !kept.current.call) reason = "call";
-      else if (!state.call?.apps.length && quiet >= QUIET_CHECK_IN && !kept.current.quiet) reason = "quiet";
-    }
+    if ((state.call?.ended_for ?? null) === null) kept.current.call = false;
+    if ((state.quiet_for ?? 0) < QUIET_CHECK_IN) kept.current.quiet = false;
+    const reason = stopWhenCallEnds ? dueToStop(state, kept.current) : null;
     setAutoStop((current) =>
       reason === null ? null : current?.reason === reason ? current : { reason, deadline: Date.now() + (reason === "call" ? 15_000 : 60_000) },
     );
@@ -223,11 +266,30 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
       `The recording stops in ${seconds} seconds unless you keep it going in ZachCap.`,
     );
     const timer = window.setTimeout(() => {
-      setAutoStop(null);
-      void stop().catch((error) => void announce("Couldn't stop recording", String(error), "error"));
+      void (async () => {
+        // Asked again at the deadline, not trusted from the last poll: a hidden window's
+        // timers run late, and a stale reading must never stop a meeting that went on.
+        let fresh: RecordState | null = null;
+        let wanted = true;
+        try {
+          [fresh, wanted] = await Promise.all([api<RecordState>("/api/record"), readStopSetting()]);
+        } catch {
+          fresh = null;
+        }
+        setAutoStop(null);
+        if (!fresh || !wanted || dueToStop(fresh, kept.current) !== autoStop.reason) {
+          void refresh(); // things changed: keep recording, and show the latest state
+          return;
+        }
+        try {
+          await stop({ automatic: true });
+        } catch (error) {
+          void announce("Couldn't stop recording", String(error), "error");
+        }
+      })();
     }, Math.max(0, autoStop.deadline - Date.now()));
     return () => window.clearTimeout(timer);
-  }, [autoStop, stop]);
+  }, [autoStop, stop, refresh, readStopSetting]);
   const keepRecording = useCallback(() => {
     if (autoStop) kept.current[autoStop.reason] = true;
     setAutoStop(null);

@@ -285,8 +285,9 @@ const TranscriptRow = memo(function TranscriptRow({
     <div
       data-current={current || undefined}
       data-segment={segment.id}
+      data-start={segment.start}
       className={cn(
-        "group grid grid-cols-[3.5rem_10rem_1fr_1.5rem] items-start gap-3 rounded-lg px-2 py-1.5 transition-colors",
+        "group grid grid-cols-[3.5rem_10rem_minmax(0,1fr)_1.5rem] items-start gap-3 rounded-lg px-2 py-1.5 transition-colors",
         current ? "bg-muted" : "hover:bg-muted/40",
       )}
     >
@@ -310,8 +311,12 @@ const TranscriptRow = memo(function TranscriptRow({
         <LineEditor segment={segment} onSave={onSaveText} onCancel={onCancelEdit} />
       ) : (
         <p
-          className={cn("text-sm leading-relaxed", redacted && "italic text-muted-foreground")}
-          onDoubleClick={() => onEdit(segment)}
+          className={cn(
+            // A long link or code must wrap, not push the row (and the page) wider.
+            "min-w-0 text-sm leading-relaxed [overflow-wrap:anywhere]",
+            redacted && "italic text-muted-foreground",
+          )}
+          onDoubleClick={() => !redacted && onEdit(segment)}
         >
           {redacted ? "Redacted" : names ? <Marked text={segment.text} names={names} /> : segment.text}
           {segment.edited ? (
@@ -324,7 +329,7 @@ const TranscriptRow = memo(function TranscriptRow({
       <button
         onClick={(event) => onLineMenu(segment, event.currentTarget)}
         className="mt-0.5 flex size-6 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted hover:text-foreground focus-visible:opacity-100"
-        title="Fix the words or redact this moment"
+        title={redacted ? "Redact more around this moment" : "Fix the words or redact this moment"}
         aria-label="More for this line"
         aria-haspopup="menu"
       >
@@ -385,8 +390,9 @@ export const Transcript = memo(function Transcript({
   mentions?: Mention[];
   onSeek: (seconds: number) => void;
   onChanged: () => void;
-  /** Opens the redaction dialog for the moment this line was said. */
-  onRedact: (segment: Segment) => void;
+  /** Opens the redaction dialog for the moment this line was said; ``from`` is the line's
+   * button, which gets focus back when the dialog closes. */
+  onRedact: (segment: Segment, from: HTMLElement | null) => void;
 }) {
   const [filter, setFilter] = useState("");
   const [moving, setMoving] = useState<Segment | null>(null);
@@ -398,6 +404,9 @@ export const Transcript = memo(function Transcript({
   // choice opened something that takes focus itself.
   const anchor = useRef<HTMLElement | null>(null);
   const refocus = useRef(true);
+  // "Fix the words" chosen in the menu: the editor gets focus once the menu has closed (the
+  // menu holds on to focus until then, so the editor's own autofocus is lost).
+  const focusEditor = useRef<number | null>(null);
   const menuLabel = useId();
   const list = useRef<HTMLDivElement>(null);
 
@@ -565,27 +574,41 @@ export const Transcript = memo(function Transcript({
               aria-labelledby={menuLabel}
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
-                if (refocus.current) anchor.current?.focus({ preventScroll: true });
+                const editing = focusEditor.current;
+                focusEditor.current = null;
+                if (editing != null) {
+                  list.current
+                    ?.querySelector<HTMLTextAreaElement>(`[data-segment="${editing}"] textarea`)
+                    ?.focus({ preventScroll: true });
+                } else if (refocus.current) {
+                  anchor.current?.focus({ preventScroll: true });
+                }
               }}
             >
               <DropdownMenuLabel id={menuLabel} className="text-xs text-muted-foreground">
                 This line
               </DropdownMenuLabel>
-              <DropdownMenuItem
-                onSelect={() => {
-                  refocus.current = false; // the editor takes focus
-                  setEditingId(menu.segment.id);
-                }}
-              >
-                <Pencil className="size-4" />
-                Fix the words
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
+              {/* A redacted line has no words left to fix. */}
+              {menu.segment.text !== REDACTED && (
+                <>
+                  <DropdownMenuItem
+                    onSelect={() => {
+                      refocus.current = false;
+                      focusEditor.current = menu.segment.id;
+                      setEditingId(menu.segment.id);
+                    }}
+                  >
+                    <Pencil className="size-4" />
+                    Fix the words
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
               <DropdownMenuItem
                 variant="destructive"
                 onSelect={() => {
-                  refocus.current = false; // the dialog takes focus
-                  onRedact(menu.segment);
+                  refocus.current = false; // the dialog takes focus, and gives it back to the line
+                  onRedact(menu.segment, anchor.current);
                 }}
               >
                 <EyeOff className="size-4" />

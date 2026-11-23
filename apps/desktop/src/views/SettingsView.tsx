@@ -20,6 +20,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { PromptList } from "@/components/PromptLibrary";
+import { SETTINGS_CHANGED } from "@/components/Recording";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,8 +37,9 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { SoundCheck } from "@/components/SoundCheck";
 import { usePoll } from "@/hooks/usePoll";
+import { useReturnFocus } from "@/hooks/useReturnFocus";
 import { api, isTauri, type Devices, type KeyStatus, type PromptLibrary, type Settings } from "@/lib/engine";
-import { attempt, copyText } from "@/lib/feedback";
+import { attempt, copyText, reason } from "@/lib/feedback";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
 
 const KEYS = [
@@ -83,6 +85,7 @@ function WatchFolderRow({
   onSave: (change: SettingsChange) => Promise<void>;
 }) {
   const [asking, setAsking] = useState<{ path: string; count: number } | null>(null);
+  const returnFocus = useReturnFocus();
 
   const choose = () =>
     attempt("Couldn't choose the folder", async () => {
@@ -115,7 +118,14 @@ function WatchFolderRow({
         <code className="min-w-0 flex-1 truncate font-mono text-xs" title={folder || undefined}>
           {folder || "Off"}
         </code>
-        <Button size="sm" variant="outline" onClick={() => void choose()}>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={(event) => {
+            returnFocus.remember(event.currentTarget);
+            void choose();
+          }}
+        >
           <FolderOpen className="size-3.5" />
           Choose
         </Button>
@@ -136,7 +146,7 @@ function WatchFolderRow({
         </p>
       )}
       <Dialog open={asking !== null} onOpenChange={(open) => !open && setAsking(null)}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md" onCloseAutoFocus={returnFocus.onCloseAutoFocus}>
           <DialogHeader>
             <DialogTitle>Import the recordings already there?</DialogTitle>
             <DialogDescription>
@@ -367,9 +377,11 @@ export function SettingsView() {
     try {
       await api("/api/settings", { method: "PUT", json: change });
       toast.success("Saved");
+      // A recording in progress reads some settings (Stop when the call ends): now, not later.
+      window.dispatchEvent(new Event(SETTINGS_CHANGED));
       await refresh();
     } catch (error) {
-      toast.error("Couldn't save", { description: String(error) });
+      toast.error("Couldn't save", { description: reason(error) });
     }
   };
 
@@ -390,19 +402,30 @@ export function SettingsView() {
     });
 
   // Empty records every output (the engine's default); "default" is the Windows default only.
-  const outputOptions = (list: { name: string; default: boolean }[] | undefined) => {
+  // A saved device that isn't plugged in now is listed as such: otherwise the picker shows
+  // its first choice, which isn't what's saved (and picking it wouldn't be a change).
+  const missing = (saved: string | undefined, list: { name: string }[] | undefined, special: string[]) =>
+    saved && list && !special.includes(saved) && !list.some((d) => d.name === saved) ? saved : null;
+
+  const outputOptions = (list: { name: string; default: boolean }[] | undefined, saved: string | undefined) => {
     const windowsDefault = list?.find((d) => d.default)?.name;
+    const gone = missing(saved, list, ["", "default"]);
     return [
       { value: "", label: "Every speaker and headset (follows the call)" },
       { value: "default", label: `Windows default only${windowsDefault ? ` (${windowsDefault})` : ""}` },
       ...(list ?? []).map((d) => ({ value: d.name, label: `${d.name} only` })),
+      ...(gone ? [{ value: gone, label: `${gone}: not connected, so every speaker and headset is recorded` }] : []),
     ];
   };
 
-  const deviceOptions = (list: { name: string; default: boolean }[] | undefined) => [
-    { value: "", label: `Windows default${list?.find((d) => d.default) ? ` (${list.find((d) => d.default)!.name})` : ""}` },
-    ...(list ?? []).map((d) => ({ value: d.name, label: d.name })),
-  ];
+  const deviceOptions = (list: { name: string; default: boolean }[] | undefined, saved: string | undefined) => {
+    const gone = missing(saved, list, [""]);
+    return [
+      { value: "", label: `Windows default${list?.find((d) => d.default) ? ` (${list.find((d) => d.default)!.name})` : ""}` },
+      ...(list ?? []).map((d) => ({ value: d.name, label: d.name })),
+      ...(gone ? [{ value: gone, label: `${gone}: not connected, so the Windows default is used` }] : []),
+    ];
+  };
 
   return (
     <ScrollArea className="min-h-0 flex-1">
@@ -450,18 +473,18 @@ export function SettingsView() {
               label="Microphone"
               value={settings?.mic_device ?? ""}
               onChange={(value) => void save({ mic_device: value })}
-              options={deviceOptions(devices?.inputs)}
+              options={deviceOptions(devices?.inputs, settings?.mic_device)}
             />
           </Row>
           <Row
             label="Computer audio from"
-            help="Everyone else on the call. By default ZachCap records every speaker and headset at once, so a call on a headset, or a headset plugged in mid-call, isn't missed. Pick one device (or a virtual cable) to record only that."
+            help="Everyone else on the call. By default ZachCap records every speaker and headset at once, so a call on a headset, or a headset plugged in mid-call, isn't missed. Pick one device (or a virtual cable) to record only that; while it isn't connected, every speaker and headset is recorded instead."
           >
             <Select
               label="Computer audio from"
               value={settings?.output_device ?? ""}
               onChange={(value) => void save({ output_device: value })}
-              options={outputOptions(devices?.outputs)}
+              options={outputOptions(devices?.outputs, settings?.output_device)}
             />
           </Row>
           <Row
