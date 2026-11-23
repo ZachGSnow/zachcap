@@ -37,6 +37,10 @@ def _stamp(seconds: float, separator: str) -> str:
 
 
 def _note_text(note) -> str:
+    if note["kind"] == "file":
+        name, text = note["text"].partition("\n")[::2]
+        lines = text.count("\n") + 1
+        return f"Attached file: {name} ({lines} line{'' if lines == 1 else 's'})"
     if note["kind"] == "snapshot":
         text = " / ".join(line.strip() for line in note["text"].splitlines() if line.strip())
         return f"Snapshot: {text}" if text else "Snapshot (no text)"

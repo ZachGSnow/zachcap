@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from . import (
     __version__,
     apikeys,
+    attachments,
     audio,
     clients,
     dictation,
@@ -142,6 +143,10 @@ class RecordBody(BaseModel):
 
 class PauseBody(BaseModel):
     paused: bool
+
+
+class AttachBody(BaseModel):
+    path: str  # a text file on this PC: a log, an exported email, a config
 
 
 class NoteBody(BaseModel):
@@ -773,6 +778,25 @@ def create_app(token: str) -> FastAPI:
         meeting_or_404(store, meeting_id)
         text = check_note(body)
         note_id = store.add_note(meeting_id, max(0.0, body.at or 0.0), body.kind, text)
+        tickets.fill(store, meeting_id)
+        export.auto_export(store, meeting_id)
+        return dict(store.note(note_id))
+
+    @app.post("/api/meetings/{meeting_id}/attach", dependencies=auth)
+    def attach_file(meeting_id: int, body: AttachBody, store: Store = Depends(db)):
+        """A text file's text, kept with the meeting as a note: summaries, ticket notes and
+        Ask use it. The file itself is only read."""
+        meeting_or_404(store, meeting_id)
+        attached = [n for n in store.notes(meeting_id) if n["kind"] == attachments.KIND]
+        if len(attached) >= attachments.MAX_FILES:
+            raise HTTPException(
+                status_code=400, detail=f"A meeting has at most {attachments.MAX_FILES} files"
+            )
+        try:
+            name, text = attachments.read(Path(body.path))
+        except attachments.NotText as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        note_id = store.add_note(meeting_id, 0.0, attachments.KIND, attachments.as_note(name, text))
         tickets.fill(store, meeting_id)
         export.auto_export(store, meeting_id)
         return dict(store.note(note_id))

@@ -128,7 +128,8 @@ def candidates(store, meeting_id: int, heard: bool = True) -> list[dict]:
 
     add(_found(meeting["title"], compiled), "title", meeting["title"])
     for note in store.notes(meeting_id):
-        source = "snapshots" if note["kind"] == "snapshot" else "notes"
+        # An attached file (a log) is full of numbers: what's in it is offered, not filled in.
+        source = {"snapshot": "snapshots", "file": "files"}.get(note["kind"], "notes")
         add(_found(note["text"] or "", compiled), source, note["text"] or "")
     for line in store.transcript(meeting_id) if heard else []:
         add(_heard(line["text"], compiled), "transcript", line["text"])
