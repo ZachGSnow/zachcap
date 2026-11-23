@@ -36,6 +36,10 @@ RECENT = 10  # dictations kept in memory (never on disk) in case one went astray
 ENGLISH_MODEL = "small.en"
 ANY_LANGUAGE_MODEL = "small"
 SETTING = "dictation"
+SNIPPETS = "dictation_snippets"  # "cue: the text to type", one per line
+MAX_SNIPPETS = 50
+MAX_CUE = 60
+MAX_SNIPPET = 1000
 
 
 def _sound(name: str) -> None:
@@ -167,6 +171,36 @@ class Transcriber:
             hotwords=hotwords or None,
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
+
+
+def cue(text: str) -> str:
+    """Words as a snippet's cue is matched: lowercase, no punctuation ("Reboot note." is
+    "reboot note")."""
+    return " ".join(re.findall(r"[^\W_]+", text.lower()))
+
+
+def snippets(text: str | None) -> dict[str, str]:
+    """Snippets as written in Settings, one per line: "cue: the text to type". Saying just a
+    cue types its text instead. Raises ValueError, with a reason to show, for a line that
+    can't be used."""
+    found: dict[str, str] = {}
+    for number, line in enumerate((text or "").splitlines(), 1):
+        if not line.strip():
+            continue
+        said, colon, typed = line.partition(":")
+        if not colon or not cue(said) or not typed.strip():
+            raise ValueError(f"Line {number}: write the cue, a colon, then the text to type")
+        if len(said.strip()) > MAX_CUE or len(typed.strip()) > MAX_SNIPPET:
+            raise ValueError(
+                f"Line {number}: a cue is at most {MAX_CUE} characters and its text at most "
+                f"{MAX_SNIPPET}"
+            )
+        if cue(said) in found:
+            raise ValueError(f'Line {number}: "{said.strip()}" is already a cue')
+        found[cue(said)] = typed.strip()
+    if len(found) > MAX_SNIPPETS:
+        raise ValueError(f"At most {MAX_SNIPPETS} snippets")
+    return found
 
 
 def model_for(language: str | None) -> str:
@@ -523,11 +557,13 @@ class Dictation:
         hotwords: str | None,
         fix=None,
         type_it: bool = True,
+        snippets: dict[str, str] | None = None,
     ) -> dict:
         """Stops listening, transcribes, applies the Words to know corrections (``fix``) and
         types the text into the window that was in front when the keys came up (``number``
-        None: the newest dictation). Returns the text, timings and how it was delivered.
-        Raises NotListening if that dictation already ended."""
+        None: the newest dictation); a dictation that's just a snippet's cue types the
+        snippet instead. Returns the text, timings and how it was delivered. Raises
+        NotListening if that dictation already ended."""
         window = foreground_window() if type_it else None
         with self._lock:
             if number is None and self._open:
@@ -537,15 +573,17 @@ class Dictation:
             raise NotListening("Not listening")
         audio = self._close(mic, expire)
         _sound("Speech Off.wav")
-        job = self._in_order.submit(self._deliver, audio, window, language, hotwords, fix, type_it)
+        job = self._in_order.submit(
+            self._deliver, audio, window, language, hotwords, fix, type_it, snippets or {}
+        )
         return job.result()
 
-    def _deliver(self, audio, window, language, hotwords, fix, type_it: bool) -> dict:
+    def _deliver(self, audio, window, language, hotwords, fix, type_it: bool, snippets) -> dict:
         began = time.perf_counter()
         text = self.transcriber.text(audio, language, hotwords)
         if fix is not None and text:
             text = fix(text)
-        text = printable(text)
+        text = printable(snippets.get(cue(text), text) if text else text)
         typed, why = 0, None
         if text and type_it:
             # A hold under way: its keys are down, and its text comes after this one.

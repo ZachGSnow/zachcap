@@ -174,6 +174,7 @@ class SettingsBody(BaseModel):
     stop_when_call_ends: bool | None = None
     export_work_log: bool | None = None  # keep a daily and weekly work log in the export folder
     dictation: bool | None = None  # hold the dictation keys to dictate into any app
+    dictation_snippets: str | None = None  # "cue: text to type", one per line
     shortcuts: dict[str, str] | None = None  # new keys for some shortcuts, "" for the default
     ticket_patterns: str | None = None  # how ticket numbers look ("#######, INC-####"); "" off
     also_answer_to: str | None = None  # other names you answer to, comma-separated
@@ -1127,6 +1128,10 @@ def create_app(token: str) -> FastAPI:
         """The keys came up: transcribe what was said and type it where the cursor is."""
         body = body or DictateBody()
         vocab = words.parse(store.setting("vocabulary"))
+        try:
+            snippets = dictation.snippets(store.setting(dictation.SNIPPETS))
+        except ValueError:  # saved before a stricter check: none rather than none typed
+            snippets = {}
         names = [p["name"] for p in store.people() if p["name"].lower() not in {"you", "me"}]
         try:
             return dictator.finish(
@@ -1135,6 +1140,7 @@ def create_app(token: str) -> FastAPI:
                 vocab.hotwords(names),
                 fix=vocab.correct,
                 type_it=body.type,
+                snippets=snippets,
             )
         except dictation.NotListening as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1278,6 +1284,7 @@ def create_app(token: str) -> FastAPI:
             "stop_when_call_ends": store.setting("stop_when_call_ends", "1") == "1",
             "export_work_log": store.setting("export_work_log") == "1",
             "dictation": store.setting(dictation.SETTING) == "1",
+            "dictation_snippets": store.setting(dictation.SNIPPETS, ""),
             "shortcuts": shortcuts.current(store),
             "ticket_patterns": store.setting(tickets.SETTING, ""),
             "soundcheck_passed": store.setting("soundcheck_passed"),
@@ -1324,6 +1331,12 @@ def create_app(token: str) -> FastAPI:
             store.set_setting("mask_before_claude", "1" if body.mask_before_claude else "0")
         if body.stop_when_call_ends is not None:
             store.set_setting("stop_when_call_ends", "1" if body.stop_when_call_ends else "0")
+        if body.dictation_snippets is not None:
+            try:
+                dictation.snippets(body.dictation_snippets)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            store.set_setting(dictation.SNIPPETS, body.dictation_snippets.strip())
         if body.dictation is not None:
             store.set_setting(dictation.SETTING, "1" if body.dictation else "0")
             if body.dictation:  # loaded now, so the first dictation is quick

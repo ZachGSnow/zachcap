@@ -87,6 +87,7 @@ type SettingsChange = Partial<{
   stop_when_call_ends: boolean;
   export_work_log: boolean;
   dictation: boolean;
+  dictation_snippets: string;
   also_answer_to: string;
   ticket_patterns: string;
   watch_folder: string;
@@ -502,6 +503,35 @@ function WordsToKnow({ saved, onSave }: { saved: string; onSave: (value: string)
   );
 }
 
+/** Snippets for dictation: say just a cue and its text is typed instead. */
+function Snippets({ saved, onSave }: { saved: string; onSave: (value: string) => Promise<void> }) {
+  const [value, setValue] = useState(saved);
+  useEffect(() => setValue(saved), [saved]);
+  const changed = value.trim() !== saved.trim();
+  return (
+    <div className="px-4 py-3.5">
+      <div className="text-sm font-medium">Snippets</div>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        Say just a cue, and its text is typed instead: one per line, the cue, a colon, then the text, like{" "}
+        <code className="font-mono">reboot note: Rebooted the PC and confirmed it works.</code> A cue said in a sentence
+        is typed as said.
+      </p>
+      <Textarea
+        aria-label="Snippets"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        placeholder={"reboot note: Rebooted the PC and confirmed it works.\nmy extension: 4120"}
+        className="mt-2.5 min-h-20 font-mono text-xs"
+      />
+      <div className="mt-2 flex justify-end">
+        <Button size="sm" disabled={!changed} onClick={() => void onSave(value)}>
+          Save snippets
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function StartWithWindows() {
   const [on, setOn] = useState<boolean>();
   useEffect(() => {
@@ -838,6 +868,12 @@ export function SettingsView() {
             <Row label="Try it here" help={`Click in the box, hold ${keysNow.dictate} and say something.`}>
               <Textarea aria-label="Try dictation here" placeholder={`Hold ${keysNow.dictate} and speak`} className="min-h-16 text-sm" />
             </Row>
+          )}
+          {settings?.dictation && (
+            <Snippets
+              saved={settings.dictation_snippets ?? ""}
+              onSave={(dictation_snippets) => save({ dictation_snippets })}
+            />
           )}
           {settings?.dictation && <RecentDictations />}
         </Section>
