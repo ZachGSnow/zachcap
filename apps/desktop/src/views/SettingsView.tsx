@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { FolderOpen, KeyRound, Keyboard, Mic, RefreshCw, ShieldCheck, Sparkles, Speaker, UserRound } from "lucide-react";
+import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { FolderOpen, KeyRound, Keyboard, Mic, Power, RefreshCw, ShieldCheck, Sparkles, Speaker, UserRound } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -7,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Switch } from "@/components/ui/switch";
 import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type Devices, type KeyStatus, type Settings } from "@/lib/engine";
 
@@ -120,6 +122,31 @@ function KeyRow({ name, title, help, status, onSaved }: { name: string; title: s
   );
 }
 
+function StartWithWindows() {
+  const [on, setOn] = useState<boolean>();
+  useEffect(() => {
+    isEnabled()
+      .then(setOn)
+      .catch(() => setOn(false));
+  }, []);
+
+  const change = async (next: boolean) => {
+    try {
+      await (next ? enable() : disable());
+      setOn(await isEnabled());
+      toast.success(next ? "ZachCap will start with Windows" : "ZachCap won't start with Windows");
+    } catch (error) {
+      toast.error("Couldn't change that", { description: String(error) });
+    }
+  };
+
+  return (
+    <Row label="Start with Windows" help="Opens in the tray when you sign in, so it can offer to record your calls.">
+      <Switch className="ml-auto" checked={on ?? false} disabled={on === undefined} onCheckedChange={(next) => void change(next)} />
+    </Row>
+  );
+}
+
 export function SettingsView() {
   const { data: settings, refresh } = usePoll(() => api<Settings>("/api/settings"), 0);
   const { data: keys, refresh: refreshKeys } = usePoll(() => api<KeyStatus>("/api/keys"), 0);
@@ -223,6 +250,13 @@ export function SettingsView() {
             <KeyRow key={key.name} {...key} status={keys?.[key.name]} onSaved={() => void refreshKeys()} />
           ))}
         </Section>
+
+        {/* Release builds only: the shell registers autostart only there. */}
+        {isTauri() && import.meta.env.PROD && (
+          <Section icon={<Power className="size-3.5" />} title="Startup">
+            <StartWithWindows />
+          </Section>
+        )}
 
         <Section icon={<Keyboard className="size-3.5" />} title="Shortcuts">
           <Row label="Start or stop recording" help="Works from anywhere, even with ZachCap in the tray.">

@@ -5,11 +5,15 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+
+/// Added to the sign-in launch: ZachCap starts in the tray instead of opening its window.
+const HIDDEN_ARG: &str = "--hidden";
 
 #[derive(Clone, Serialize)]
 struct EngineInfo {
@@ -156,12 +160,59 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// The first time the window is closed, says where ZachCap went. A marker file in the
+/// app's local data folder keeps it to once.
+fn tell_about_tray(app: &AppHandle) {
+    static TOLD: AtomicBool = AtomicBool::new(false);
+    if TOLD.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let Ok(folder) = app.path().app_local_data_dir() else {
+        return;
+    };
+    let marker = folder.join("tray-hint-shown");
+    if marker.exists()
+        || std::fs::create_dir_all(&folder)
+            .and_then(|_| std::fs::write(&marker, b""))
+            .is_err()
+    {
+        return;
+    }
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app
+        .notification()
+        .builder()
+        .title("ZachCap is still running")
+        .body("It's in the tray, ready to record. Quit from the tray icon's menu.")
+        .show();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let port = free_port();
     let token = uuid::Uuid::new_v4().simple().to_string();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        // A second launch (Start menu, shortcut) shows the running copy instead of starting
+        // another engine and tray icon. The plugin has to be registered first.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main(app)
+        }));
+        // Release builds only: a debug build started at sign-in would load the dev server,
+        // which isn't running then.
+        #[cfg(not(debug_assertions))]
+        {
+            builder = builder.plugin(
+                tauri_plugin_autostart::Builder::new()
+                    .app_name("ZachCap")
+                    .arg(HIDDEN_ARG)
+                    .build(),
+            );
+        }
+    }
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -231,6 +282,11 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // The window starts hidden (tauri.conf.json); a sign-in launch leaves it in the tray.
+            if !std::env::args().any(|arg| arg == HIDDEN_ARG) {
+                show_main(app.handle());
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -238,6 +294,7 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                tell_about_tray(window.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![engine_info, engine_exited, open_folder])
