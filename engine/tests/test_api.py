@@ -63,6 +63,11 @@ def test_settings_round_trip_and_validation(client: TestClient):
     assert words.json()["vocabulary"] == "Contoso\nProxmox"
     too_long = client.put("/api/settings", headers=AUTH, json={"vocabulary": "x" * 4001})
     assert too_long.status_code == 400
+    styled = client.put("/api/settings", headers=AUTH, json={"summary_template": "incident"})
+    assert styled.json()["summary_template"] == "incident"
+    assert {"id": "email", "label": "Follow-up email"} in styled.json()["recipes"]
+    bad_style = client.put("/api/settings", headers=AUTH, json={"summary_template": "poem"})
+    assert bad_style.status_code == 400
 
 
 def test_import_rejects_missing_files_and_actions_validate(client: TestClient, tmp_path: Path):

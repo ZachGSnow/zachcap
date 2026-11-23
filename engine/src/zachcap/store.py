@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS meetings (
     status      TEXT NOT NULL DEFAULT 'recorded',
     source_app  TEXT,
     notes       TEXT,
+    template    TEXT,                               -- the kind of meeting, for summaries
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -135,9 +136,17 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self._batch = 0
         self.db.executescript(SCHEMA)
+        self._migrate()
         if not self.db.execute("SELECT 1 FROM people WHERE is_me = 1").fetchone():
             self.db.execute("INSERT INTO people (name, is_me) VALUES ('You', 1)")
             self._commit()
+
+    def _migrate(self) -> None:
+        """Columns added after a database was created (CREATE TABLE IF NOT EXISTS skips them)."""
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(meetings)")}
+        if "template" not in columns:
+            self.db.execute("ALTER TABLE meetings ADD COLUMN template TEXT")
+            self.db.commit()
 
     def close(self) -> None:
         self.db.close()

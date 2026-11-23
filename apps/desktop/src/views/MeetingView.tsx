@@ -40,7 +40,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { usePoll } from "@/hooks/usePoll";
-import { api, mediaUrl, type MeetingDetail, type Person, type Speaker } from "@/lib/engine";
+import { api, mediaUrl, type MeetingDetail, type Person, type Settings, type Speaker } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
 import { clock, colorMap, minutes, when } from "@/lib/format";
 import { StatusBadge } from "@/views/MeetingsView";
@@ -52,6 +52,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   const [busy, setBusy] = useState(false);
   const { data, error, refresh } = usePoll(() => api<MeetingDetail>(`/api/meetings/${id}`), busy ? 1500 : 0, id);
   const { data: people = [], refresh: refreshPeople } = usePoll(() => api<Person[]>("/api/people"), 0);
+  const { data: settings } = usePoll(() => api<Settings>("/api/settings"), 0);
   const audio = useRef<HTMLAudioElement>(null);
   const [player, setPlayer] = useState<PlayerState>({ playing: false, time: 0, duration: 0, rate: 1 });
   const [solo, setSolo] = useState<string | null>(null);
@@ -168,13 +169,13 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
     }
   };
 
-  const summarize = async () => {
+  const summarize = async (template?: string) => {
     if (summarizing) return;
     setTab("summary");
     setSummarizing(true);
     const toastId = toast.loading("Summarizing with Claude...");
     try {
-      await api(`/api/meetings/${id}/summary`, { method: "POST" });
+      await api(`/api/meetings/${id}/summary`, { method: "POST", json: { template: template ?? null } });
       toast.success("Summary ready", { id: toastId });
       await refresh();
     } catch (error) {
@@ -394,13 +395,17 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
 
             <TabsContent value="summary">
               <SummaryPanel
+                meetingId={id}
                 title={meeting.title}
                 summary={data.summary}
                 items={data.action_items}
                 me={data.me}
                 colorOf={colorOf}
+                templates={settings?.templates ?? []}
+                recipes={settings?.recipes ?? []}
+                template={meeting.template ?? settings?.summary_template ?? "general"}
                 summarizing={summarizing}
-                onSummarize={() => void summarize()}
+                onSummarize={(template) => void summarize(template)}
                 onSeek={seek}
                 onChanged={() => void refresh()}
               />
