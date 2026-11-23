@@ -21,7 +21,7 @@ import { NotesPanel } from "@/components/NotesPanel";
 import { PlayerBar, type PlayerState } from "@/components/PlayerBar";
 import { RedactDialog } from "@/components/RedactDialog";
 import { SummaryPanel } from "@/components/SummaryPanel";
-import { NamePrompt, Transcript, WhoIsThis } from "@/components/Transcript";
+import { NamePrompt, REDACTED, Transcript, WhoIsThis } from "@/components/Transcript";
 import { AvatarStack, ConversationStats, SpeakerLanes, TalkTimeBars } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -51,11 +51,12 @@ import {
   mediaUrl,
   type MeetingDetail,
   type Person,
+  type RedactResult,
   type Segment,
   type Settings,
   type Speaker,
 } from "@/lib/engine";
-import { attempt, copyText } from "@/lib/feedback";
+import { attempt, copyText, reason } from "@/lib/feedback";
 import { clock, colorMap, day, minutes, when } from "@/lib/format";
 import { StatusBadge } from "@/views/MeetingsView";
 
@@ -66,10 +67,12 @@ const TRACK_LABEL: Record<Track, string> = { mix: "Everyone", mic: "Your mic onl
 const SILENCE_GAP = 1.5;
 const SKIP_KEY = "zachcap-skip-silences";
 
-/** Stretches where anyone is talking: lines merged when they overlap or nearly touch. */
-function speechSpans(segments: { start: number; end: number }[]): { start: number; end: number }[] {
+/** Stretches where anyone is talking: lines merged when they overlap or nearly touch. A
+ * redacted line is silence now (its audio was silenced), so it isn't speech. */
+function speechSpans(segments: { start: number; end: number; text: string }[]): { start: number; end: number }[] {
   const spans: { start: number; end: number }[] = [];
-  for (const segment of [...segments].sort((a, b) => a.start - b.start)) {
+  const spoken = segments.filter((segment) => segment.text !== REDACTED);
+  for (const segment of spoken.sort((a, b) => a.start - b.start)) {
     const last = spans.at(-1);
     if (last && segment.start <= last.end + 0.3) last.end = Math.max(last.end, segment.end);
     else spans.push({ start: segment.start, end: segment.end });
@@ -113,7 +116,17 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
+  // Also as a ref: a toast's "Summarize again" keeps the closure from when it was shown.
+  const summarizingNow = useRef(false);
   const [redacting, setRedacting] = useState<Segment | null>(null);
+  // The line button that opened the redaction dialog, and the moment, to give focus back to
+  // (or to the line now at that moment, when the line was removed).
+  const redactOpener = useRef<{ from: HTMLElement | null; at: number } | null>(null);
+  const openRedact = useCallback((segment: Segment, from: HTMLElement | null) => {
+    redactOpener.current = { from, at: segment.start };
+    setRedacting(segment);
+  }, []);
+  const moreButton = useRef<HTMLButtonElement>(null);
   // Bumped after a redaction, so the player loads the silenced audio, not a cached copy.
   const [audioVersion, setAudioVersion] = useState(0);
   const pendingSeek = useRef<{ time: number; play: boolean } | null>(at != null ? { time: at, play: false } : null);
@@ -210,6 +223,12 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   useEffect(() => {
     // Space or K plays and pauses; Left and Right move 5 s, J and L 10 s (as in video players).
     const moves: Record<string, number> = { ArrowLeft: -5, ArrowRight: 5, KeyJ: -10, KeyL: 10 };
+    // Whether the focused control got focus from the keyboard (Tab): it showed a focus ring
+    // as it got focus. Asked then, not at the key press, which makes any focus "visible".
+    let keyboardFocus = false;
+    const onFocus = (event: FocusEvent) => {
+      keyboardFocus = event.target instanceof Element && event.target.matches(":focus-visible");
+    };
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
       const toggle = event.code === "Space" || event.code === "KeyK";
@@ -222,7 +241,10 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
       ) {
         return;
       }
-      // Also stops Space from clicking whichever button was clicked last.
+      // A keyboard user on a button, checkbox or switch presses it with Space. A control that
+      // a click focused isn't pressed again: Space plays and pauses then, as before.
+      const control = target.closest("button, a[href], [role=button], [role=checkbox], [role=switch], [role=radio]");
+      if (event.code === "Space" && control && keyboardFocus) return;
       event.preventDefault();
       const element = audio.current;
       if (!element) return;
@@ -235,8 +257,12 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
         element.currentTime = Math.max(0, Math.min(end, element.currentTime + moves[event.code]));
       }
     };
+    window.addEventListener("focusin", onFocus, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("focusin", onFocus, true);
+      window.removeEventListener("keydown", onKey);
+    };
   }, []);
 
   const reprocess = async () => {
@@ -247,7 +273,8 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   };
 
   const summarize = async () => {
-    if (summarizing) return;
+    if (summarizingNow.current) return;
+    summarizingNow.current = true;
     setTab("summary");
     setSummarizing(true);
     const toastId = toast.loading("Summarizing with Claude...");
@@ -256,8 +283,9 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
       toast.success("Summary ready", { id: toastId });
       await refresh();
     } catch (error) {
-      toast.error("Couldn't create the summary", { id: toastId, description: String(error) });
+      toast.error("Couldn't create the summary", { id: toastId, description: reason(error) });
     } finally {
+      summarizingNow.current = false;
       setSummarizing(false);
     }
   };
@@ -303,26 +331,60 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
       element.load();
     }
     try {
-      const done = await api<{ lines_removed: number; lines_redacted: number; has_summary: boolean }>(
-        `/api/meetings/${id}/redact`,
-        { method: "POST", json: { start, end } },
-      );
+      const done = await api<RedactResult>(`/api/meetings/${id}/redact`, { method: "POST", json: { start, end } });
+      // The lines, notes and action items as they are now, before the dialog closes, so
+      // focus can go to the line that is now at that moment.
+      await Promise.all([refresh(), refreshPeople()]);
       setRedacting(null);
       const lines = done.lines_removed + done.lines_redacted;
+      const notes = done.notes_removed ?? 0;
+      const changed = [
+        `${lines} line${lines === 1 ? "" : "s"} changed.`,
+        notes ? `${notes} note${notes === 1 ? "" : "s"} or snapshot${notes === 1 ? "" : "s"} from then removed.` : "",
+        done.summary_removed
+          ? "The summary and action items were removed too, since they may repeat it."
+          : done.has_summary
+            ? "The summary was written before: regenerate it if it mentions this."
+            : "",
+      ];
+      const again = done.summary_removed || done.has_summary;
       toast.success(`Redacted ${clock(start)} to ${clock(end)}`, {
-        description: `${lines} line${lines === 1 ? "" : "s"} changed.${
-          done.has_summary ? " The summary was written before: regenerate it if it mentions this." : ""
-        }`,
+        description: changed.filter(Boolean).join(" "),
         duration: 12_000,
-        action: done.has_summary ? { label: "Regenerate summary", onClick: () => void summarize() } : undefined,
+        action: again
+          ? { label: done.summary_removed ? "Summarize again" : "Regenerate summary", onClick: () => void summarize() }
+          : undefined,
       });
-      refreshAll();
+      if (done.audio_error) {
+        toast.warning("The audio wasn't silenced", {
+          description: `The words were removed, but the audio couldn't be silenced: ${done.audio_error}. Try again.`,
+          duration: 20_000,
+        });
+      }
       return true;
     } catch (error) {
-      toast.error("Couldn't redact", { description: String(error) });
+      toast.error("Couldn't redact", { description: reason(error) });
       return false;
     } finally {
       setAudioVersion((version) => version + 1);
+    }
+  };
+
+  /** Focus after the redaction dialog: the line's button, or the line now at that moment
+   * when the redacted line was removed. */
+  const redactClosed = (event: Event) => {
+    const opener = redactOpener.current;
+    redactOpener.current = null;
+    if (!opener) return;
+    let target = opener.from?.isConnected ? opener.from : null;
+    if (!target) {
+      const rows = [...document.querySelectorAll<HTMLElement>("[data-segment][data-start]")];
+      const row = rows.find((r) => Number(r.dataset.start) >= opener.at - 0.01) ?? rows.at(-1);
+      target = row?.querySelector<HTMLElement>("button[aria-label='More for this line']") ?? null;
+    }
+    if (target) {
+      event.preventDefault();
+      target.focus({ preventScroll: true });
     }
   };
 
@@ -433,7 +495,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
         )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button size="icon" variant="outline" className="size-8" aria-label="More">
+            <Button ref={moreButton} size="icon" variant="outline" className="size-8" aria-label="More">
               <MoreHorizontal className="size-4" />
             </Button>
           </DropdownMenuTrigger>
@@ -572,7 +634,9 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
               />
             </TabsContent>
 
-            <TabsContent value="transcript">
+            {/* Kept mounted, like Ask: a cited line is scrolled to once (not on every return to
+                the tab), and a line being fixed survives a look at another tab. */}
+            <TabsContent value="transcript" forceMount className="data-[state=inactive]:hidden">
               {unnamed.length > 0 && !processing && (
                 <section className="mb-6">
                   <div className="mb-2 flex items-center gap-2 text-sm font-medium">
@@ -601,7 +665,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 solo={solo}
                 onSeek={seek}
                 onChanged={refreshAll}
-                onRedact={setRedacting}
+                onRedact={openRedact}
               />
             </TabsContent>
 
@@ -717,9 +781,19 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
         audioRemoved={!!meeting.audio_removed_at}
         onCancel={() => setRedacting(null)}
         onConfirm={redact}
+        onCloseAutoFocus={redactClosed}
       />
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent
+          className="sm:max-w-sm"
+          onCloseAutoFocus={(event) => {
+            // Opened from the More menu, not a trigger: focus goes back to that button.
+            if (moreButton.current?.isConnected) {
+              event.preventDefault();
+              moreButton.current.focus({ preventScroll: true });
+            }
+          }}
+        >
           <DialogHeader>
             <DialogTitle>Delete this meeting?</DialogTitle>
             <DialogDescription>

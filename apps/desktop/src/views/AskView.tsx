@@ -76,13 +76,14 @@ export function AskView({ library, onOpen }: { library: LibraryAsk; onOpen: (mee
             </div>
           )}
 
-          <div className="mt-6 space-y-5">
+          {/* A log: screen readers announce each question and answer as it arrives. */}
+          <div className="mt-6 space-y-5" role="log" aria-label="Questions and answers" aria-live="polite">
             {history.map((exchange) => (
               <div key={exchange.id} className="space-y-2">
-                <div className="ml-auto w-fit max-w-[80%] rounded-2xl rounded-br-sm bg-foreground px-3.5 py-2 text-sm text-background">
+                <div className="ml-auto w-fit max-w-[80%] rounded-2xl rounded-br-sm bg-foreground px-3.5 py-2 text-sm text-background [overflow-wrap:anywhere]">
                   {exchange.question}
                 </div>
-                <div className="max-w-[92%] rounded-2xl rounded-bl-sm border bg-card px-4 py-3">
+                <div className="max-w-[92%] rounded-2xl rounded-bl-sm border bg-card px-4 py-3 [overflow-wrap:anywhere]">
                   {exchange.answer ? (
                     <>
                       <Answer

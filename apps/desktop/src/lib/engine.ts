@@ -334,3 +334,16 @@ export type WorkLog = {
 
 export type SoundCheckSide = { device: string; peak_dbfs: number | null; heard: boolean };
 export type SoundCheckResult = { mic: SoundCheckSide; system: SoundCheckSide; played: boolean; errors: string[] };
+
+/** What a redaction did. Removing the summary, action items and the notes taken in the
+ * stretch, and reporting an audio failure, came with the engine's privacy fix. */
+export type RedactResult = {
+  lines_removed: number;
+  lines_redacted: number;
+  has_summary: boolean;
+  summary_removed?: boolean;
+  items_removed?: number;
+  notes_removed?: number;
+  audio_error?: string | null;
+  scrubbed?: boolean;
+};

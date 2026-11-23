@@ -10,9 +10,23 @@ export function getTheme(): Theme {
   return saved === "light" || saved === "dark" ? saved : "system";
 }
 
-export function applyTheme() {
+const listeners = new Set<() => void>();
+
+/** What the window actually shows now: the chosen theme, or Windows' while that's "system". */
+export function resolvedTheme(): "light" | "dark" {
   const theme = getTheme();
-  document.documentElement.classList.toggle("dark", theme === "dark" || (theme === "system" && windowsDark.matches));
+  return theme === "dark" || (theme === "system" && windowsDark.matches) ? "dark" : "light";
+}
+
+/** Calls back whenever the window's theme changes (a new choice, or Windows switching). */
+export function subscribeTheme(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+export function applyTheme() {
+  document.documentElement.classList.toggle("dark", resolvedTheme() === "dark");
+  listeners.forEach((listener) => listener());
 }
 
 export function setTheme(theme: Theme) {

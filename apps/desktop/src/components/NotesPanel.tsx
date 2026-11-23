@@ -12,16 +12,21 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useReturnFocus } from "@/hooks/useReturnFocus";
 import { api, mediaUrl, type Note } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
 import { clock } from "@/lib/format";
 
 /** A snapshot of the call: its picture, and the text Windows read in it. */
-function SnapshotNote({ note, onOpen }: { note: Note; onOpen: () => void }) {
+function SnapshotNote({ note, onOpen }: { note: Note; onOpen: (from: HTMLElement) => void }) {
   const lines = note.text.split("\n").filter((line) => line.trim());
   return (
     <div className="flex min-w-0 flex-1 gap-3">
-      <button onClick={onOpen} className="shrink-0 overflow-hidden rounded-md border" title="Show the snapshot">
+      <button
+        onClick={(event) => onOpen(event.currentTarget)}
+        className="shrink-0 overflow-hidden rounded-md border"
+        title="Show the snapshot"
+      >
         <img src={mediaUrl(`/api/notes/${note.id}/image`)} alt="Snapshot of the call" className="h-16 w-28 object-cover object-top" />
       </button>
       <div className="min-w-0 flex-1 text-sm">
@@ -31,7 +36,10 @@ function SnapshotNote({ note, onOpen }: { note: Note; onOpen: () => void }) {
           <p className="text-muted-foreground">No text in this snapshot.</p>
         )}
         {lines.length > 3 && (
-          <button onClick={onOpen} className="mt-0.5 text-xs text-muted-foreground hover:text-foreground hover:underline">
+          <button
+            onClick={(event) => onOpen(event.currentTarget)}
+            className="mt-0.5 text-xs text-muted-foreground hover:text-foreground hover:underline"
+          >
             {lines.length - 3} more line{lines.length === 4 ? "" : "s"}
           </button>
         )}
@@ -59,6 +67,7 @@ export function NotesPanel({
   const [text, setText] = useState("");
   const saving = useRef(false);
   const [shown, setShown] = useState<Note | null>(null);
+  const returnFocus = useReturnFocus();
 
   const add = async () => {
     const value = text.trim();
@@ -130,7 +139,13 @@ export function NotesPanel({
                 <NotebookPen className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
               )}
               {note.kind === "snapshot" ? (
-                <SnapshotNote note={note} onOpen={() => setShown(note)} />
+                <SnapshotNote
+                  note={note}
+                  onOpen={(from) => {
+                    returnFocus.remember(from);
+                    setShown(note);
+                  }}
+                />
               ) : (
                 <p className="min-w-0 flex-1 text-sm">
                   {note.text || <span className="text-muted-foreground">Bookmarked moment</span>}
@@ -151,7 +166,7 @@ export function NotesPanel({
       )}
 
       <Dialog open={shown !== null} onOpenChange={(open) => !open && setShown(null)}>
-        <DialogContent className="sm:max-w-4xl">
+        <DialogContent className="sm:max-w-4xl" onCloseAutoFocus={returnFocus.onCloseAutoFocus}>
           <DialogHeader>
             <DialogTitle>Snapshot at {shown ? clock(shown.at) : ""}</DialogTitle>
             <DialogDescription>

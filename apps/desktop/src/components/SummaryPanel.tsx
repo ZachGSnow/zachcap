@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
+import { useReturnFocus } from "@/hooks/useReturnFocus";
 import { api, type ActionItem, type RecipeResult, type Summary } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
 import { clock, toSeconds, type SpeakerColor } from "@/lib/format";
@@ -152,16 +153,18 @@ function RecipeDialog({
   run,
   onClose,
   onRewrite,
+  onCloseAutoFocus,
 }: {
   open: boolean;
   run: RecipeRun | null;
   onClose: () => void;
   onRewrite: (recipe: Choice) => void;
+  onCloseAutoFocus: (event: Event) => void;
 }) {
   const writing = run !== null && !run.result && !run.error;
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="sm:max-w-2xl" onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>{run?.recipe.label}</DialogTitle>
           <DialogDescription>Written by Claude from this meeting. Read it over before you send it.</DialogDescription>
@@ -261,6 +264,8 @@ export function SummaryPanel({
     }
   };
 
+  const returnFocus = useReturnFocus();
+
   const openRecipe = (recipe: Choice) => {
     const run = runs[recipe.id];
     if (run && !run.error) {
@@ -326,7 +331,16 @@ export function SummaryPanel({
             // Your own documents get a plain document icon.
             const Icon = RECIPE_ICON[recipe.id] ?? FileText;
             return (
-              <Button key={recipe.id} size="sm" variant="ghost" className="h-7 border" onClick={() => openRecipe(recipe)}>
+              <Button
+                key={recipe.id}
+                size="sm"
+                variant="ghost"
+                className="h-7 border"
+                onClick={(event) => {
+                  returnFocus.remember(event.currentTarget);
+                  openRecipe(recipe);
+                }}
+              >
                 <Icon className="size-3.5" />
                 {recipe.label}
               </Button>
@@ -339,6 +353,7 @@ export function SummaryPanel({
         run={shown ? (runs[shown] ?? null) : null}
         onClose={() => setDialogOpen(false)}
         onRewrite={(recipe) => void write(recipe)}
+        onCloseAutoFocus={returnFocus.onCloseAutoFocus}
       />
 
       <p className="mt-5 text-[15px] leading-relaxed">{c.overview}</p>

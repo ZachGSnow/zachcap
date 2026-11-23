@@ -42,13 +42,19 @@ export async function announce(
   }
 }
 
+/** What went wrong, as the engine said it ("This meeting is busy (redacting)..."), without
+ * the "Error:" that String() puts in front. */
+export function reason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /** Runs an action and says why when it fails, instead of failing silently. */
 export async function attempt(failure: string, action: () => Promise<unknown>): Promise<boolean> {
   try {
     await action();
     return true;
   } catch (error) {
-    toast.error(failure, { description: error instanceof Error ? error.message : String(error) });
+    toast.error(failure, { description: reason(error) });
     return false;
   }
 }

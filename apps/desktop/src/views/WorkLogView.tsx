@@ -109,12 +109,26 @@ export function WorkLogView({ onOpen }: { onOpen: (meetingId: number) => void })
         </p>
 
         <div className="mt-6 flex flex-wrap items-center gap-2">
-          <div className="flex rounded-lg border p-0.5" role="radiogroup" aria-label="Period">
+          <div
+            className="flex rounded-lg border p-0.5"
+            role="radiogroup"
+            aria-label="Period"
+            onKeyDown={(event) => {
+              // Arrow keys move the choice, as in any radio group (one tab stop for the group).
+              if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+              event.preventDefault();
+              const next = period === "day" ? "week" : "day";
+              setPeriod(next);
+              event.currentTarget.querySelector<HTMLButtonElement>(`[data-period="${next}"]`)?.focus();
+            }}
+          >
             {(["day", "week"] as const).map((choice) => (
               <button
                 key={choice}
                 role="radio"
+                data-period={choice}
                 aria-checked={period === choice}
+                tabIndex={period === choice ? 0 : -1}
                 onClick={() => setPeriod(choice)}
                 className={cn(
                   "rounded-md px-3 py-1 text-sm capitalize transition-colors",
@@ -185,7 +199,7 @@ export function WorkLogView({ onOpen }: { onOpen: (meetingId: number) => void })
                   Copy
                 </Button>
               </div>
-              <table className="w-full text-sm">
+              <table className="w-full table-fixed text-sm">
                 <tbody className="divide-y">
                   {log.days.flatMap((day) =>
                     day.meetings.map((m) => (
@@ -193,8 +207,8 @@ export function WorkLogView({ onOpen }: { onOpen: (meetingId: number) => void })
                         {period === "week" && <td className="w-24 py-2 pl-4 text-muted-foreground">{day.label.split(",")[0]}</td>}
                         <td className="w-28 py-2 pl-4 font-mono text-xs tabular-nums text-muted-foreground">{m.time}</td>
                         <td className="w-14 py-2 font-mono text-xs tabular-nums">{m.hours} h</td>
-                        <td className="py-2 pr-4">
-                          <button onClick={() => onOpen(m.id)} className="font-medium hover:underline">
+                        <td className="py-2 pr-4 [overflow-wrap:anywhere]">
+                          <button onClick={() => onOpen(m.id)} className="text-left font-medium hover:underline">
                             {m.title}
                           </button>
                           {m.note && <span className="text-muted-foreground"> {"\u00b7"} {m.note}</span>}
@@ -212,14 +226,14 @@ export function WorkLogView({ onOpen }: { onOpen: (meetingId: number) => void })
                 <div className="space-y-3">
                   {day.meetings.map((m) => (
                     <article key={m.id} className="rounded-xl border bg-card p-4">
-                      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                      <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
                         <span className="font-mono text-xs tabular-nums text-muted-foreground">{m.time}</span>
-                        <button onClick={() => onOpen(m.id)} className="font-medium hover:underline">
+                        <button onClick={() => onOpen(m.id)} className="min-w-0 text-left font-medium [overflow-wrap:anywhere] hover:underline">
                           {m.title}
                         </button>
                         {m.people.length > 0 && <span className="text-xs text-muted-foreground">with {m.people.join(", ")}</span>}
                       </div>
-                      <p className={cn("mt-2 text-sm leading-relaxed", !m.overview && "text-muted-foreground")}>
+                      <p className={cn("mt-2 text-sm leading-relaxed [overflow-wrap:anywhere]", !m.overview && "text-muted-foreground")}>
                         {m.overview || "Not summarized yet: summarize it for an overview, decisions and action items."}
                       </p>
                       {m.decisions.length > 0 && (
