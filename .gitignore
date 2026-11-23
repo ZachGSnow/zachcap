@@ -6,6 +6,11 @@
 *.mp3
 *.m4a
 *.mp4
+*.webm
+*.mkv
+*.mov
+*.aac
+*.wma
 *.db
 *.db-shm
 *.db-wal

@@ -53,6 +53,15 @@ Then open **Settings** and add:
 
 Keys are stored in Windows Credential Manager. The engine also has a command line (`uv run zachcap --help`): `record`, `import`, `show`, `name`, `confirm`, `search`, `keys`.
 
+For everyday use, build the app once and start it from a shortcut:
+
+```powershell
+cd apps\desktop
+npm run tauri build          # creates src-tauri\target\release\zachcap.exe
+```
+
+The exe runs the engine from this clone, so keep the folder where it is (there is no installer yet). Turn on **Start with Windows** in Settings to have ZachCap waiting in the tray, and its log is `engine.log` in the data folder.
+
 ## Configuration
 
 Everything is set in the app under **Settings**:

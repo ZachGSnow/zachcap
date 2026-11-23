@@ -7,6 +7,11 @@ updates:
     groups:
       python-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # torch comes from the CUDA 12.8 index, which trails PyPI, so Dependabot can't
+      # resolve PyPI's newest version there. Bump both by hand together with that index.
+      - dependency-name: torch
+      - dependency-name: torchaudio
     commit-message:
       prefix: build
   - package-ecosystem: npm
