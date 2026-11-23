@@ -34,6 +34,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { SoundCheck } from "@/components/SoundCheck";
 import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type Devices, type KeyStatus, type PromptLibrary, type Settings } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
@@ -462,6 +463,12 @@ export function SettingsView() {
               onChange={(value) => void save({ output_device: value })}
               options={outputOptions(devices?.outputs)}
             />
+          </Row>
+          <Row
+            label="Sound check"
+            help="Records four seconds as a meeting would, with a short sound halfway; say a few words while it listens. Shows both sides are heard. Nothing is kept."
+          >
+            <SoundCheck onDone={() => void refresh()} />
           </Row>
           <Row label="Devices" help="Plugged in a headset? Refresh the lists.">
             <Button size="sm" variant="outline" onClick={() => void refreshDevices()}>

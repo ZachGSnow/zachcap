@@ -85,6 +85,7 @@ Everything is set in the app under **Settings**:
 | Kinds of meeting, one-click documents | Edit the built-in ones (and reset them), or add your own with your own instructions | As shipped |
 | API keys | Hugging Face token and Anthropic key | not set |
 | Start with Windows | Opens ZachCap in the tray when you sign in (release builds) | off |
+| Sound check | Four seconds recorded as a meeting would be, with a short sound halfway: shows your mic and the computer's audio are both heard (nothing is kept) | - |
 | Stop when the call ends | Count down and stop when the call app lets go of the mic and it goes quiet, or after ten quiet minutes | on |
 | Theme | Light, dark, or the same as Windows | Same as Windows |
 | Export folder | Keeps a Markdown copy of every meeting in a folder you choose, one file per meeting, named with its id (M12) | off |
@@ -120,7 +121,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 169 tests: storage, matching, audio, capture and mixing, the recording watch, crash recovery, API, summaries and templates, Ask, redaction, work logs, snapshots, mentions, the watch folder
+uv run pytest -q             # 172 tests: storage, matching, audio, capture and mixing, the recording watch, crash recovery, API, summaries and templates, Ask, redaction, work logs, snapshots, mentions, the watch folder
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```
