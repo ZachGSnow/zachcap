@@ -425,3 +425,163 @@ def test_stopping_when_the_call_ends_is_on_unless_turned_off(client: TestClient)
     assert client.get("/api/settings", headers=AUTH).json()["stop_when_call_ends"] is True
     off = client.put("/api/settings", headers=AUTH, json={"stop_when_call_ends": False}).json()
     assert off["stop_when_call_ends"] is False
+
+
+def a_support_call(folder: Path, status: str = "ready") -> tuple[int, list[int]]:
+    """A meeting with recorded audio (6 s, both tracks) and three lines, the middle one a
+    password read aloud."""
+    import json
+
+    import numpy as np
+    import soundfile as sf
+
+    folder.mkdir(parents=True, exist_ok=True)
+    tone = (0.3 * np.sin(2 * np.pi * 220 * np.arange(6 * 16000) / 16000)).astype(np.float32)
+    for name in ("mic", "system"):
+        sf.write(folder / f"{name}-000.flac", tone, 16000, subtype="PCM_16")
+    info = {"tracks": {"mic": {"offset": 0.0}, "system": {"offset": 0.0}}, "complete": True}
+    (folder / "recording.json").write_text(json.dumps(info), encoding="utf-8")
+    sf.write(folder / "playback.flac", tone, 16000)  # the player's cached mix
+    store = Store()
+    meeting_id = store.create_meeting(
+        "Support call", "2026-11-22T09:00:00", folder, duration=6.0, status=status
+    )
+    dana = store.add_speaker(
+        meeting_id,
+        "system",
+        "Dana",
+        None,
+        6.0,
+        (2.0, 4.0),
+        Match(store.person_id("Dana"), 1.0, "confirmed"),
+    )
+    store.add_segments(
+        meeting_id,
+        [
+            (dana, "system", 0.0, 2.0, "We moved to cooper netties last week", 0.9),
+            (dana, "system", 2.0, 4.0, "The admin password is zebra99", 0.9),
+            (dana, "system", 4.0, 6.0, "Thanks for the help", 0.9),
+        ],
+    )
+    lines = [row["id"] for row in store.transcript(meeting_id)]
+    store.close()
+    return meeting_id, lines
+
+
+def test_fixing_a_line_offers_words_to_know_and_reaches_the_export(client: TestClient, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    client.put("/api/settings", headers=AUTH, json={"export_folder": str(vault)})
+    meeting_id, lines = a_support_call(tmp_path / "call")
+
+    fixed = client.patch(
+        f"/api/segments/{lines[0]}",
+        headers=AUTH,
+        json={"text": "We moved to  Kubernetes\nlast week"},
+    ).json()
+
+    assert fixed["text"] == "We moved to Kubernetes last week"
+    assert fixed["suggestion"] == {"term": "Kubernetes", "misheard": "cooper netties"}
+    first = client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()["segments"][0]
+    assert (first["text"], first["edited"]) == ("We moved to Kubernetes last week", 1)
+    assert "Kubernetes" in next(vault.glob("*.md")).read_text(encoding="utf-8")
+    empty = client.patch(f"/api/segments/{lines[0]}", headers=AUTH, json={"text": " \n "})
+    assert empty.status_code == 400
+    assert client.patch("/api/segments/999", headers=AUTH, json={"text": "x"}).status_code == 404
+
+    added = client.post("/api/vocabulary/correction", headers=AUTH, json=fixed["suggestion"])
+    assert added.json()["vocabulary"] == "Kubernetes: cooper netties"
+    assert (
+        client.get("/api/settings", headers=AUTH).json()["vocabulary"]
+        == "Kubernetes: cooper netties"
+    )
+    bad = client.post("/api/vocabulary/correction", headers=AUTH, json={"term": "C:Drive"})
+    assert bad.status_code == 400
+
+
+def test_redacting_silences_the_recording_and_removes_the_words(client: TestClient, tmp_path):
+    import numpy as np
+
+    from zachcap import audio
+
+    folder = tmp_path / "call"
+    meeting_id, _ = a_support_call(folder)
+    assert client.get("/api/search?q=zebra99", headers=AUTH).json()
+
+    redacted = client.post(
+        f"/api/meetings/{meeting_id}/redact", headers=AUTH, json={"start": 1.9, "end": 4.1}
+    ).json()
+
+    assert (redacted["audio_files"], redacted["lines_removed"], redacted["lines_redacted"]) == (
+        2,
+        1,
+        2,  # the lines on each side reach 0.1 s into it
+    )
+    assert redacted["has_summary"] is False and "zebra99" not in str(redacted)
+    assert not (folder / "playback.flac").exists()  # rebuilt from the silenced tracks
+    meeting = client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()
+    assert [s["text"] for s in meeting["segments"]] == ["[redacted]", "[redacted]"]
+    assert meeting["speakers"][0]["sample_start"] is None  # its sample was the password
+    assert client.get("/api/search?q=zebra99", headers=AUTH).json() == []
+    for name in ("mic", "system"):
+        track = audio.load_track(folder, name)
+        assert not np.any(track[int(1.91 * 16000) : int(4.09 * 16000)])
+        assert np.any(track[: int(1.8 * 16000)]) and np.any(track[int(4.2 * 16000) :])
+    mix = client.get(f"/api/meetings/{meeting_id}/audio?token=test-token")
+    assert mix.status_code == 200
+
+    for bad in ({"start": 3, "end": 3}, {"start": 0, "end": 1000}, {"start": 7, "end": 8}):
+        refused = client.post(f"/api/meetings/{meeting_id}/redact", headers=AUTH, json=bad)
+        assert refused.status_code == 400, bad
+
+
+def test_without_its_recording_a_meeting_is_redacted_in_text_only(client: TestClient, tmp_path):
+    folder = tmp_path / "old"
+    meeting_id, _ = a_support_call(folder)
+    store = Store()
+    store.update_meeting(meeting_id, audio_removed_at="2026-11-01T00:00:00")
+    store.close()
+
+    redacted = client.post(
+        f"/api/meetings/{meeting_id}/redact", headers=AUTH, json={"start": 2.0, "end": 4.0}
+    ).json()
+
+    assert redacted["audio_removed"] is True and redacted["audio_files"] == 0
+    assert redacted["lines_removed"] == 1
+    assert (folder / "playback.flac").exists()  # retention's business, not touched here
+
+
+def test_a_meeting_being_recorded_or_processed_cant_be_changed(
+    client: TestClient, tmp_path, monkeypatch
+):
+    import threading
+
+    gate = threading.Event()
+    monkeypatch.setattr(pipeline, "process", lambda *args, **kwargs: gate.wait(10))
+    meeting_id, lines = a_support_call(tmp_path / "call", status="recording")
+    edit = {"text": "changed words"}
+    moment = {"start": 2.0, "end": 4.0}
+
+    assert client.patch(f"/api/segments/{lines[0]}", headers=AUTH, json=edit).status_code == 409
+    recording = client.post(f"/api/meetings/{meeting_id}/redact", headers=AUTH, json=moment)
+    assert recording.status_code == 409 and "recorded" in recording.json()["detail"]
+
+    store = Store()
+    store.update_meeting(meeting_id, status="recorded")
+    store.close()
+    client.post(f"/api/meetings/{meeting_id}/process", headers=AUTH)
+    try:
+        busy = client.patch(f"/api/segments/{lines[0]}", headers=AUTH, json=edit)
+        assert busy.status_code == 409 and "being processed" in busy.json()["detail"]
+        busy = client.post(f"/api/meetings/{meeting_id}/redact", headers=AUTH, json=moment)
+        assert busy.status_code == 409
+    finally:
+        gate.set()
+    for _ in range(50):  # the worker lets go of the meeting
+        if (
+            client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()["meeting"]["progress"]
+            is None
+        ):
+            break
+        time.sleep(0.1)
+    assert client.patch(f"/api/segments/{lines[0]}", headers=AUTH, json=edit).status_code == 200

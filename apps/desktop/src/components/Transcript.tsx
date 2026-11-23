@@ -1,4 +1,4 @@
-import { Check, Play, Search, UserRoundSearch } from "lucide-react";
+import { Check, EyeOff, MoreHorizontal, Pencil, Play, Search, UserRoundSearch } from "lucide-react";
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -20,7 +20,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { api, mediaUrl, type Person, type Segment, type Speaker } from "@/lib/engine";
+import { attempt } from "@/lib/feedback";
 import { clock, minutes, type SpeakerColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -62,6 +64,8 @@ export function WhoIsThis({
         size="icon"
         variant="outline"
         className="size-8 shrink-0 rounded-full"
+        disabled={speaker.sample_start == null}
+        title={speaker.sample_start == null ? "No sample left to play (it was redacted)" : undefined}
         onClick={() => {
           if (!sample.current) return;
           sample.current.currentTime = 0;
@@ -71,7 +75,15 @@ export function WhoIsThis({
       >
         <Play className="size-3.5" />
       </Button>
-      <audio ref={sample} src={mediaUrl(`/api/meetings/${meetingId}/speakers/${speaker.id}/sample`)} preload="none" />
+      {speaker.sample_start != null && (
+        // The sample's time is part of the address, so a sample moved by a redaction is
+        // never played from the browser's cache.
+        <audio
+          ref={sample}
+          src={mediaUrl(`/api/meetings/${meetingId}/speakers/${speaker.id}/sample?at=${speaker.sample_start}`)}
+          preload="none"
+        />
+      )}
       <div className="w-32 shrink-0">
         <div className="text-sm font-medium">{speaker.label}</div>
         <div className="text-xs text-muted-foreground">
@@ -167,28 +179,111 @@ export function NamePrompt({
 /** Where a line can move: a voice of this meeting (named or not), or a known person. */
 type LineTarget = { label: string; speakerId?: number; name?: string };
 
+/** What a redacted line says instead (as the engine writes it). */
+export const REDACTED = "[redacted]";
+
+type Suggestion = { term: string; misheard: string | null };
+
+/** Offers, once, to add what a fixed line taught to Words to know. */
+function offerWord({ term, misheard }: Suggestion) {
+  const add = async () => {
+    const added = await attempt("Couldn't add it to Words to know", () =>
+      api("/api/vocabulary/correction", { method: "POST", json: { term, misheard } }),
+    );
+    if (added) toast.success(`"${term}" is in Words to know`, { description: "Used from the next meeting processed." });
+  };
+  toast("Line fixed", {
+    description: misheard
+      ? `Write "${term}" whenever it sounds like "${misheard}", in later meetings too?`
+      : `Teach ZachCap to spell "${term}" like that in later meetings?`,
+    duration: 15_000,
+    action: { label: "Add to Words to know", onClick: () => void add() },
+  });
+}
+
+/** A line's words, being fixed in place. */
+function LineEditor({
+  segment,
+  onSave,
+  onCancel,
+}: {
+  segment: Segment;
+  onSave: (segment: Segment, text: string) => Promise<boolean>;
+  onCancel: () => void;
+}) {
+  const [text, setText] = useState(segment.text === REDACTED ? "" : segment.text);
+  const [saving, setSaving] = useState(false);
+  const save = async () => {
+    if (saving || !text.trim()) return;
+    setSaving(true);
+    if (!(await onSave(segment, text))) setSaving(false);
+  };
+  return (
+    <div className="min-w-0">
+      <Textarea
+        autoFocus
+        aria-label="The line's words"
+        value={text}
+        rows={Math.min(6, Math.max(2, Math.ceil(text.length / 70)))}
+        onChange={(event) => setText(event.target.value)}
+        onFocus={(event) => event.currentTarget.setSelectionRange(text.length, text.length)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            void save();
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+        }}
+        className="min-h-0 text-sm leading-relaxed"
+      />
+      <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+        <span className="min-w-0 flex-1">Enter saves, Esc cancels. Reprocessing the audio replaces fixed lines.</span>
+        <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button size="sm" className="h-6 px-2 text-xs" disabled={saving || !text.trim()} onClick={() => void save()}>
+          Save
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /** One transcript line. Memoized: during playback only the line that becomes current
  * re-renders, which keeps two-hour meetings (thousands of lines) smooth. */
 const TranscriptRow = memo(function TranscriptRow({
   segment,
   color,
   current,
+  editing,
   onSeek,
   onPickSpeaker,
+  onLineMenu,
+  onEdit,
+  onSaveText,
+  onCancelEdit,
 }: {
   segment: Segment;
   color: SpeakerColor;
   current: boolean;
+  editing: boolean;
   onSeek: (seconds: number) => void;
   onPickSpeaker: (segment: Segment, anchor: HTMLElement) => void;
+  onLineMenu: (segment: Segment, anchor: HTMLElement) => void;
+  onEdit: (segment: Segment) => void;
+  onSaveText: (segment: Segment, text: string) => Promise<boolean>;
+  onCancelEdit: () => void;
 }) {
   const unsure = segment.speaker_status === "suggested" || segment.speaker_status === "unknown";
+  const redacted = segment.text === REDACTED;
   return (
     <div
       data-current={current || undefined}
       data-segment={segment.id}
       className={cn(
-        "group grid grid-cols-[3.5rem_10rem_1fr] items-start gap-3 rounded-lg px-2 py-1.5 transition-colors",
+        "group grid grid-cols-[3.5rem_10rem_1fr_1.5rem] items-start gap-3 rounded-lg px-2 py-1.5 transition-colors",
         current ? "bg-muted" : "hover:bg-muted/40",
       )}
     >
@@ -208,10 +303,37 @@ const TranscriptRow = memo(function TranscriptRow({
         <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", color.dot)} />
         <span className={cn("truncate text-sm font-medium", unsure && "text-muted-foreground")}>{segment.speaker}</span>
       </button>
-      <p className="text-sm leading-relaxed">{segment.text}</p>
+      {editing ? (
+        <LineEditor segment={segment} onSave={onSaveText} onCancel={onCancelEdit} />
+      ) : (
+        <p
+          className={cn("text-sm leading-relaxed", redacted && "italic text-muted-foreground")}
+          onDoubleClick={() => onEdit(segment)}
+        >
+          {redacted ? "Redacted" : segment.text}
+          {segment.edited ? (
+            <span className="ml-1.5 align-baseline text-[10px] text-muted-foreground" title="You fixed these words">
+              edited
+            </span>
+          ) : null}
+        </p>
+      )}
+      <button
+        onClick={(event) => onLineMenu(segment, event.currentTarget)}
+        className="mt-0.5 flex size-6 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted hover:text-foreground focus-visible:opacity-100"
+        title="Fix the words or redact this moment"
+        aria-label="More for this line"
+        aria-haspopup="menu"
+      >
+        <MoreHorizontal className="size-3.5" />
+      </button>
     </div>
   );
 });
+
+/** Where the shared menu is open: for a line's speaker, or for the line itself. */
+type MenuAt = { segment: Segment; x: number; y: number; kind: "speaker" | "line" };
+const LINE_MENU_WIDTH = 224; // w-56
 
 export const Transcript = memo(function Transcript({
   segments,
@@ -224,6 +346,7 @@ export const Transcript = memo(function Transcript({
   solo,
   onSeek,
   onChanged,
+  onRedact,
 }: {
   segments: Segment[];
   speakers: Speaker[];
@@ -236,13 +359,19 @@ export const Transcript = memo(function Transcript({
   solo: string | null;
   onSeek: (seconds: number) => void;
   onChanged: () => void;
+  /** Opens the redaction dialog for the moment this line was said. */
+  onRedact: (segment: Segment) => void;
 }) {
   const [filter, setFilter] = useState("");
   const [moving, setMoving] = useState<Segment | null>(null);
-  // One menu for every line, opened next to the name that was clicked.
-  const [menu, setMenu] = useState<{ segment: Segment; x: number; y: number } | null>(null);
-  // The name that opened the menu gets focus back when it closes (keyboard users).
+  const [editingId, setEditingId] = useState<number | null>(null);
+  // One menu for every line, opened next to what was clicked: the name (who said it) or
+  // the line's own button (fix the words, redact).
+  const [menu, setMenu] = useState<MenuAt | null>(null);
+  // What opened the menu gets focus back when it closes (keyboard users), unless the
+  // choice opened something that takes focus itself.
   const anchor = useRef<HTMLElement | null>(null);
+  const refocus = useRef(true);
   const menuLabel = useId();
   const list = useRef<HTMLDivElement>(null);
 
@@ -276,12 +405,45 @@ export const Transcript = memo(function Transcript({
     if (playing) setFocusId(null);
   }, [playing]);
 
-  const pickSpeaker = useCallback((segment: Segment, from: HTMLElement) => {
+  const openMenu = useCallback((segment: Segment, from: HTMLElement, kind: MenuAt["kind"]) => {
     anchor.current = from;
+    refocus.current = true;
     const box = from.getBoundingClientRect();
     const parent = list.current?.getBoundingClientRect();
-    setMenu({ segment, x: box.left - (parent?.left ?? 0), y: box.bottom - (parent?.top ?? 0) });
+    // The line menu opens leftward from its button at the row's end.
+    const x = (kind === "line" ? box.right - LINE_MENU_WIDTH : box.left) - (parent?.left ?? 0);
+    setMenu({ segment, x, y: box.bottom - (parent?.top ?? 0), kind });
   }, []);
+  const pickSpeaker = useCallback((segment: Segment, from: HTMLElement) => openMenu(segment, from, "speaker"), [openMenu]);
+  const lineMenu = useCallback((segment: Segment, from: HTMLElement) => openMenu(segment, from, "line"), [openMenu]);
+
+  const editLine = useCallback((segment: Segment) => setEditingId(segment.id), []);
+  const cancelEdit = useCallback(() => setEditingId(null), []);
+  const saveText = useCallback(
+    async (segment: Segment, text: string) => {
+      const value = text.split(/\s+/).join(" ").trim();
+      if (!value) return false;
+      if (value === segment.text) {
+        setEditingId(null);
+        return true;
+      }
+      try {
+        const { suggestion } = await api<{ text: string; suggestion: Suggestion | null }>(`/api/segments/${segment.id}`, {
+          method: "PATCH",
+          json: { text: value },
+        });
+        setEditingId(null);
+        onChanged();
+        if (suggestion) offerWord(suggestion);
+        else toast.success("Line fixed");
+        return true;
+      } catch (error) {
+        toast.error("Couldn't save the line", { description: String(error) });
+        return false;
+      }
+    },
+    [onChanged],
+  );
 
   const reassign = async (segment: Segment, target: LineTarget) => {
     try {
@@ -334,8 +496,13 @@ export const Transcript = memo(function Transcript({
             segment={segment}
             color={colorOf(segment.speaker)}
             current={(currentId === segment.id && playing) || segment.id === focusId}
+            editing={segment.id === editingId}
             onSeek={onSeek}
             onPickSpeaker={pickSpeaker}
+            onLineMenu={lineMenu}
+            onEdit={editLine}
+            onSaveText={saveText}
+            onCancelEdit={cancelEdit}
           />
         ))}
         <DropdownMenu open={menu !== null} onOpenChange={(open) => !open && setMenu(null)}>
@@ -346,7 +513,42 @@ export const Transcript = memo(function Transcript({
               style={{ left: menu?.x ?? 0, top: menu?.y ?? 0 }}
             />
           </DropdownMenuTrigger>
-          {menu && (
+          {menu?.kind === "line" && (
+            <DropdownMenuContent
+              align="start"
+              className="w-56"
+              aria-labelledby={menuLabel}
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                if (refocus.current) anchor.current?.focus({ preventScroll: true });
+              }}
+            >
+              <DropdownMenuLabel id={menuLabel} className="text-xs text-muted-foreground">
+                This line
+              </DropdownMenuLabel>
+              <DropdownMenuItem
+                onSelect={() => {
+                  refocus.current = false; // the editor takes focus
+                  setEditingId(menu.segment.id);
+                }}
+              >
+                <Pencil className="size-4" />
+                Fix the words
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant="destructive"
+                onSelect={() => {
+                  refocus.current = false; // the dialog takes focus
+                  onRedact(menu.segment);
+                }}
+              >
+                <EyeOff className="size-4" />
+                Redact this moment...
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          )}
+          {menu?.kind === "speaker" && (
             <DropdownMenuContent
               align="start"
               className="w-56"
@@ -354,7 +556,7 @@ export const Transcript = memo(function Transcript({
               onCloseAutoFocus={(event) => {
                 // Radix would focus the hidden anchor, which can't take focus.
                 event.preventDefault();
-                anchor.current?.focus({ preventScroll: true });
+                if (refocus.current) anchor.current?.focus({ preventScroll: true });
               }}
             >
               <DropdownMenuLabel id={menuLabel} className="text-xs text-muted-foreground">

@@ -28,7 +28,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from . import __version__, apikeys, audio, export, insights, paths, pipeline, privacy, prompts
+from . import (
+    __version__,
+    apikeys,
+    audio,
+    export,
+    insights,
+    paths,
+    pipeline,
+    privacy,
+    prompts,
+    redact,
+)
+from . import vocabulary as words
 from .store import Store
 from .watchdog import Watch
 
@@ -40,6 +52,20 @@ LANGUAGES = {"auto": "Detect automatically", "en": "English", "es": "Spanish", "
 
 class NameBody(BaseModel):
     name: str
+
+
+class LineTextBody(BaseModel):
+    text: str
+
+
+class CorrectionBody(BaseModel):
+    term: str
+    misheard: str | None = None
+
+
+class RedactBody(BaseModel):
+    start: float  # seconds into the meeting
+    end: float
 
 
 class LineSpeakerBody(BaseModel):
@@ -302,6 +328,17 @@ def create_app(token: str) -> FastAPI:
         if meeting is None:
             raise HTTPException(status_code=404, detail="No such meeting")
         return meeting
+
+    def refuse_if_busy(meeting) -> None:
+        """Changing a transcript while it is being recorded or (re)processed would be lost
+        or would mix with the new results."""
+        progress = worker.progress.get(meeting["id"])
+        if meeting["status"] == "recording":
+            raise HTTPException(status_code=409, detail="This meeting is still being recorded.")
+        if progress is not None and not progress.startswith("failed"):
+            raise HTTPException(
+                status_code=409, detail="This meeting is being processed. Try again when it's done."
+            )
 
     auth = [Depends(authorized)]
 
@@ -569,6 +606,80 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         export.auto_export(store, meeting_id)
         return {"ok": True}
+
+    @app.patch("/api/segments/{segment_id}", dependencies=auth)
+    def edit_line(segment_id: int, body: LineTextBody, store: Store = Depends(db)):
+        """Fix a line's words. Offers the Words to know entry that would fix the same
+        mishearing in future meetings, when the edit looks like one."""
+        segment = store.segment(segment_id)
+        if segment is None:
+            raise HTTPException(status_code=404, detail="No such line")
+        refuse_if_busy(store.meeting(segment["meeting_id"]))
+        text = " ".join(body.text.split())
+        if not text:
+            raise HTTPException(status_code=400, detail="A line can't be empty")
+        if len(text) > 4000:
+            raise HTTPException(status_code=400, detail="Keep a line under 4,000 characters")
+        suggestion = words.suggest(segment["text"], text, store.setting("vocabulary"))
+        store.edit_segment(segment_id, text)
+        export.auto_export(store, segment["meeting_id"])
+        return {"text": text, "suggestion": suggestion}
+
+    @app.post("/api/vocabulary/correction", dependencies=auth)
+    def add_to_words_to_know(body: CorrectionBody, store: Store = Depends(db)):
+        try:
+            merged = words.add_correction(store.setting("vocabulary"), body.term, body.misheard)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        store.set_setting("vocabulary", merged)
+        return {"vocabulary": merged}
+
+    @app.post("/api/meetings/{meeting_id}/redact", dependencies=auth)
+    def redact_moment(meeting_id: int, body: RedactBody, store: Store = Depends(db)):
+        """Silence start..end in the recording and remove what was said from the transcript
+        and search (a password or code read aloud). Can't be undone."""
+        meeting = meeting_or_404(store, meeting_id)
+        refuse_if_busy(meeting)
+        start, end = round(max(0.0, body.start), 2), round(body.end, 2)
+        if end <= start:
+            raise HTTPException(status_code=400, detail="The end must come after the start")
+        if end - start > 15 * 60:
+            raise HTTPException(status_code=400, detail="Redact at most 15 minutes at a time")
+        if meeting["duration"] and start >= meeting["duration"]:
+            raise HTTPException(status_code=400, detail="That's after the end of the meeting")
+        folder = Path(meeting["folder"])
+        # Hold the player's locks: a mix being built now would bring the words back.
+        with _playback_locks_guard:
+            locks = [
+                _playback_locks.setdefault(folder / name, threading.Lock())
+                for name in redact.PLAYBACK
+            ]
+        for lock in locks:
+            lock.acquire()
+        try:
+            result = redact.redact(
+                store, meeting_id, start, end, with_audio=not meeting["audio_removed_at"]
+            )
+        except PermissionError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="The recording is open in another program. Close it and try again.",
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Couldn't rewrite the audio: {exc.strerror or exc}"
+            ) from exc
+        finally:
+            for lock in locks:
+                lock.release()
+        export.auto_export(store, meeting_id)
+        return {
+            **result,
+            "start": start,
+            "end": end,
+            "audio_removed": bool(meeting["audio_removed_at"]),
+            "has_summary": store.summary(meeting_id) is not None,
+        }
 
     @app.post("/api/import", dependencies=auth)
     def import_recording(body: ImportBody, store: Store = Depends(db)):

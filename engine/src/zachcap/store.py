@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS segments (
     start               REAL NOT NULL,
     end                 REAL NOT NULL,
     text                TEXT NOT NULL,
-    confidence          REAL
+    confidence          REAL,
+    edited              INTEGER NOT NULL DEFAULT 0  -- 1 once the user fixed its words
 );
 CREATE INDEX IF NOT EXISTS segments_by_meeting ON segments(meeting_id, start);
 
@@ -144,6 +145,9 @@ CREATE TABLE IF NOT EXISTS prompts (
 );
 """
 
+# What a redacted line says instead.
+REDACTED = "[redacted]"
+
 # Suggestions show as "Speaker 2 (Dana?)" until confirmed.
 SPEAKER_NAME = (
     "CASE WHEN ms.status = 'suggested' THEN ms.label || ' (' || p.name || '?)' "
@@ -179,6 +183,10 @@ class Store:
             if column not in columns:
                 self.db.execute(f"ALTER TABLE meetings ADD COLUMN {column} TEXT")
                 self.db.commit()
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(segments)")}
+        if "edited" not in columns:
+            self.db.execute("ALTER TABLE segments ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
+            self.db.commit()
 
     def close(self) -> None:
         self.db.close()
@@ -746,6 +754,49 @@ class Store:
         )
         self._commit()
         return segment["meeting_id"]
+
+    def segment(self, segment_id: int) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM segments WHERE id = ?", (segment_id,)).fetchone()
+
+    def edit_segment(self, segment_id: int, text: str) -> None:
+        """The user's own wording for a line (the search index follows through its trigger).
+        Reprocessing the audio replaces edited lines like any other."""
+        self.db.execute("UPDATE segments SET text = ?, edited = 1 WHERE id = ?", (text, segment_id))
+        self._commit()
+
+    def redact_lines(self, meeting_id: int, start: float, end: float) -> tuple[int, int]:
+        """Remove what was said between start and end (seconds): lines entirely inside are
+        deleted, lines reaching into it become "[redacted]". Returns (deleted, replaced)."""
+        # Freed space is overwritten with zeros from here on, instead of keeping the old text.
+        self.db.execute("PRAGMA secure_delete = ON")
+        deleted = self.db.execute(
+            "DELETE FROM segments WHERE meeting_id = ? AND start >= ? AND end <= ?",
+            (meeting_id, start, end),
+        ).rowcount
+        replaced = self.db.execute(
+            "UPDATE segments SET text = ? WHERE meeting_id = ? AND start < ? AND end > ?",
+            (REDACTED, meeting_id, end, start),
+        ).rowcount
+        self._commit()
+        return deleted, replaced
+
+    def set_speaker_sample(self, speaker_id: int, sample: tuple[float, float] | None) -> None:
+        start, end = sample or (None, None)
+        self.db.execute(
+            "UPDATE meeting_speakers SET sample_start = ?, sample_end = ? WHERE id = ?",
+            (start, end, speaker_id),
+        )
+        self._commit()
+
+    def scrub_deleted_text(self) -> None:
+        """After a redaction: make the removed text unrecoverable from the database files as
+        far as SQLite can. The search index keeps deleted words until its pieces are merged,
+        so merge them (with freed space overwritten), then empty the write-ahead log. The disk
+        itself may still hold old copies: this is not a secure erase."""
+        self.db.execute("PRAGMA secure_delete = ON")
+        self.db.execute("INSERT INTO segments_fts(segments_fts) VALUES ('optimize')")
+        self.db.commit()
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def _speaker_for_person(self, segment: sqlite3.Row, name: str) -> int:
         me = self.me()
