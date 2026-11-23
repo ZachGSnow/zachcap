@@ -176,6 +176,26 @@ export type Settings = {
 
 export type RecipeResult = { title: string; text: string; model: string; cost_usd: number };
 
+/** A kind of meeting (what a summary focuses on) or a one-click document. */
+export type PromptKind = "template" | "recipe";
+
+export type Prompt = {
+  id: string;
+  kind: PromptKind;
+  label: string;
+  instructions: string;
+  /** Ships with ZachCap: can be edited and reset, not deleted. */
+  builtin: boolean;
+  /** A built-in that differs from how it ships. */
+  edited: boolean;
+};
+
+export type PromptLibrary = {
+  templates: Prompt[];
+  recipes: Prompt[];
+  limits: { label: number; instructions: number };
+};
+
 export type Devices = {
   inputs: { name: string; default: boolean }[];
   outputs: { name: string; default: boolean }[];

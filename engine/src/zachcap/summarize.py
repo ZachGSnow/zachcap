@@ -9,7 +9,8 @@ from typing import Literal
 import anthropic
 from pydantic import BaseModel, Field
 
-from . import apikeys, privacy, vocabulary
+from . import apikeys, privacy, prompts, vocabulary
+from .prompts import DEFAULT_TEMPLATE, RECIPES, TEMPLATES  # noqa: F401 (re-exported)
 from .store import Store
 
 # The models to choose from in Settings.
@@ -48,69 +49,9 @@ offhand promises ("I'll send it over", "I can bring the cable") as commitments t
 Don't invent anything that isn't in the transcript. Leave a list empty when there is \
 nothing for it."""
 
-# Kinds of meeting. The summary keeps the same fields, so the action item tracker works
-# for all of them, but its focus follows what matters in that kind of meeting.
-TEMPLATES = {
-    "general": ("General", ""),
-    "one_on_one": (
-        "1:1",
-        "This is a one-on-one. Focus on the other person's updates and concerns, feedback in "
-        "both directions, workload and growth, and what each of you will do before the next one.",
-    ),
-    "standup": (
-        "Standup",
-        "This is a standup. In who said what, give each person's done, next and blockers. "
-        "Keep everything short.",
-    ),
-    "customer": (
-        "Customer call",
-        "This is a call with a customer or client. Focus on their needs, problems and requests, "
-        "what was promised to them (by whom and by when), scope or pricing discussed, risks to "
-        "the relationship and next steps.",
-    ),
-    "project": (
-        "Project status",
-        "This is a project or status meeting. Focus on status by workstream, decisions, risks "
-        "and blockers, and dates with owners.",
-    ),
-    "incident": (
-        "Incident or troubleshooting",
-        "This is an incident or troubleshooting call. Cover what broke and its impact, the "
-        "timeline, what was checked or tried, the cause if found, the fix or workaround, and "
-        "follow-ups with owners.",
-    ),
-    "interview": (
-        "Interview",
-        "This is an interview. Cover the candidate's background, strengths, concerns and "
-        "answers to the key questions, and the interviewers' impressions. Don't invent ratings.",
-    ),
-}
-DEFAULT_TEMPLATE = "general"
 
 RECIPE_SYSTEM = """You write documents from a meeting for {me}, who recorded it. Use only \
 facts from the meeting, in plain text without Markdown headings, ready to paste."""
-
-# One-click documents made from a meeting.
-RECIPES = {
-    "email": (
-        "Follow-up email",
-        "Write the follow-up email {me} would send to the others after this meeting. Start "
-        "with 'Subject: ...', then a one-line thanks, a short recap of what was decided, the "
-        "action items with owners and dates, and any open questions. Write in {me}'s voice.",
-    ),
-    "status": (
-        "Status update",
-        "Write a short status update {me} could post to their team or manager about this "
-        "meeting: 3 to 6 bullet points covering what happened, decisions, risks and next "
-        "steps with owners.",
-    ),
-    "ticket": (
-        "Ticket notes",
-        "Write notes for an IT service ticket from this call, in past tense: the problem "
-        "reported, what was checked or tried, the resolution or current state, next steps "
-        "with owners, and any times promised to the customer. Keep it concise.",
-    ),
-}
 
 
 class ActionItem(BaseModel):
@@ -298,9 +239,10 @@ def usage_cost(usage, model: str) -> float:
 
 
 def meeting_template(store: Store, meeting, requested: str | None = None) -> str:
-    """The kind of meeting to summarize as: asked for, else this meeting's, else the default."""
+    """The kind of meeting to summarize as: asked for, else this meeting's, else the usual
+    kind, else the general one. A kind the user has since deleted is skipped."""
     for template in (requested, meeting["template"], store.setting("summary_template")):
-        if template in TEMPLATES:
+        if prompts.get(store, "template", template) is not None:
             return template
     return DEFAULT_TEMPLATE
 
@@ -315,7 +257,9 @@ def summarize(store: Store, meeting_id: int, template: str | None = None) -> dic
         raise RuntimeError("This meeting has no transcript yet.")
 
     template = meeting_template(store, meeting, template)
-    focus = TEMPLATES[template][1]
+    # The user's own words (built-in or edited): they set the focus, while the summary's
+    # sections and shape stay fixed by the Summary model, so no edit can break parsing.
+    focus = prompts.get(store, "template", template)["instructions"]
     started = datetime.fromisoformat(meeting["started_at"])
     model = summary_model(store)
     client = anthropic.Anthropic(api_key=key)
@@ -358,8 +302,10 @@ def summarize(store: Store, meeting_id: int, template: str | None = None) -> dic
 
 
 def recipe(store: Store, meeting_id: int, name: str) -> dict:
-    """A document made from one meeting (a follow-up email, a status update...)."""
-    if name not in RECIPES:
+    """A document made from one meeting (a follow-up email, a status update, or one of the
+    user's own)."""
+    document = prompts.get(store, "recipe", name)
+    if document is None:
         raise RuntimeError(f"Unknown recipe {name!r}")
     key = apikeys.get("anthropic")
     if not key:
@@ -390,7 +336,8 @@ def recipe(store: Store, meeting_id: int, name: str) -> dict:
                 "content": [
                     # The meeting is the stable part: a second recipe reads it from cache.
                     {"type": "text", "text": context, "cache_control": {"type": "ephemeral"}},
-                    {"type": "text", "text": RECIPES[name][1].format(me=me)},
+                    # A plain replace, not str.format: the user's own text may hold braces.
+                    {"type": "text", "text": document["instructions"].replace("{me}", me)},
                 ],
             }
         ],
@@ -399,7 +346,7 @@ def recipe(store: Store, meeting_id: int, name: str) -> dict:
     if response.stop_reason == "refusal" or not text:
         raise RuntimeError("Claude didn't write that.")
     return {
-        "title": RECIPES[name][0],
+        "title": document["label"],
         "text": text,
         "model": response.model or model,
         "cost_usd": usage_cost(response.usage, model),

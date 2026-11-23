@@ -18,6 +18,7 @@ import {
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
+import { PromptList } from "@/components/PromptLibrary";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,7 +26,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { usePoll } from "@/hooks/usePoll";
-import { api, isTauri, type Devices, type KeyStatus, type Settings } from "@/lib/engine";
+import { api, isTauri, type Devices, type KeyStatus, type PromptLibrary, type Settings } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
 
@@ -251,6 +252,9 @@ export function SettingsView() {
   const { data: health } = usePoll(() => api<{ version: string; data: string }>("/api/health"), 0);
   const { data: devices, refresh: refreshDevices } = usePoll(() => api<Devices>("/api/devices"), 0);
   const { data: mcp } = usePoll(() => api<{ claude_code: string; claude_desktop: string }>("/api/mcp"), 0);
+  const { data: library, refresh: refreshLibrary } = usePoll(() => api<PromptLibrary>("/api/prompts"), 0);
+  // An edit renames choices in the usual-kind picker, and a deleted kind can't stay the usual one.
+  const libraryChanged = () => void Promise.all([refreshLibrary(), refresh()]);
   const [name, setName] = useState("");
   useEffect(() => setName(settings?.me.name ?? ""), [settings?.me.name]);
 
@@ -377,6 +381,12 @@ export function SettingsView() {
               options={(settings?.templates ?? []).map((t) => ({ value: t.id, label: t.label }))}
             />
           </Row>
+          {library && (
+            <>
+              <PromptList kind="template" items={library.templates} limits={library.limits} onChanged={libraryChanged} />
+              <PromptList kind="recipe" items={library.recipes} limits={library.limits} onChanged={libraryChanged} />
+            </>
+          )}
         </Section>
 
         <Section icon={<Plug className="size-3.5" />} title="Use your meetings in Claude">

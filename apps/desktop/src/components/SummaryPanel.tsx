@@ -1,4 +1,4 @@
-import { Check, Copy, Loader2, Mail, Megaphone, MessageSquareQuote, RotateCw, Sparkles, Ticket } from "lucide-react";
+import { Check, Copy, FileText, Loader2, Mail, Megaphone, MessageSquareQuote, RotateCw, Sparkles, Ticket } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 
 import { PersonAvatar } from "@/components/Visuals";
@@ -323,7 +323,8 @@ export function SummaryPanel({
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">Write from this meeting:</span>
           {recipes.map((recipe) => {
-            const Icon = RECIPE_ICON[recipe.id] ?? Sparkles;
+            // Your own documents get a plain document icon.
+            const Icon = RECIPE_ICON[recipe.id] ?? FileText;
             return (
               <Button key={recipe.id} size="sm" variant="ghost" className="h-7 border" onClick={() => openRecipe(recipe)}>
                 <Icon className="size-3.5" />
