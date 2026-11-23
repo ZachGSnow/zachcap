@@ -11,7 +11,7 @@ from datetime import date, datetime
 import anthropic
 from anthropic import beta_tool
 
-from . import apikeys
+from . import apikeys, privacy
 from .store import Store
 from .summarize import MODELS, _clock, cost_usd, notes_text, spellings, summary_model
 
@@ -147,7 +147,7 @@ def make_tools(store: Store) -> list:
             query: Words to look for, like "firewall cutover" or a name.
             limit: How many lines to return, at most 60.
         """
-        return search(store, query, limit)
+        return privacy.outgoing(store, search(store, query, limit))
 
     @beta_tool
     def list_meetings(
@@ -160,7 +160,7 @@ def make_tools(store: Store) -> list:
             until: Only meetings on or before this date, YYYY-MM-DD.
             person: Only meetings this person spoke in.
         """
-        return meetings_list(store, since, until, person)
+        return privacy.outgoing(store, meetings_list(store, since, until, person))
 
     @beta_tool
     def get_meeting(meeting_id: int) -> str:
@@ -169,7 +169,7 @@ def make_tools(store: Store) -> list:
         Args:
             meeting_id: The meeting's id, the number after M.
         """
-        return meeting_detail(store, meeting_id)
+        return privacy.outgoing(store, meeting_detail(store, meeting_id))
 
     @beta_tool
     def list_action_items(status: str = "open", owner: str | None = None) -> str:
@@ -179,7 +179,7 @@ def make_tools(store: Store) -> list:
             status: "open", "done" or "all".
             owner: Only items owned by this person.
         """
-        return action_items_list(store, status, owner)
+        return privacy.outgoing(store, action_items_list(store, status, owner))
 
     return [search_transcripts, list_meetings, get_meeting, list_action_items]
 

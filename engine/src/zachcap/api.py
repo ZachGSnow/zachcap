@@ -15,6 +15,7 @@ import re
 import secrets as pysecrets
 import shutil
 import threading
+import time
 import traceback
 from collections.abc import Callable
 from datetime import datetime
@@ -27,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from . import __version__, apikeys, audio, export, insights, paths, pipeline
+from . import __version__, apikeys, audio, export, insights, paths, pipeline, privacy
 from .store import Store
 
 ALLOWED_ORIGINS = ["http://tauri.localhost", "tauri://localhost", "http://localhost:1420"]
@@ -117,6 +118,11 @@ class SettingsBody(BaseModel):
     vocabulary: str | None = None
     summary_template: str | None = None
     export_folder: str | None = None  # "" turns automatic export off
+    keep_audio_days: int | None = None  # 0 keeps recordings forever
+    mask_before_claude: bool | None = None
+
+
+KEEP_AUDIO_CHOICES = (0, 7, 30, 90, 365)
 
 
 class Worker:
@@ -207,6 +213,20 @@ def create_app(token: str) -> FastAPI:
         recover(startup, worker.submit)
     finally:
         startup.close()
+
+    def remove_old_audio() -> None:
+        """The "keep recordings" setting, applied at startup and every few hours after."""
+        while True:
+            store = Store()
+            try:
+                privacy.remove_old_audio(store)
+            except Exception:
+                traceback.print_exc()
+            finally:
+                store.close()
+            time.sleep(6 * 3600)
+
+    threading.Thread(target=remove_old_audio, name="zachcap-retention", daemon=True).start()
 
     def finish_recording() -> int | None:
         """Stop the recorder, if one is running, and save its meeting. Returns the meeting id.
@@ -372,7 +392,12 @@ def create_app(token: str) -> FastAPI:
 
     @app.post("/api/meetings/{meeting_id}/process", dependencies=auth)
     def process(meeting_id: int, store: Store = Depends(db)):
-        meeting_or_404(store, meeting_id)
+        if meeting_or_404(store, meeting_id)["audio_removed_at"]:
+            raise HTTPException(
+                status_code=400,
+                detail="This meeting's recording was deleted (Settings, keep recordings), "
+                "so it can't be processed again. The transcript is kept.",
+            )
         worker.submit(meeting_id)
         return {"queued": True}
 
@@ -698,6 +723,8 @@ def create_app(token: str) -> FastAPI:
             ],
             "summary_template": store.setting("summary_template", DEFAULT_TEMPLATE),
             "export_folder": store.setting("export_folder", ""),
+            "keep_audio_days": int(store.setting("keep_audio_days", "0") or 0),
+            "mask_before_claude": store.setting("mask_before_claude") == "1",
             "templates": [{"id": key, "label": label} for key, (label, _) in TEMPLATES.items()],
             "recipes": [{"id": key, "label": label} for key, (label, _) in RECIPES.items()],
             "language": store.setting("language", "en"),
@@ -716,6 +743,15 @@ def create_app(token: str) -> FastAPI:
             if body.summary_template not in TEMPLATES:
                 raise HTTPException(status_code=400, detail="Unknown summary style")
             store.set_setting("summary_template", body.summary_template)
+        if body.keep_audio_days is not None:
+            if body.keep_audio_days not in KEEP_AUDIO_CHOICES:
+                raise HTTPException(
+                    status_code=400, detail="Keep audio for 0, 7, 30, 90 or 365 days"
+                )
+            store.set_setting("keep_audio_days", str(body.keep_audio_days))
+            privacy.remove_old_audio(store)
+        if body.mask_before_claude is not None:
+            store.set_setting("mask_before_claude", "1" if body.mask_before_claude else "0")
         if body.export_folder is not None:
             folder = body.export_folder.strip()
             if folder and not Path(folder).is_dir():

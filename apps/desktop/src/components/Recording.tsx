@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Bookmark, Circle, Mic, Pause, Play, Square, TriangleAlert } from "lucide-react";
+import { Bookmark, Circle, Megaphone, Mic, Pause, Play, Square, TriangleAlert } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -17,9 +17,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type RecordState } from "@/lib/engine";
-import { announce, notify, windowShowing } from "@/lib/feedback";
+import { announce, copyText, notify, windowShowing } from "@/lib/feedback";
 import { clock, levelPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
+
+/** To paste in the meeting chat: recording laws differ, and people should know. */
+const HEADS_UP =
+  "Heads-up: I'm recording this call to take notes. The recording stays on my computer and isn't shared.";
 
 type RecordingContext = {
   state: RecordState | undefined;
@@ -328,6 +332,16 @@ export function RecordingBar() {
           <span className="truncate">{state.errors[0]}</span>
         </span>
       )}
+      <Button
+        size="icon"
+        variant="ghost"
+        className="size-8 shrink-0"
+        title="Copy a heads-up to paste in the meeting chat"
+        aria-label="Copy a heads-up that you're recording"
+        onClick={() => void copyText(HEADS_UP, "Heads-up copied: paste it in the meeting chat")}
+      >
+        <Megaphone className="size-4" />
+      </Button>
       <Button
         size="sm"
         variant="outline"
