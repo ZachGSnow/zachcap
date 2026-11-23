@@ -100,6 +100,8 @@ class SummaryBody(BaseModel):
 
 class RecipeBody(BaseModel):
     recipe: str
+    previous: str | None = None  # the document as it stands, to rewrite...
+    change: str | None = None  # ...this way ("shorter, for the client")
 
 
 class PromptBody(BaseModel):
@@ -562,7 +564,7 @@ def create_app(token: str) -> FastAPI:
 
         meeting_or_404(store, meeting_id)
         try:
-            return recipe(store, meeting_id, body.recipe)
+            return recipe(store, meeting_id, body.recipe, body.previous, body.change)
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:

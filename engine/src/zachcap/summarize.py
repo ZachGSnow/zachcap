@@ -322,9 +322,29 @@ def summarize(store: Store, meeting_id: int, template: str | None = None) -> dic
     return result
 
 
-def recipe(store: Store, meeting_id: int, name: str) -> dict:
+MAX_CHANGE = 500  # characters in one "change it" request
+MAX_DOCUMENT = 20_000  # characters of a document sent back to be changed
+
+
+def recipe(
+    store: Store,
+    meeting_id: int,
+    name: str,
+    previous: str | None = None,
+    change: str | None = None,
+) -> dict:
     """A document made from one meeting (a follow-up email, a status update, or one of the
-    user's own)."""
+    user's own). With ``previous`` (the document as it stands, edits included) and
+    ``change`` ("shorter, for the client"), Claude rewrites it that way instead, still from
+    the meeting."""
+    if (previous is None) != (change is None):
+        raise RuntimeError("Send the document and the change together.")
+    if change is not None:
+        change = change.strip()
+        if not change or len(change) > MAX_CHANGE:
+            raise RuntimeError(f"Say what to change, in at most {MAX_CHANGE} characters.")
+        if not previous.strip() or len(previous) > MAX_DOCUMENT:
+            raise RuntimeError(f"The document to change must be 1 to {MAX_DOCUMENT} characters.")
     document = prompts.get(store, "recipe", name)
     if document is None:
         raise RuntimeError(f"Unknown recipe {name!r}")
@@ -346,6 +366,26 @@ def recipe(store: Store, meeting_id: int, name: str) -> dict:
         context += f"Summary:\n{json.dumps(summary['content'], ensure_ascii=False)}\n\n"
     context += f"Transcript:\n{text}" + notes_text(store, meeting_id)
     model = summary_model(store)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                # The meeting is the stable part: a second recipe reads it from cache.
+                {"type": "text", "text": context, "cache_control": {"type": "ephemeral"}},
+                # A plain replace, not str.format: the user's own text may hold braces.
+                {"type": "text", "text": document["instructions"].replace("{me}", me)},
+            ],
+        }
+    ]
+    if change is not None:  # the document as it stands, then what to change
+        messages += [
+            {"role": "assistant", "content": previous.strip()},
+            {
+                "role": "user",
+                "content": f"Rewrite it: {change}\n\nStill use only facts from the meeting. "
+                "Answer with the whole new version and nothing else.",
+            },
+        ]
     client = anthropic.Anthropic(api_key=key)
     response = client.beta.messages.create(
         model=model,
@@ -354,17 +394,7 @@ def recipe(store: Store, meeting_id: int, name: str) -> dict:
         fallbacks="default",
         output_config={"effort": "low"},
         system=RECIPE_SYSTEM.format(me=me) + spellings(store),
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    # The meeting is the stable part: a second recipe reads it from cache.
-                    {"type": "text", "text": context, "cache_control": {"type": "ephemeral"}},
-                    # A plain replace, not str.format: the user's own text may hold braces.
-                    {"type": "text", "text": document["instructions"].replace("{me}", me)},
-                ],
-            }
-        ],
+        messages=messages,
     )
     text = reply_text(response)
     if response.stop_reason == "refusal" or not text:
