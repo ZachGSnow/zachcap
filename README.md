@@ -35,8 +35,8 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 
 | | |
 |---|---|
-| ![Home](docs/images/home.jpg) | ![Speakers](docs/images/speakers.jpg) |
-| ![Action items](docs/images/action-items.jpg) | |
+| ![Home: meeting time, your open items, getting set up](docs/images/home.jpg) | ![Work log: a week's meetings with draft time entries](docs/images/work-log.jpg) |
+| ![Speakers: talk time, conversation stats and voices](docs/images/speakers.jpg) | ![Action items across every meeting](docs/images/action-items.jpg) |
 
 ## Quick start
 
