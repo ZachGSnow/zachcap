@@ -21,6 +21,7 @@ import { NotesPanel } from "@/components/NotesPanel";
 import { PlayerBar, type PlayerState } from "@/components/PlayerBar";
 import { RedactDialog } from "@/components/RedactDialog";
 import { SummaryPanel } from "@/components/SummaryPanel";
+import { TicketControl } from "@/components/Ticket";
 import { NamePrompt, REDACTED, Transcript, WhoIsThis } from "@/components/Transcript";
 import { AvatarStack, ConversationStats, SpeakerLanes, TalkTimeBars } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
@@ -484,6 +485,12 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
               {named.length ? ` \u00b7 ${named.length} speaker${named.length === 1 ? "" : "s"}` : ""}
             </span>
             {participants.length > 0 && <AvatarStack names={participants} colorOf={colorOf} max={5} />}
+            <TicketControl
+              meetingId={meeting.id}
+              ticket={meeting.ticket ?? null}
+              suggestions={data.ticket_suggestions ?? []}
+              onChanged={() => void refresh()}
+            />
           </div>
         </div>
         <StatusBadge meeting={meeting} />

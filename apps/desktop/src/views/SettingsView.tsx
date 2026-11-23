@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   Sparkles,
   Speaker,
+  Ticket,
   TriangleAlert,
   UserRound,
 } from "lucide-react";
@@ -87,6 +88,7 @@ type SettingsChange = Partial<{
   export_work_log: boolean;
   dictation: boolean;
   also_answer_to: string;
+  ticket_patterns: string;
   watch_folder: string;
   /** With watch_folder: import the recordings already there too. */
   watch_existing: boolean;
@@ -544,6 +546,11 @@ export function SettingsView() {
   useEffect(() => setName(settings?.me.name ?? ""), [settings?.me.name]);
   const [aliases, setAliases] = useState("");
   useEffect(() => setAliases(settings?.also_answer_to ?? ""), [settings?.also_answer_to]);
+  const [ticketPatterns, setTicketPatterns] = useState("");
+  useEffect(() => setTicketPatterns(settings?.ticket_patterns ?? ""), [settings?.ticket_patterns]);
+  const saveTicketPatterns = () => {
+    if (settings && ticketPatterns.trim() !== settings.ticket_patterns) void save({ ticket_patterns: ticketPatterns });
+  };
 
   const keysNow = useKeys();
   const [shortcutStatus, setShortcutStatus] = useState<ShortcutStatus[]>([]);
@@ -745,6 +752,25 @@ export function SettingsView() {
               <PromptList kind="recipe" items={library.recipes} limits={library.limits} onChanged={libraryChanged} />
             </>
           )}
+        </Section>
+
+        <Section icon={<Ticket className="size-3.5" />} title="Tickets">
+          <Row
+            label="Ticket numbers look like"
+            help="# is a digit, ? a letter, anything else itself; several separated by commas. A ticket number in a meeting's title, your notes or a snapshot becomes its ticket; ones only heard in the call are offered on the meeting's page. The ticket goes into time entries, ticket notes, exports and search."
+          >
+            <Input
+              value={ticketPatterns}
+              placeholder="#######, INC-####"
+              aria-label="Ticket numbers look like"
+              className="font-mono text-sm"
+              onChange={(event) => setTicketPatterns(event.target.value)}
+              onBlur={saveTicketPatterns}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") saveTicketPatterns();
+              }}
+            />
+          </Row>
         </Section>
 
         <Section icon={<Plug className="size-3.5" />} title="Use your meetings in Claude">

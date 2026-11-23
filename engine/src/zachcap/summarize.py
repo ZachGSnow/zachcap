@@ -338,7 +338,10 @@ def recipe(store: Store, meeting_id: int, name: str) -> dict:
     me = store.me()["name"]
     started = datetime.fromisoformat(meeting["started_at"])
     summary = store.summary(meeting_id)
-    context = f"Meeting: {meeting['title']}\nDate: {started:%A %B %d, %Y}\n\n"
+    context = f"Meeting: {meeting['title']}\nDate: {started:%A %B %d, %Y}\n"
+    if meeting["ticket"]:
+        context += f"Ticket: {meeting['ticket']}\n"
+    context += "\n"
     if summary:
         context += f"Summary:\n{json.dumps(summary['content'], ensure_ascii=False)}\n\n"
     context += f"Transcript:\n{text}" + notes_text(store, meeting_id)

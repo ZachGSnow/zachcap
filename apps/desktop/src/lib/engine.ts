@@ -21,6 +21,15 @@ export type Meeting = {
   template?: string | null;
   /** Set when the recording was deleted by the "keep recordings" setting. */
   audio_removed_at?: string | null;
+  /** The service ticket it was about, if any. */
+  ticket?: string | null;
+};
+
+/** A ticket number found in a meeting, and where: offered to pick as its ticket. */
+export type TicketFound = {
+  ticket: string;
+  where: ("title" | "notes" | "snapshots" | "transcript")[];
+  count: number;
 };
 
 export type SpeakerStatus = "auto" | "suggested" | "confirmed" | "unknown" | "minor";
@@ -111,6 +120,8 @@ export type MeetingDetail = {
   action_items: ActionItem[];
   me: string;
   mentions: Mention[];
+  /** Ticket numbers found in it, best first, other than its own. */
+  ticket_suggestions: TicketFound[];
 };
 
 export type Person = {
@@ -216,6 +227,8 @@ export type Settings = {
   soundcheck_passed: string | null;
   /** Hold the dictation keys to dictate into any app. */
   dictation: boolean;
+  /** How ticket numbers look ("#######, INC-####": # a digit, ? a letter); "" when off. */
+  ticket_patterns: string;
   /** The keys for each global shortcut: picked in Settings, or the defaults. */
   shortcuts: Record<ShortcutAction, string>;
   templates: { id: string; label: string }[];
@@ -347,6 +360,8 @@ export type WorkLogMeeting = {
   decisions: string[];
   items: WorkLogItem[];
   status: string;
+  /** The service ticket it was about, if any. */
+  ticket: string | null;
 };
 
 export type WorkLog = {
