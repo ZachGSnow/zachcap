@@ -1,7 +1,7 @@
 import { Bookmark, Headphones } from "lucide-react";
 import { memo, useMemo, type ReactNode } from "react";
 
-import type { Note, Segment, TalkTime } from "@/lib/engine";
+import type { Insights, Note, Segment, TalkTime } from "@/lib/engine";
 import { clock, initials, minutes, type SpeakerColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -192,6 +192,74 @@ export function SpeakerLanes({
           <span key={tick}>{clock(tick)}</span>
         ))}
       </div>
+    </div>
+  );
+}
+
+/** How the conversation went: who held the floor longest, pace, questions, interruptions. */
+export function ConversationStats({
+  insights,
+  colorOf,
+  onSeek,
+}: {
+  insights: Insights;
+  colorOf: (name: string) => SpeakerColor;
+  onSeek: (seconds: number) => void;
+}) {
+  if (!insights.speakers.length) return null;
+  const { longest } = insights;
+  return (
+    <div>
+      <div className="mb-3 flex flex-wrap gap-2 text-xs">
+        {longest && (
+          <button
+            onClick={() => onSeek(longest.at)}
+            className="rounded-lg border px-2.5 py-1.5 text-left hover:bg-muted"
+            title="Play from the start of it"
+          >
+            <span className="text-muted-foreground">Longest stretch </span>
+            <span className="font-medium">
+              {longest.speaker}, {minutes(longest.seconds)}
+            </span>
+            <span className="ml-1 font-mono text-muted-foreground">at {clock(longest.at)}</span>
+          </button>
+        )}
+        <span className="rounded-lg border px-2.5 py-1.5">
+          <span className="text-muted-foreground">Questions asked </span>
+          <span className="font-medium tabular-nums">{insights.questions}</span>
+        </span>
+      </div>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-left text-xs text-muted-foreground">
+            <th className="pb-1.5 font-normal">Speaker</th>
+            <th className="pb-1.5 text-right font-normal" title="Words per minute while talking">
+              Pace
+            </th>
+            <th className="pb-1.5 text-right font-normal">Longest</th>
+            <th className="pb-1.5 text-right font-normal">Questions</th>
+            <th className="pb-1.5 text-right font-normal" title="Started while the other side of the call was still talking">
+              Talked over
+            </th>
+          </tr>
+        </thead>
+        <tbody className="tabular-nums">
+          {insights.speakers.map((s) => (
+            <tr key={s.speaker} className="border-t">
+              <td className="py-1.5">
+                <span className="flex items-center gap-2">
+                  <span className={cn("size-2 shrink-0 rounded-full", colorOf(s.speaker).dot)} />
+                  <span className="truncate">{s.speaker}</span>
+                </span>
+              </td>
+              <td className="py-1.5 text-right">{s.words_per_minute ? `${s.words_per_minute} wpm` : "-"}</td>
+              <td className="py-1.5 text-right">{minutes(s.longest)}</td>
+              <td className="py-1.5 text-right">{s.questions}</td>
+              <td className="py-1.5 text-right">{s.interruptions}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

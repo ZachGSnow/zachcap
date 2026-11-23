@@ -21,7 +21,7 @@ import { NotesPanel } from "@/components/NotesPanel";
 import { PlayerBar, type PlayerState } from "@/components/PlayerBar";
 import { SummaryPanel } from "@/components/SummaryPanel";
 import { NamePrompt, Transcript, WhoIsThis } from "@/components/Transcript";
-import { AvatarStack, SpeakerLanes, TalkTimeBars } from "@/components/Visuals";
+import { AvatarStack, ConversationStats, SpeakerLanes, TalkTimeBars } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -491,9 +491,19 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
 
             <TabsContent value="speakers">
               <div className="grid gap-5 lg:grid-cols-[1fr_1.2fr]">
-                <div className="rounded-xl border bg-card p-4">
-                  <h3 className="mb-3 text-xs font-medium tracking-wide text-muted-foreground uppercase">Talk time</h3>
-                  <TalkTimeBars talk={data.talk_time} colorOf={colorOf} />
+                <div className="space-y-5">
+                  <div className="rounded-xl border bg-card p-4">
+                    <h3 className="mb-3 text-xs font-medium tracking-wide text-muted-foreground uppercase">Talk time</h3>
+                    <TalkTimeBars talk={data.talk_time} colorOf={colorOf} />
+                  </div>
+                  {data.insights.speakers.length > 0 && (
+                    <div className="rounded-xl border bg-card p-4">
+                      <h3 className="mb-3 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                        Conversation
+                      </h3>
+                      <ConversationStats insights={data.insights} colorOf={colorOf} onSeek={seek} />
+                    </div>
+                  )}
                 </div>
                 <div>
                   <div className="mb-2 flex items-center justify-between">
