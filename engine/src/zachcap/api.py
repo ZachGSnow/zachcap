@@ -319,6 +319,8 @@ def create_app(token: str) -> FastAPI:
 
     app.state.finish_recording = finish_recording
     app.state.submit = worker.submit
+    # The watch folder's looks (a thread started by serve()); Settings reads what it found.
+    app.state.folder_watch = watchfolder.FolderWatch(worker.submit)
 
     def authorized(request: Request) -> None:
         supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
@@ -679,19 +681,25 @@ def create_app(token: str) -> FastAPI:
             if note["kind"] == "snapshot":  # its picture goes with it
                 meeting = store.meeting(note["meeting_id"])
                 if meeting is not None:
-                    snapshot.image_path(Path(meeting["folder"]), note_id).unlink(missing_ok=True)
+                    snapshot.remove_pictures(Path(meeting["folder"]), note_id)
             export.auto_export(store, note["meeting_id"])
         return {"deleted": note_id}
 
     @app.get("/api/notes/{note_id}/image", dependencies=auth)
-    def note_image(note_id: int, store: Store = Depends(db)):
-        """A snapshot's picture (the app shows it with the note)."""
+    def note_image(note_id: int, size: str = "full", store: Store = Depends(db)):
+        """A snapshot's picture (size "thumb": the small one the notes list shows)."""
         from . import snapshot
 
         note = store.note(note_id)
         meeting = store.meeting(note["meeting_id"]) if note is not None else None
-        path = snapshot.image_path(Path(meeting["folder"]), note_id) if meeting else None
-        if path is None or not path.exists():
+        if meeting is None:
+            raise HTTPException(status_code=404, detail="No picture for that note")
+        folder = Path(meeting["folder"])
+        thumb = snapshot.thumbnail_path(folder, note_id)
+        if size == "thumb" and thumb.exists():
+            return FileResponse(thumb, media_type="image/jpeg", headers=NO_STORE)
+        path = snapshot.image_path(folder, note_id)
+        if not path.exists():
             raise HTTPException(status_code=404, detail="No picture for that note")
         return FileResponse(path, media_type="image/png", headers=NO_STORE)
 
@@ -701,18 +709,29 @@ def create_app(token: str) -> FastAPI:
         this moment of the recording."""
         from . import snapshot
 
-        recorder = recording.get("recorder")
-        if recorder is None:
+        # Read together, under the lock: a Stop at the same moment means "not recording".
+        with lock:
+            recorder = recording.get("recorder")
+            meeting_id = recording.get("meeting_id")
+        if recorder is None or meeting_id is None:
             raise HTTPException(status_code=409, detail="Not recording")
-        meeting = store.meeting(recording["meeting_id"])
-        note_id = store.add_note(meeting["id"], recorder.elapsed, "snapshot", "")
+        meeting = store.meeting(meeting_id)
+        if meeting is None:  # stopped and deleted at that very moment
+            raise HTTPException(status_code=409, detail="Not recording")
+        note_id = store.add_note(meeting_id, recorder.elapsed, "snapshot", "")
         try:
             shot = snapshot.take(Path(meeting["folder"]), note_id)
+        except snapshot.SnapshotError as exc:  # nothing right to capture: say why
+            store.delete_note(note_id)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             store.delete_note(note_id)
+            snapshot.remove_pictures(Path(meeting["folder"]), note_id)
             raise HTTPException(status_code=400, detail=f"Couldn't take a snapshot: {exc}") from exc
         store.update_note(note_id, shot["text"])
-        recording["notes"] = recording.get("notes", 0) + 1
+        with lock:
+            if recording.get("meeting_id") == meeting_id:
+                recording["notes"] = recording.get("notes", 0) + 1
         return {
             **dict(store.note(note_id)),
             "window": shot["window"],
@@ -821,6 +840,11 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=400, detail=f"Couldn't read the audio: {exc}") from exc
         worker.submit(meeting_id)
         return {"meeting_id": meeting_id}
+
+    @app.post("/api/watch-folder/retry", dependencies=auth)
+    def watch_folder_retry(store: Store = Depends(db)):
+        """Give the files that couldn't be imported another go, on the next look."""
+        return {"retrying": app.state.folder_watch.retry_failed(store)}
 
     @app.get("/api/watch-folder/files", dependencies=auth)
     def watch_folder_files(path: str):
@@ -1090,10 +1114,10 @@ def create_app(token: str) -> FastAPI:
         return {"deleted": prompt_id}
 
     def watch_failures(store: Store) -> list[dict]:
-        folder = store.setting(watchfolder.SETTING)
-        if not folder:
+        """From the watch folder's last look: Settings never reads the folder itself."""
+        if not store.setting(watchfolder.SETTING):
             return []
-        return watchfolder.failures(store, Path(folder))
+        return list(app.state.folder_watch.failures)
 
     @app.get("/api/settings", dependencies=auth)
     def get_settings(store: Store = Depends(db)):
@@ -1174,7 +1198,10 @@ def create_app(token: str) -> FastAPI:
                     watchfolder.retry_existing(store, Path(folder))
                 else:
                     watchfolder.skip_existing(store, Path(folder))
+            changed = folder != store.setting(watchfolder.SETTING, "")
             store.set_setting(watchfolder.SETTING, folder)
+            if changed:  # a look under way stops between files; the next starts over
+                app.state.folder_watch.reset()
         if body.also_answer_to is not None:
             if len(body.also_answer_to) > 400:
                 raise HTTPException(status_code=400, detail="Keep the names under 400 characters")
@@ -1274,7 +1301,7 @@ def serve(port: int, token: str) -> None:
     # Recordings saved in the watch folder import themselves (off until a folder is chosen).
     # Started here rather than in create_app, so tests never leave one running.
     threading.Thread(
-        target=watchfolder.FolderWatch(app.state.submit).run_forever,
+        target=app.state.folder_watch.run_forever,
         name="zachcap-watch-folder",
         daemon=True,
     ).start()

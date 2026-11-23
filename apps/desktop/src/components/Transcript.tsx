@@ -258,7 +258,7 @@ const TranscriptRow = memo(function TranscriptRow({
   color,
   current,
   editing,
-  names,
+  spans,
   onSeek,
   onPickSpeaker,
   onLineMenu,
@@ -270,8 +270,8 @@ const TranscriptRow = memo(function TranscriptRow({
   color: SpeakerColor;
   current: boolean;
   editing: boolean;
-  /** Your names said in this line, to mark. */
-  names?: string[];
+  /** Where your names were said in this line, to mark (as the engine counted them). */
+  spans?: [number, number][];
   onSeek: (seconds: number) => void;
   onPickSpeaker: (segment: Segment, anchor: HTMLElement) => void;
   onLineMenu: (segment: Segment, anchor: HTMLElement) => void;
@@ -318,7 +318,7 @@ const TranscriptRow = memo(function TranscriptRow({
           )}
           onDoubleClick={() => !redacted && onEdit(segment)}
         >
-          {redacted ? "Redacted" : names ? <Marked text={segment.text} names={names} /> : segment.text}
+          {redacted ? "Redacted" : spans ? <Marked text={segment.text} spans={spans} /> : segment.text}
           {segment.edited ? (
             <span className="ml-1.5 align-baseline text-[10px] text-muted-foreground" title="You fixed these words">
               edited
@@ -339,11 +339,20 @@ const TranscriptRow = memo(function TranscriptRow({
   );
 });
 
-/** A line with your names marked, wherever they were said in it. */
-function Marked({ text, names }: { text: string; names: string[] }) {
-  const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"));
-  // Whole words only, as the engine matched them (not "Alex" inside "Alexander").
-  const parts = text.split(new RegExp(`(?<!\\w)(${escaped.join("|")})(?!\\w)`, "gi"));
+/** A line with your names marked exactly where the engine counted them, so a "Will" that
+ * starts a question or the "Don" in "don't" is never marked. */
+function Marked({ text, spans }: { text: string; spans: [number, number][] }) {
+  // The engine's offsets count characters (code points); a JavaScript string counts UTF-16
+  // units, which differ after an emoji.
+  const chars = Array.from(text);
+  const parts: string[] = [];
+  let at = 0;
+  for (const [start, end] of spans) {
+    if (start < at || end > chars.length) continue; // the line changed since: leave it
+    parts.push(chars.slice(at, start).join(""), chars.slice(start, end).join(""));
+    at = end;
+  }
+  parts.push(chars.slice(at).join(""));
   return (
     <>
       {parts.map((part, index) =>
@@ -411,7 +420,7 @@ export const Transcript = memo(function Transcript({
   const list = useRef<HTMLDivElement>(null);
 
   const [onlyMentions, setOnlyMentions] = useState(false);
-  const mentioned = useMemo(() => new Map((mentions ?? []).map((m) => [m.segment_id, m.names])), [mentions]);
+  const mentioned = useMemo(() => new Map((mentions ?? []).map((m) => [m.segment_id, m.spans])), [mentions]);
   const shown = useMemo(() => {
     const needle = filter.trim().toLowerCase();
     return segments.filter(
@@ -523,7 +532,9 @@ export const Transcript = memo(function Transcript({
             className="h-9 pl-8"
           />
         </div>
-        {mentioned.size > 0 && (
+        {/* Kept while the filter is on, even with no lines left (a fixed line, a changed
+            name), so it can always be turned off again. */}
+        {(mentioned.size > 0 || onlyMentions) && (
           <Button
             size="sm"
             variant={onlyMentions ? "default" : "outline"}
@@ -550,7 +561,7 @@ export const Transcript = memo(function Transcript({
             color={colorOf(segment.speaker)}
             current={(currentId === segment.id && playing) || segment.id === focusId}
             editing={segment.id === editingId}
-            names={mentioned.get(segment.id)}
+            spans={mentioned.get(segment.id)}
             onSeek={onSeek}
             onPickSpeaker={pickSpeaker}
             onLineMenu={lineMenu}

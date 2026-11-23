@@ -642,8 +642,6 @@ def test_the_watch_folder_settings(client: TestClient, tmp_path: Path):
     import numpy as np
     import soundfile as sf
 
-    from zachcap import watchfolder
-
     folder = tmp_path / "exports"
     folder.mkdir()
     sf.write(folder / "old.wav", np.zeros(1600, np.float32), 16000)
@@ -658,7 +656,9 @@ def test_the_watch_folder_settings(client: TestClient, tmp_path: Path):
     on = client.put("/api/settings", headers=AUTH, json={"watch_folder": str(folder)}).json()
     assert on["watch_folder"] == str(folder) and on["watch_folder_failed"] == []
     store = Store()
-    watch = watchfolder.FolderWatch(lambda _: None, clock=lambda: time.time() + 120)
+    watch = client.app.state.folder_watch  # the engine's own looks (its thread isn't started)
+    watch._clock = lambda: time.time() + 120
+    watch._submit = lambda _: None
     watch.check(store)
     assert watch.check(store) == []
 
@@ -670,6 +670,10 @@ def test_the_watch_folder_settings(client: TestClient, tmp_path: Path):
     store.close()
     failed = client.get("/api/settings", headers=AUTH).json()["watch_folder_failed"]
     assert [f["name"] for f in failed] == ["broken.mp3"] and failed[0]["error"]
+    assert not failed[0]["retrying"]
+    retried = client.post("/api/watch-folder/retry", headers=AUTH).json()
+    assert retried == {"retrying": 1}
+    assert client.get("/api/settings", headers=AUTH).json()["watch_folder_failed"] == []
     off = client.put("/api/settings", headers=AUTH, json={"watch_folder": ""}).json()
     assert off["watch_folder"] == "" and off["watch_folder_failed"] == []
 
@@ -802,3 +806,19 @@ def test_a_deleted_meetings_words_leave_the_database_files(client: TestClient, t
     client.delete(f"/api/meetings/{meeting_id}", headers=AUTH)
 
     assert b"zebra99" not in raw_library_bytes(tmp_path)
+
+
+def test_settings_never_read_the_watch_folder_itself(client: TestClient, tmp_path, monkeypatch):
+    # On a network share that is offline, listing the folder took 42 s, and Settings was
+    # loaded by every page; now only the watch's own looks read it.
+    from zachcap import watchfolder
+
+    folder = tmp_path / "exports"
+    folder.mkdir()
+    client.put("/api/settings", headers=AUTH, json={"watch_folder": str(folder)})
+
+    def unreachable(path):
+        raise AssertionError("Settings read the folder")
+
+    monkeypatch.setattr(watchfolder, "media_files", unreachable)
+    assert client.get("/api/settings", headers=AUTH).json()["watch_folder_failed"] == []

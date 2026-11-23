@@ -60,3 +60,26 @@ def test_old_recordings_are_deleted_and_transcripts_kept(tmp_path: Path, monkeyp
         assert len(list(Path(store.meeting(kept)["folder"]).glob("*.flac"))) == 3
     assert privacy.remove_old_audio(store, now) == []  # nothing left to do
     store.close()
+
+
+def test_keeping_recordings_also_removes_snapshot_pictures_but_not_their_text(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    store = Store()
+    now = datetime(2026, 11, 23, 9, 0).astimezone()
+    folder = tmp_path / "meetings" / "call"
+    (folder / "snapshots").mkdir(parents=True)
+    (folder / "mic-000.flac").write_bytes(b"audio")
+    for picture in ("note-1.png", "note-1.thumb.jpg"):
+        (folder / "snapshots" / picture).write_bytes(b"picture")
+    started = (now - timedelta(days=40)).isoformat(timespec="seconds")
+    meeting = store.create_meeting("Call", started, folder)
+    store.update_meeting(meeting, status="ready")
+    note = store.add_note(meeting, 5.0, "snapshot", "Error 0x80070005")
+    store.set_setting("keep_audio_days", "30")
+
+    assert privacy.remove_old_audio(store, now) == [meeting]
+    assert not (folder / "snapshots").exists()
+    assert store.note(note)["text"] == "Error 0x80070005"
+    store.close()

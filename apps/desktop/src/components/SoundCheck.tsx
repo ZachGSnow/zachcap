@@ -38,8 +38,9 @@ function Side({
   );
 }
 
-/** Four seconds recorded exactly as a meeting would be, with a short Windows sound halfway:
- * shows both sides are heard before a call depends on it. Nothing is kept. */
+/** Four seconds recorded exactly as a meeting would be, with a short sound halfway, played
+ * where the computer's audio is recorded from (a quiet tone on a chosen output device): shows
+ * both sides are heard before a call depends on it. Nothing is kept. */
 export function SoundCheck({ onDone }: { onDone?: (result: SoundCheckResult) => void }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<SoundCheckResult | null>(null);
@@ -78,7 +79,7 @@ export function SoundCheck({ onDone }: { onDone?: (result: SoundCheckResult) => 
             fix={
               result.played
                 ? "The test sound wasn't heard: is Windows muted, or the sound going to a device that's off?"
-                : "Windows didn't play the test sound; check the volume and try again."
+                : "The test sound didn't play; check the volume and the device picked above, and try again."
             }
           />
           {result.errors.map((error) => (

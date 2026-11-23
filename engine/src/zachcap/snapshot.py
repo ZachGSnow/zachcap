@@ -19,22 +19,37 @@ from PIL import Image, ImageGrab
 
 FOLDER = "snapshots"
 MAX_TEXT = 4000  # characters of recognized text kept with the note
+THUMBNAIL = (480, 270)  # the notes list shows this; the full picture only in the full view
 DWMWA_EXTENDED_FRAME_BOUNDS = 9
-GW_HWNDNEXT = 2
+DWMWA_CLOAKED = 14
+WDA_NONE = 0
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PW_RENDERFULLCONTENT = 2
 PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+
+
+class SnapshotError(RuntimeError):
+    """Why there's nothing to capture, said to the user as is."""
 
 
 def image_path(meeting_folder: Path, note_id: int) -> Path:
     return meeting_folder / FOLDER / f"note-{note_id}.png"
 
 
+def thumbnail_path(meeting_folder: Path, note_id: int) -> Path:
+    return meeting_folder / FOLDER / f"note-{note_id}.thumb.jpg"
+
+
+def remove_pictures(meeting_folder: Path, note_id: int) -> None:
+    """A snapshot's picture and its thumbnail (the note keeps its text unless deleted)."""
+    for path in (image_path(meeting_folder, note_id), thumbnail_path(meeting_folder, note_id)):
+        path.unlink(missing_ok=True)
+
+
 def _user32():
     """user32 with handle-sized results: window handles and DPI contexts are pointers."""
     user32 = ctypes.windll.user32
     user32.GetForegroundWindow.restype = wintypes.HWND
-    user32.GetWindow.restype = wintypes.HWND
-    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
     user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
     user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
     return user32
@@ -51,31 +66,144 @@ def _ours() -> set[int]:
 
 def _window_pid(user32, hwnd) -> int:
     pid = wintypes.DWORD()
-    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
     return pid.value
 
 
-def _usable(user32, hwnd) -> bool:
-    return bool(
-        user32.IsWindowVisible(hwnd)
-        and not user32.IsIconic(hwnd)
-        and user32.GetWindowTextLengthW(hwnd) > 0
+def _title(user32, hwnd) -> str:
+    title = ctypes.create_unicode_buffer(512)
+    user32.GetWindowTextW(wintypes.HWND(hwnd), title, 512)
+    return title.value
+
+
+def _cloaked(hwnd) -> bool:
+    """Hidden by Windows though "visible": on another virtual desktop, or a suspended app."""
+    value = wintypes.DWORD()
+    found = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+        wintypes.HWND(hwnd), DWMWA_CLOAKED, ctypes.byref(value), ctypes.sizeof(value)
+    )
+    return found == 0 and value.value != 0
+
+
+def _protected(user32, hwnd) -> bool:
+    """The app asked Windows to keep it out of screenshots (a meeting app's "prevent screen
+    capture", a password manager): respected, never worked around."""
+    affinity = wintypes.DWORD()
+    return bool(user32.GetWindowDisplayAffinity(wintypes.HWND(hwnd), ctypes.byref(affinity))) and (
+        affinity.value != WDA_NONE
     )
 
 
-def call_window() -> tuple[int, str] | None:
-    """The window to capture: the one in front, or, when that is ZachCap itself (its camera
-    button was clicked), the next real window behind it. Returns (handle, title)."""
+def _shown(user32, hwnd) -> bool:
+    """A real window someone can see: visible, titled and not cloaked."""
+    return bool(
+        user32.IsWindowVisible(wintypes.HWND(hwnd))
+        and user32.GetWindowTextLengthW(wintypes.HWND(hwnd)) > 0
+        and not _cloaked(hwnd)
+    )
+
+
+def _process_path(pid: int) -> str:
+    """The program a process runs (its full path), or "" if Windows won't say."""
+    kernel32 = ctypes.WinDLL("kernel32")  # its own copy: handle-sized results set here only
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        size = wintypes.DWORD(1024)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return buffer.value
+        return ""
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _top_windows(user32) -> list[int]:
+    """Every top-level window, front to back."""
+    found: list[int] = []
+    callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(
+        lambda hwnd, _: found.append(hwnd) or True
+    )
+    user32.EnumWindows(callback, 0)
+    return found
+
+
+def _meeting_window(user32, ours: set[int]) -> tuple[int, str] | None:
+    """The front-most window of the meeting app holding the microphone now: a call app's
+    (Teams, Zoom) before a browser's, and a browser's only when it has just the one window
+    (any other could show anything). Raises SnapshotError when the call's windows are all
+    minimized, or it's in a browser with several windows."""
+    from . import calls
+
+    keys = calls.meeting_app_keys()
+    if not keys:
+        return None
+    found: list[tuple[int, str, bool]] = []  # front to back: handle, title, a browser's
+    minimized = False
+    for hwnd in _top_windows(user32):
+        if not hwnd or not _shown(user32, hwnd):
+            continue
+        pid = _window_pid(user32, hwnd)
+        if pid in ours:
+            continue
+        path = _process_path(pid)
+        key = next((key for key in keys if path and calls.key_matches(key, path)), None)
+        if key is None:
+            continue
+        if user32.IsIconic(wintypes.HWND(hwnd)):
+            minimized = True
+            continue
+        found.append((hwnd, _title(user32, hwnd), calls.is_browser(key)))
+    apps = [window for window in found if not window[2]]
+    if apps or len(found) == 1:
+        hwnd, title, _ = (apps or found)[0]
+        return hwnd, title
+    if found:
+        raise SnapshotError(
+            "The call is in a browser with several windows open: bring the call's window to "
+            "the front, then press Ctrl+Alt+S"
+        )
+    if minimized:
+        raise SnapshotError("The call window is minimized: restore it, then take the snapshot")
+    return None
+
+
+def call_window() -> tuple[int, str]:
+    """The window to capture. The one in front, when it isn't ZachCap (Ctrl+Alt+S from the
+    call, or from a window someone shared); when ZachCap is in front (its camera was
+    clicked), the window of the meeting app holding the microphone. Never just "the next
+    window behind", which could be an email. Returns (handle, title); raises SnapshotError
+    with the reason when there's nothing right to capture."""
     user32 = _user32()
     ours = _ours()
-    hwnd = user32.GetForegroundWindow()
-    while hwnd:
-        if _usable(user32, hwnd) and _window_pid(user32, hwnd) not in ours:
-            title = ctypes.create_unicode_buffer(512)
-            user32.GetWindowTextW(hwnd, title, 512)
-            return hwnd, title.value
-        hwnd = user32.GetWindow(hwnd, GW_HWNDNEXT)
-    return None
+    front = user32.GetForegroundWindow()
+    if (
+        front
+        and _window_pid(user32, front) not in ours
+        and _shown(user32, front)
+        and not user32.IsIconic(wintypes.HWND(front))
+    ):
+        chosen = front, _title(user32, front)
+    else:
+        chosen = _meeting_window(user32, ours)
+    if chosen is None:
+        raise SnapshotError(
+            "No call window to capture: bring the window you want to the front, then press "
+            "Ctrl+Alt+S"
+        )
+    if _protected(user32, chosen[0]):
+        raise SnapshotError(f"{chosen[1] or 'That window'} is protected from screen capture")
+    return chosen
 
 
 def _bounds(hwnd) -> tuple[int, int, int, int]:
@@ -132,8 +260,9 @@ def _print_window(hwnd, window: tuple[int, int, int, int]) -> Image.Image | None
 
 
 def grab(hwnd) -> Image.Image:
-    """The window's picture in real pixels on any display scaling: drawn by the window
-    itself, or read off the screen if it won't draw (or drew nothing)."""
+    """The window's picture in real pixels on any display scaling, drawn by the window
+    itself. Only when it won't draw (or draws nothing) and it is the window in front is the
+    screen read instead: for any other window that would capture whatever covers it."""
     user32 = _user32()
     previous = user32.SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2)
     try:
@@ -149,6 +278,8 @@ def grab(hwnd) -> Image.Image:
             return drawn.crop(
                 (left - outer[0], top - outer[1], right - outer[0], bottom - outer[1])
             )
+        if user32.GetForegroundWindow() != hwnd:
+            raise SnapshotError("That window didn't let itself be captured")
         return ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
     finally:
         if previous:
@@ -188,15 +319,16 @@ def read_text(image: Image.Image) -> str:
 
 
 def take(meeting_folder: Path, note_id: int) -> dict:
-    """Captures the call window into the meeting folder and reads its text."""
-    found = call_window()
-    if found is None:
-        raise RuntimeError("There's no window to capture")
-    hwnd, title = found
+    """Captures the call window into the meeting folder (the picture and a thumbnail for the
+    notes list) and reads its text."""
+    hwnd, title = call_window()
     image = grab(hwnd)
     path = image_path(meeting_folder, note_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path, optimize=True)
+    small = image.convert("RGB")
+    small.thumbnail(THUMBNAIL)
+    small.save(thumbnail_path(meeting_folder, note_id), quality=80)
     try:
         text = read_text(image)
     except Exception as exc:  # the picture is still worth keeping

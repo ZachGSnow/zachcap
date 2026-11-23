@@ -79,12 +79,26 @@ function WatchFolderRow({
   folder,
   failed,
   onSave,
+  onRetried,
 }: {
   folder: string;
-  failed: { name: string; error: string }[];
+  failed: Settings["watch_folder_failed"];
   onSave: (change: SettingsChange) => Promise<void>;
+  /** After Retry: Settings reads the list again. */
+  onRetried: () => Promise<void>;
 }) {
   const [asking, setAsking] = useState<{ path: string; count: number } | null>(null);
+  // Files that aren't recordings ZachCap can read wait for a change or Retry; files that
+  // couldn't be opened (in use, a share offline) are tried on every look anyway.
+  const broken = failed.filter((file) => !file.retrying);
+  const busy = failed.filter((file) => file.retrying);
+
+  const retry = () =>
+    attempt("Couldn't try them again", async () => {
+      await api("/api/watch-folder/retry", { method: "POST" });
+      toast.success(broken.length === 1 ? "It's tried again within a minute" : "They're tried again within a minute");
+      await onRetried();
+    });
   const returnFocus = useReturnFocus();
 
   const choose = () =>
@@ -135,13 +149,28 @@ function WatchFolderRow({
           </Button>
         )}
       </Row>
-      {failed.length > 0 && (
-        <p className="flex items-start gap-2 px-4 py-2.5 text-xs text-amber-700 dark:text-amber-300">
+      {broken.length > 0 && (
+        <div className="flex items-start gap-2 px-4 py-2.5 text-xs text-amber-700 dark:text-amber-300">
           <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1">
+            {broken.length === 1 ? "1 file" : `${broken.length} files`} couldn't be imported: {broken[0].name}
+            {broken[0].error ? ` (${broken[0].error})` : ""}
+            {broken.length > 1 ? " and others" : ""}. They're tried again if they change.
+          </span>
+          <Button size="sm" variant="outline" className="h-6 shrink-0 px-2 text-xs" onClick={() => void retry()}>
+            <RefreshCw className="size-3" />
+            Retry
+          </Button>
+        </div>
+      )}
+      {busy.length > 0 && (
+        <p className="flex items-start gap-2 px-4 py-2.5 text-xs text-muted-foreground">
+          <RefreshCw className="mt-0.5 size-3.5 shrink-0" />
           <span className="min-w-0">
-            {failed.length === 1 ? "1 file" : `${failed.length} files`} couldn't be imported: {failed[0].name}
-            {failed[0].error ? ` (${failed[0].error})` : ""}
-            {failed.length > 1 ? " and others" : ""}. They're tried again if they change.
+            {busy.length === 1 ? busy[0].name : `${busy.length} files, such as ${busy[0].name},`} can't be opened yet
+            {busy[0].error ? ` (${busy[0].error})` : ""}: open in another program, or the folder is offline. ZachCap
+            keeps trying, and imports {busy.length === 1 ? "it" : "them"} once {busy.length === 1 ? "it" : "they"} can
+            be read.
           </span>
         </p>
       )}
@@ -608,12 +637,15 @@ export function SettingsView() {
           <Row label="Start or stop recording" help="Works from anywhere, even with ZachCap in the tray.">
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Ctrl + Alt + R</kbd>
           </Row>
-          <Row label="Bookmark this moment" help="While recording, from anywhere. Summaries make sure to cover it.">
+          <Row
+            label="Bookmark this moment"
+            help="While recording, from anywhere. Summaries make sure to cover it. Held only while recording, so other apps can use these keys the rest of the time."
+          >
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Ctrl + Alt + B</kbd>
           </Row>
           <Row
             label="Snapshot the call"
-            help="While recording: a picture of the call window, and the text Windows reads in it (an error message, a hostname), saved with the meeting's notes."
+            help="While recording, from anywhere: a picture of the call window, and the text Windows reads in it (an error message, a hostname), saved with the meeting's notes. Held only while recording."
           >
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Ctrl + Alt + S</kbd>
           </Row>
@@ -683,10 +715,11 @@ export function SettingsView() {
             folder={settings?.watch_folder ?? ""}
             failed={settings?.watch_folder_failed ?? []}
             onSave={save}
+            onRetried={refresh}
           />
           <Row
             label="Keep recordings"
-            help="After this, a meeting's audio is deleted; its transcript, summary, notes and the voices it taught stay. It can't be played or reprocessed after."
+            help="After this, a meeting's audio and its snapshot pictures are deleted; its transcript, summary, notes, the text read in its snapshots and the voices it taught stay. It can't be played or reprocessed after."
           >
             <Select
               label="Keep recordings"
