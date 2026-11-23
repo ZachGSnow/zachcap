@@ -130,9 +130,12 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 224 tests: storage, matching, audio, capture and mixing, the recording watch, crash recovery, API, summaries and templates, Ask, redaction, work logs, snapshots, mentions, the watch folder
+uv run pytest -q             # 320 tests: storage, matching, audio, capture and mixing, the recording watch, crash recovery, API, summaries and templates, Ask, redaction, work logs, snapshots, mentions, the watch folder, dictation, shortcuts, tickets, clients, topics
 cd ..\apps\desktop
+npm test                     # the page's own logic: keys from a key press, times
 npx tsc --noEmit; npx vite build
+cd src-tauri
+cargo test --lib             # the shell: the dictation keys' hook, keys in both parsers
 ```
 
 Verified on a Windows 11 laptop with an RTX A500 (4 GB), November 2026:
