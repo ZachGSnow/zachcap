@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import apikeys, audio, transcript, voiceprint
+from . import apikeys, audio, transcript, vocabulary, voiceprint
 from .store import Store
 
 MIN_SPEAKER_SECONDS = 1.5  # shorter clusters are usually noise or cross-talk
@@ -36,7 +36,8 @@ def process(store: Store, meeting_id: int, log: Log = print) -> str:
     try:
         tracks = _load_tracks(Path(meeting["folder"]), log)
         duration = max(len(a) for a in tracks.values()) / audio.RATE
-        words = _transcribe(store, tracks, duration, log)
+        vocab = vocabulary.parse(store.setting("vocabulary"))
+        words = _transcribe(store, tracks, duration, log, vocab)
         diarized, separated = _diarize(tracks, words, log)
 
         utterances = {
@@ -56,9 +57,11 @@ def process(store: Store, meeting_id: int, log: Log = print) -> str:
                 return "deleted"
             store.clear_results(meeting_id)
             if separated:
-                _store_results(store, meeting_id, utterances, diarized, EMBEDDING_MODEL)
+                _store_results(
+                    store, meeting_id, utterances, diarized, EMBEDDING_MODEL, vocab.correct
+                )
             else:
-                _store_unseparated(store, meeting_id, utterances)
+                _store_unseparated(store, meeting_id, utterances, vocab.correct)
             store.update_meeting(meeting_id, duration=round(duration, 3))
             status = store.refresh_status(meeting_id)
         done = f"done in {time.perf_counter() - started:.0f} s"
@@ -71,16 +74,23 @@ def process(store: Store, meeting_id: int, log: Log = print) -> str:
         raise
 
 
-def _transcribe(store: Store, tracks: dict, duration: float, log: Log) -> dict:
+def _transcribe(
+    store: Store, tracks: dict, duration: float, log: Log, vocab: vocabulary.Vocabulary
+) -> dict:
     from .asr import Transcriber
 
     log(f"transcribing {duration / 60:.1f} min of audio")
     started = time.perf_counter()
+    # The words to know, then everyone the user has named, so their names come out right.
+    names = [p["name"] for p in store.people() if p["name"].lower() not in {"you", "me"}]
+    hotwords = vocab.hotwords(names)
     asr = Transcriber()
     try:
         language = store.setting("language", "en")
         language = None if language == "auto" else language
-        words = {name: asr.words(a, language=language) for name, a in tracks.items()}
+        words = {
+            name: asr.words(a, language=language, hotwords=hotwords) for name, a in tracks.items()
+        }
     finally:
         asr.close()  # frees the GPU for the speaker model, even after an error
     log(
@@ -172,7 +182,9 @@ def _load_tracks(folder: Path, log: Log) -> dict[str, np.ndarray]:
     return tracks
 
 
-def _store_unseparated(store: Store, meeting_id: int, utterances) -> None:
+def _store_unseparated(
+    store: Store, meeting_id: int, utterances, fix: Callable[[str], str] = str
+) -> None:
     """Without speaker separation: the mic is you, the computer audio is one "Call audio" voice."""
     me = store.me()
     rows = []
@@ -188,7 +200,14 @@ def _store_unseparated(store: Store, meeting_id: int, utterances) -> None:
             label = "Call audio"
         speaker_id = store.add_speaker(meeting_id, track, label, None, seconds, None, match)
         rows += [
-            (speaker_id, track, round(u.start, 2), round(u.end, 2), u.text, round(u.confidence, 3))
+            (
+                speaker_id,
+                track,
+                round(u.start, 2),
+                round(u.end, 2),
+                fix(u.text),
+                round(u.confidence, 3),
+            )
             for u in utts
         ]
     store.add_segments(meeting_id, sorted(rows, key=lambda r: r[2]))
@@ -199,7 +218,9 @@ def _sample_score(seconds: float) -> float:
     return seconds if seconds <= 10 else 10 - (seconds - 10) * 0.1
 
 
-def _store_results(store: Store, meeting_id: int, utterances, diarized, model: str) -> None:
+def _store_results(
+    store: Store, meeting_id: int, utterances, diarized, model: str, fix: Callable[[str], str] = str
+) -> None:
     stats: dict[SpeakerKey, dict] = {}
     for track, utts in utterances.items():
         for u in utts:
@@ -266,7 +287,7 @@ def _store_results(store: Store, meeting_id: int, utterances, diarized, model: s
             track,
             round(u.start, 2),
             round(u.end, 2),
-            u.text,
+            fix(u.text),
             round(u.confidence, 3),
         )
         for track, utts in utterances.items()

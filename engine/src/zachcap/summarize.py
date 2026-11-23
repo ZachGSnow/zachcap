@@ -8,7 +8,7 @@ from typing import Literal
 import anthropic
 from pydantic import BaseModel, Field
 
-from . import apikeys
+from . import apikeys, vocabulary
 from .store import Store
 
 # Model id -> (label, USD per million input tokens, per million output tokens).
@@ -69,6 +69,14 @@ class Summary(BaseModel):
     )
     open_questions: list[str]
     topics: list[Topic]
+
+
+def spellings(store: Store) -> str:
+    """The user's words to know, for prompts, so names and jargon are spelled their way."""
+    terms = vocabulary.parse(store.setting("vocabulary")).terms
+    return (
+        f"\n\nSpell these names and terms exactly as written: {', '.join(terms)}." if terms else ""
+    )
 
 
 def to_seconds(stamp: str | None) -> float | None:
@@ -132,7 +140,8 @@ def ask(store: Store, meeting_id: int, question: str) -> dict:
                 "type": "text",
                 "text": ASK_SYSTEM.format(
                     me=store.me()["name"], title=meeting["title"], transcript=text
-                ),
+                )
+                + spellings(store),
                 "cache_control": {"type": "ephemeral"},
             }
         ],
@@ -184,7 +193,7 @@ def summarize(store: Store, meeting_id: int) -> dict:
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
         output_config={"effort": "medium"},
-        system=SYSTEM.format(me=store.me()["name"]),
+        system=SYSTEM.format(me=store.me()["name"]) + spellings(store),
         messages=[
             {
                 "role": "user",
