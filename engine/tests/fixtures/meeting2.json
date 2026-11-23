@@ -1,0 +1,19 @@
+{
+  "title": "Helpdesk weekly review",
+  "notes": "Synthetic in-room meeting: You and Mark share the laptop mic (mic track); Dana is remote (system track). Same voices as meeting1, so names learned there should carry over.",
+  "lines": [
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "Alright, Mark is here in the room with me today, and Dana is joining remotely. Let's go through the ticket numbers for the week." },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "mic", "text": "We closed about forty tickets. Most of them were password resets and printer problems on the second floor." },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "The printer issue should be fixed now. I replaced the driver package on the print server yesterday afternoon." },
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "Good. Did anyone call back about the laptop that would not join the wireless network?" },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "mic", "text": "Yes. Its certificate had expired. I renewed it and the laptop connected right away." },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "We should check the other laptops from that same order. They were all set up on the same day, so they might expire together." },
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "Good catch. Dana, can you pull a list of certificates that expire in the next thirty days?" },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "Sure, I will send that list on Monday." },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "mic", "text": "I can renew whatever is on the list once Dana sends it over." },
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "Great. One last thing. The new hire starts on Wednesday and still needs a laptop and an account." },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "mic", "text": "The laptop is imaged and ready. I just need the account created before I hand it over." },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "I will create the account tomorrow and add it to the right groups." },
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "Perfect. Thanks, both of you. That is everything for this week." }
+  ]
+}

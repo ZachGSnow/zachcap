@@ -1,0 +1,500 @@
+"""Local HTTP API for the desktop app.
+
+Listens on 127.0.0.1 only. The Tauri shell picks the port and a random token
+at launch; every request must carry the token (as a Bearer header, or a
+``token`` query parameter for <audio> elements, which can't send headers).
+GPU work runs on a single background worker so jobs never compete for memory.
+"""
+
+from __future__ import annotations
+
+import io
+import queue
+import secrets as pysecrets
+import shutil
+import threading
+import traceback
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel
+
+from . import __version__, apikeys, audio, paths, pipeline
+from .store import Store
+
+ALLOWED_ORIGINS = ["http://tauri.localhost", "tauri://localhost", "http://localhost:1420"]
+LANGUAGES = {"auto": "Detect automatically", "en": "English", "es": "Spanish", "fr": "French",
+             "de": "German", "pt": "Portuguese", "it": "Italian", "nl": "Dutch"}  # fmt: skip
+
+
+class NameBody(BaseModel):
+    name: str
+
+
+class TitleBody(BaseModel):
+    title: str
+
+
+class QuestionBody(BaseModel):
+    question: str
+
+
+class StatusBody(BaseModel):
+    status: str
+
+
+class RecordBody(BaseModel):
+    title: str | None = None
+
+
+class KeyBody(BaseModel):
+    value: str
+
+
+class ImportBody(BaseModel):
+    path: str
+    title: str | None = None
+    start: str | None = None
+    end: str | None = None
+
+
+class SettingsBody(BaseModel):
+    summary_model: str | None = None
+    language: str | None = None
+    mic_device: str | None = None
+    output_device: str | None = None
+
+
+class Worker:
+    """Runs processing jobs one at a time and remembers the latest message per meeting."""
+
+    def __init__(self) -> None:
+        self.jobs: queue.Queue[int] = queue.Queue()
+        self.progress: dict[int, str] = {}
+        threading.Thread(target=self._run, name="zachcap-worker", daemon=True).start()
+
+    def submit(self, meeting_id: int) -> None:
+        self.progress[meeting_id] = "queued"
+        self.jobs.put(meeting_id)
+
+    def _run(self) -> None:
+        while True:
+            meeting_id = self.jobs.get()
+            store = Store()
+            try:
+                pipeline.process(
+                    store,
+                    meeting_id,
+                    log=lambda msg, m=meeting_id: self.progress.__setitem__(m, msg),
+                )
+                self.progress.pop(meeting_id, None)
+            except Exception as exc:  # surfaced to the UI, full trace to the console
+                traceback.print_exc()
+                self.progress[meeting_id] = f"failed: {exc}"
+            finally:
+                store.close()
+
+
+def create_app(token: str) -> FastAPI:
+    app = FastAPI(title="ZachCap engine", version=__version__)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    worker = Worker()
+    recording: dict = {}
+    lock = threading.Lock()
+
+    def authorized(request: Request) -> None:
+        supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        supplied = supplied or request.query_params.get("token", "")
+        if not pysecrets.compare_digest(supplied, token):
+            raise HTTPException(status_code=401, detail="Missing or wrong token")
+
+    def db():
+        store = Store()
+        try:
+            yield store
+        finally:
+            store.close()
+
+    def meeting_or_404(store: Store, meeting_id: int):
+        meeting = store.meeting(meeting_id)
+        if meeting is None:
+            raise HTTPException(status_code=404, detail="No such meeting")
+        return meeting
+
+    auth = [Depends(authorized)]
+
+    # app status ---------------------------------------------------------------
+
+    @app.get("/api/health", dependencies=auth)
+    def health():
+        return {"ok": True, "version": __version__, "data": str(paths.home())}
+
+    @app.get("/api/stats", dependencies=auth)
+    def stats(store: Store = Depends(db)):
+        return store.stats()
+
+    # meetings -----------------------------------------------------------------
+
+    @app.get("/api/meetings", dependencies=auth)
+    def list_meetings(store: Store = Depends(db)):
+        participants = store.participants()
+        return [
+            {
+                **dict(m),
+                "progress": worker.progress.get(m["id"]),
+                "participants": participants.get(m["id"], []),
+            }
+            for m in store.meetings()
+        ]
+
+    @app.get("/api/meetings/{meeting_id}", dependencies=auth)
+    def get_meeting(meeting_id: int, store: Store = Depends(db)):
+        meeting = meeting_or_404(store, meeting_id)
+        speakers = [
+            {k: s[k] for k in s.keys() if k != "embedding"} for s in store.speakers(meeting_id)
+        ]
+        return {
+            "meeting": {**dict(meeting), "progress": worker.progress.get(meeting_id)},
+            "speakers": speakers,
+            "segments": [dict(row) for row in store.transcript(meeting_id)],
+            "summary": store.summary(meeting_id),
+            "talk_time": [dict(row) for row in store.talk_time(meeting_id)],
+            "action_items": [dict(row) for row in store.action_items(meeting_id=meeting_id)],
+            "me": store.me()["name"],
+        }
+
+    @app.patch("/api/meetings/{meeting_id}", dependencies=auth)
+    def rename_meeting(meeting_id: int, body: TitleBody, store: Store = Depends(db)):
+        meeting_or_404(store, meeting_id)
+        if not body.title.strip():
+            raise HTTPException(status_code=400, detail="The title can't be empty")
+        store.update_meeting(meeting_id, title=body.title.strip())
+        return {"title": body.title.strip()}
+
+    @app.delete("/api/meetings/{meeting_id}", dependencies=auth)
+    def delete_meeting(meeting_id: int, store: Store = Depends(db)):
+        folder = Path(meeting_or_404(store, meeting_id)["folder"]).resolve()
+        store.delete_meeting(meeting_id)
+        # Only remove audio ZachCap recorded or imported itself, never a folder elsewhere.
+        if folder.is_relative_to(paths.meetings_dir().resolve()) and folder.exists():
+            shutil.rmtree(folder, ignore_errors=True)
+        return {"deleted": meeting_id}
+
+    @app.post("/api/meetings/{meeting_id}/summary", dependencies=auth)
+    def create_summary(meeting_id: int, store: Store = Depends(db)):
+        from .summarize import summarize
+
+        meeting_or_404(store, meeting_id)
+        try:
+            summarize(store, meeting_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # network, auth, rate limits: show the reason in the app
+            raise HTTPException(status_code=502, detail=f"Claude request failed: {exc}") from exc
+        return store.summary(meeting_id)
+
+    @app.post("/api/meetings/{meeting_id}/ask", dependencies=auth)
+    def ask(meeting_id: int, body: QuestionBody, store: Store = Depends(db)):
+        from .summarize import ask as ask_claude
+
+        meeting_or_404(store, meeting_id)
+        if not body.question.strip():
+            raise HTTPException(status_code=400, detail="Ask a question first")
+        try:
+            return ask_claude(store, meeting_id, body.question.strip())
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Claude request failed: {exc}") from exc
+
+    @app.post("/api/meetings/{meeting_id}/process", dependencies=auth)
+    def process(meeting_id: int, store: Store = Depends(db)):
+        meeting_or_404(store, meeting_id)
+        worker.submit(meeting_id)
+        return {"queued": True}
+
+    @app.post("/api/meetings/{meeting_id}/speakers/{speaker_id}/name", dependencies=auth)
+    def name(meeting_id: int, speaker_id: int, body: NameBody, store: Store = Depends(db)):
+        meeting_or_404(store, meeting_id)
+        if not body.name.strip():
+            raise HTTPException(status_code=400, detail="The name can't be empty")
+        pipeline.name_speaker(store, meeting_id, str(speaker_id), body.name.strip())
+        return {"status": store.meeting(meeting_id)["status"]}
+
+    @app.post("/api/meetings/{meeting_id}/confirm", dependencies=auth)
+    def confirm(meeting_id: int, store: Store = Depends(db)):
+        meeting_or_404(store, meeting_id)
+        return {"confirmed": pipeline.confirm_matches(store, meeting_id)}
+
+    @app.get("/api/meetings/{meeting_id}/audio", dependencies=auth)
+    def meeting_audio(meeting_id: int, track: str = "mix", store: Store = Depends(db)):
+        if track not in ("mix", "mic", "system"):
+            raise HTTPException(status_code=400, detail="track is mix, mic or system")
+        folder = Path(meeting_or_404(store, meeting_id)["folder"])
+        return FileResponse(_playback_file(folder, track), media_type="audio/flac")
+
+    @app.get("/api/meetings/{meeting_id}/speakers/{speaker_id}/sample", dependencies=auth)
+    def speaker_sample(meeting_id: int, speaker_id: int, store: Store = Depends(db)):
+        folder = Path(meeting_or_404(store, meeting_id)["folder"])
+        speaker = store.speaker(speaker_id)
+        if (
+            speaker is None
+            or speaker["meeting_id"] != meeting_id
+            or speaker["sample_start"] is None
+        ):
+            raise HTTPException(status_code=404, detail="No sample for that speaker")
+        track = audio.load_track(folder, speaker["track"])
+        if track is None:
+            raise HTTPException(status_code=404, detail="Audio missing")
+        clip = audio.clip(track, speaker["sample_start"], speaker["sample_end"])
+        buffer = io.BytesIO()
+        sf.write(buffer, clip, audio.RATE, format="WAV", subtype="PCM_16")
+        return Response(buffer.getvalue(), media_type="audio/wav")
+
+    @app.post("/api/segments/{segment_id}/speaker", dependencies=auth)
+    def reassign_segment(segment_id: int, body: NameBody, store: Store = Depends(db)):
+        if not body.name.strip():
+            raise HTTPException(status_code=400, detail="The name can't be empty")
+        try:
+            store.reassign_segment(segment_id, body.name.strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"ok": True}
+
+    @app.post("/api/import", dependencies=auth)
+    def import_recording(body: ImportBody, store: Store = Depends(db)):
+        source = Path(body.path)
+        if not source.is_file():
+            raise HTTPException(status_code=400, detail="That file doesn't exist")
+        folder = paths.meetings_dir() / f"{datetime.now():%Y-%m-%d_%H%M%S}-import"
+        folder.mkdir(parents=True)
+        try:
+            seconds = audio.import_media(source, folder / "system.flac", body.start, body.end)
+        except Exception as exc:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise HTTPException(status_code=400, detail=f"Couldn't read the audio: {exc}") from exc
+        meeting_id = store.create_meeting(
+            body.title or source.stem,
+            audio.recorded_at(source).isoformat(timespec="seconds"),
+            folder,
+            duration=round(seconds, 3),
+        )
+        worker.submit(meeting_id)
+        return {"meeting_id": meeting_id}
+
+    # action items ---------------------------------------------------------------
+
+    @app.get("/api/actions", dependencies=auth)
+    def actions(status: str = "all", store: Store = Depends(db)):
+        return {"me": store.me()["name"], "items": [dict(r) for r in store.action_items(status)]}
+
+    @app.patch("/api/actions/{item_id}", dependencies=auth)
+    def set_action(item_id: int, body: StatusBody, store: Store = Depends(db)):
+        if body.status not in ("open", "done"):
+            raise HTTPException(status_code=400, detail="status is open or done")
+        store.set_action_status(item_id, body.status)
+        return {"id": item_id, "status": body.status}
+
+    # people -------------------------------------------------------------------
+
+    @app.get("/api/people", dependencies=auth)
+    def people(store: Store = Depends(db)):
+        return [dict(p) for p in store.people_stats()]
+
+    @app.patch("/api/people/{person_id}", dependencies=auth)
+    def rename_person(person_id: int, body: NameBody, store: Store = Depends(db)):
+        if not body.name.strip():
+            raise HTTPException(status_code=400, detail="The name can't be empty")
+        return {"id": store.rename_person(person_id, body.name.strip())}
+
+    @app.delete("/api/people/{person_id}/voice", dependencies=auth)
+    def forget_voice(person_id: int, store: Store = Depends(db)):
+        store.forget_voice(person_id)
+        return {"ok": True}
+
+    @app.delete("/api/people/{person_id}", dependencies=auth)
+    def delete_person(person_id: int, store: Store = Depends(db)):
+        store.delete_person(person_id)
+        return {"ok": True}
+
+    @app.get("/api/search", dependencies=auth)
+    def search(q: str, store: Store = Depends(db)):
+        try:
+            return [dict(hit) for hit in store.search(q)]
+        except Exception:  # FTS syntax errors from half-typed queries
+            return []
+
+    # recording ----------------------------------------------------------------
+
+    @app.get("/api/record", dependencies=auth)
+    def record_status():
+        recorder = recording.get("recorder")
+        if recorder is None:
+            return {"recording": False}
+        return {
+            "recording": True,
+            "title": recording.get("title"),
+            "elapsed": round(recorder.elapsed, 1),
+            "levels": recorder.levels(),
+            "devices": {name: t.device["name"] for name, t in recorder.tracks.items()},
+        }
+
+    @app.post("/api/record/start", dependencies=auth)
+    def record_start(body: RecordBody, store: Store = Depends(db)):
+        from .capture import Recorder
+
+        with lock:
+            if recording.get("recorder") is not None:
+                raise HTTPException(status_code=409, detail="Already recording")
+            folder = paths.meetings_dir() / datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            recorder = Recorder(
+                folder,
+                mic_name=store.setting("mic_device") or None,
+                output_name=store.setting("output_device") or None,
+            )
+            try:
+                recorder.start()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500, detail=f"Couldn't start recording: {exc}"
+                ) from exc
+            recording.update(recorder=recorder, folder=folder, title=body.title)
+        return {"recording": True}
+
+    @app.post("/api/record/stop", dependencies=auth)
+    def record_stop(store: Store = Depends(db)):
+        with lock:
+            recorder = recording.pop("recorder", None)
+            if recorder is None:
+                raise HTTPException(status_code=409, detail="Not recording")
+            info = recorder.stop()
+            title = recording.pop("title", None) or f"Meeting {datetime.now():%b %d %H:%M}"
+            meeting_id = store.create_meeting(
+                title, info["started_at"], recording.pop("folder"), duration=info["duration"]
+            )
+        worker.submit(meeting_id)
+        return {"meeting_id": meeting_id}
+
+    @app.get("/api/call", dependencies=auth)
+    def call():
+        """Apps using the microphone right now, so the app can offer to record."""
+        from .calls import apps_using_mic
+
+        try:
+            return {"apps": apps_using_mic()}
+        except OSError:
+            return {"apps": []}
+
+    @app.get("/api/devices", dependencies=auth)
+    def devices():
+        from .capture import list_devices
+
+        return list_devices()
+
+    # keys and settings ------------------------------------------------------------
+
+    @app.get("/api/keys", dependencies=auth)
+    def key_status():
+        return {name: apikeys.source(name) for name in apikeys.KEYS}
+
+    @app.put("/api/keys/{name}", dependencies=auth)
+    def key_set(name: str, body: KeyBody):
+        if name not in apikeys.KEYS or not body.value.strip():
+            raise HTTPException(status_code=400, detail="Unknown key or empty value")
+        apikeys.store(name, body.value.strip())
+        return {name: apikeys.source(name)}
+
+    @app.get("/api/settings", dependencies=auth)
+    def get_settings(store: Store = Depends(db)):
+        from .summarize import MODELS, summary_model
+
+        return {
+            "summary_model": summary_model(store),
+            "summary_models": [
+                {"id": model, "label": label, "input_usd": per_in, "output_usd": per_out}
+                for model, (label, per_in, per_out) in MODELS.items()
+            ],
+            "language": store.setting("language", "en"),
+            "languages": [{"id": k, "label": v} for k, v in LANGUAGES.items()],
+            "mic_device": store.setting("mic_device", ""),
+            "output_device": store.setting("output_device", ""),
+            "me": dict(store.me()),
+        }
+
+    @app.put("/api/settings", dependencies=auth)
+    def put_settings(body: SettingsBody, store: Store = Depends(db)):
+        from .summarize import MODELS
+
+        if body.summary_model is not None:
+            if body.summary_model not in MODELS:
+                raise HTTPException(status_code=400, detail="Unknown summary model")
+            store.set_setting("summary_model", body.summary_model)
+        if body.language is not None:
+            if body.language not in LANGUAGES:
+                raise HTTPException(status_code=400, detail="Unknown language")
+            store.set_setting("language", body.language)
+        for key in ("mic_device", "output_device"):
+            value = getattr(body, key)
+            if value is not None:
+                store.set_setting(key, value)
+        return get_settings(store)
+
+    return app
+
+
+def _playback_file(folder: Path, track: str = "mix") -> Path:
+    """16 kHz mono audio for the player, built once and cached next to the recording.
+
+    "mix" is everything; "mic" and "system" let the app isolate one side of the call.
+    """
+    target = folder / ("playback.flac" if track == "mix" else f"playback-{track}.flac")
+    if not target.exists():
+        names = ("mic", "system") if track == "mix" else (track,)
+        tracks = [t for t in (audio.load_track(folder, n) for n in names) if t is not None]
+        if not tracks:
+            raise HTTPException(status_code=404, detail="Audio missing")
+        mix = np.zeros(max(len(t) for t in tracks), np.float32)
+        for t in tracks:
+            mix[: len(t)] += t
+        peak = float(np.abs(mix).max()) or 1.0
+        sf.write(target, mix / max(peak, 1.0), audio.RATE, subtype="PCM_16")
+    return target
+
+
+def _exit_with_parent(pid: int) -> None:
+    """Exit when the desktop app's process ends, even if it couldn't stop us."""
+    import ctypes
+    import os
+
+    synchronize, infinite = 0x00100000, 0xFFFFFFFF
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        return
+    kernel32.WaitForSingleObject(handle, infinite)
+    os._exit(0)
+
+
+def serve(port: int, token: str) -> None:
+    import logging
+    import os
+
+    import uvicorn
+
+    parent = os.environ.get("ZACHCAP_PARENT_PID")
+    if parent and parent.isdigit():
+        threading.Thread(target=_exit_with_parent, args=(int(parent),), daemon=True).start()
+    # The player cancels audio requests whenever it seeks or switches tracks; on Windows
+    # asyncio logs each one as a ConnectionResetError traceback. They are harmless.
+    logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+    uvicorn.run(create_app(token), host="127.0.0.1", port=port, log_level="warning")

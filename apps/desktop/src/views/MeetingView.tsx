@@ -1,0 +1,476 @@
+import {
+  ArrowLeft,
+  Check,
+  ClipboardCopy,
+  Loader2,
+  MoreHorizontal,
+  Pencil,
+  RotateCw,
+  Sparkles,
+  Trash2,
+  UserRoundSearch,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
+
+import { AskPanel } from "@/components/AskPanel";
+import { PlayerBar, type PlayerState } from "@/components/PlayerBar";
+import { SummaryPanel } from "@/components/SummaryPanel";
+import { NamePrompt, Transcript, WhoIsThis } from "@/components/Transcript";
+import { AvatarStack, SpeakerLanes, TalkTimeBars } from "@/components/Visuals";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { usePoll } from "@/hooks/usePoll";
+import { api, mediaUrl, type MeetingDetail, type Person, type Speaker } from "@/lib/engine";
+import { clock, colorMap, minutes, when } from "@/lib/format";
+import { StatusBadge } from "@/views/MeetingsView";
+
+type Track = "mix" | "mic" | "system";
+const TRACK_LABEL: Record<Track, string> = { mix: "Everyone", mic: "Your mic only", system: "Call audio only" };
+
+export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBack: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const { data, refresh } = usePoll(() => api<MeetingDetail>(`/api/meetings/${id}`), busy ? 1500 : 0, id);
+  const { data: people = [], refresh: refreshPeople } = usePoll(() => api<Person[]>("/api/people"), 0);
+  const audio = useRef<HTMLAudioElement>(null);
+  const [player, setPlayer] = useState<PlayerState>({ playing: false, time: 0, duration: 0, rate: 1 });
+  const [solo, setSolo] = useState<string | null>(null);
+  const [tab, setTab] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [title, setTitle] = useState("");
+  const [renaming, setRenaming] = useState<Speaker | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const pendingSeek = useRef<{ time: number; play: boolean } | null>(at != null ? { time: at, play: false } : null);
+
+  const meeting = data?.meeting;
+  const processing = meeting?.status === "processing" || meeting?.progress === "queued";
+  useEffect(() => setBusy(processing ?? false), [processing]);
+  useEffect(() => {
+    if (data && tab === null) setTab(data.summary ? "summary" : "transcript");
+  }, [data, tab]);
+
+  const refreshAll = useCallback(() => void Promise.all([refresh(), refreshPeople()]), [refresh, refreshPeople]);
+
+  const colorOf = useMemo(
+    () => colorMap((data?.talk_time ?? []).map((t) => t.speaker), data?.me ?? "You"),
+    [data?.talk_time, data?.me],
+  );
+
+  // Audio isolation: play the soloed person's own track and skip everyone else's lines.
+  const soloSegments = useMemo(
+    () => (solo ? (data?.segments ?? []).filter((s) => s.speaker === solo) : []),
+    [solo, data?.segments],
+  );
+  const track: Track = useMemo(() => {
+    if (!solo || soloSegments.length === 0) return "mix";
+    const tracks = new Set(soloSegments.map((s) => s.track));
+    return tracks.size === 1 ? [...tracks][0] : "mix";
+  }, [solo, soloSegments]);
+  const src = data ? mediaUrl(`/api/meetings/${id}/audio${track === "mix" ? "" : `?track=${track}`}`) : undefined;
+
+  // The last position and play state, kept outside React state: when the source switches
+  // between tracks the element resets to 0 before any effect runs.
+  const last = useRef({ time: 0, playing: false });
+  useEffect(() => {
+    if (!src) return;
+    pendingSeek.current = pendingSeek.current ?? { time: last.current.time, play: last.current.playing };
+  }, [src]);
+
+  const sync = (element: HTMLAudioElement) => {
+    if (element.readyState > 0) last.current = { time: element.currentTime, playing: !element.paused };
+    setPlayer({
+      playing: !element.paused,
+      time: element.currentTime,
+      duration: Number.isFinite(element.duration) ? element.duration : (meeting?.duration ?? 0),
+      rate: element.playbackRate,
+    });
+  };
+
+  const onTime = (element: HTMLAudioElement) => {
+    if (solo && !element.paused && soloSegments.length) {
+      const t = element.currentTime;
+      const inside = soloSegments.some((s) => s.start - 0.05 <= t && t < s.end);
+      if (!inside) {
+        const next = soloSegments.find((s) => s.start > t);
+        if (next) element.currentTime = next.start;
+        else element.pause();
+      }
+    }
+    sync(element);
+  };
+
+  const seek = useCallback((seconds: number) => {
+    const element = audio.current;
+    if (!element) return;
+    element.currentTime = seconds;
+    void element.play();
+  }, []);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (event.code !== "Space" || ["INPUT", "TEXTAREA", "BUTTON"].includes(target.tagName)) return;
+      event.preventDefault();
+      const element = audio.current;
+      if (!element) return;
+      if (element.paused) void element.play();
+      else element.pause();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const reprocess = async () => {
+    await api(`/api/meetings/${id}/process`, { method: "POST" });
+    setBusy(true);
+    await refresh();
+  };
+
+  const summarize = async () => {
+    setTab("summary");
+    const toastId = toast.loading("Summarizing with Claude...");
+    try {
+      await api(`/api/meetings/${id}/summary`, { method: "POST" });
+      toast.success("Summary ready", { id: toastId });
+      await refresh();
+    } catch (error) {
+      toast.error("Couldn't create the summary", { id: toastId, description: String(error) });
+    }
+  };
+
+  const saveTitle = async () => {
+    setEditingTitle(false);
+    if (!title.trim() || title.trim() === meeting?.title) return;
+    await api(`/api/meetings/${id}`, { method: "PATCH", json: { title: title.trim() } });
+    await refresh();
+  };
+
+  const copyTranscript = () => {
+    const text = (data?.segments ?? []).map((s) => `[${clock(s.start)}] ${s.speaker}: ${s.text}`).join("\n");
+    void navigator.clipboard.writeText(`${meeting?.title}\n\n${text}`);
+    toast.success("Transcript copied");
+  };
+
+  const remove = async () => {
+    await api(`/api/meetings/${id}`, { method: "DELETE" });
+    toast.success("Meeting deleted", { description: "Its audio, transcript and the voice samples it taught were removed." });
+    onBack();
+  };
+
+  const nameSpeaker = async (speaker: Speaker, name: string) => {
+    await api(`/api/meetings/${id}/speakers/${speaker.id}/name`, { method: "POST", json: { name } });
+    toast.success(`${speaker.display_name} is now ${name}`);
+    refreshAll();
+  };
+
+  const confirmAll = async () => {
+    const { confirmed } = await api<{ confirmed: number }>(`/api/meetings/${id}/confirm`, { method: "POST" });
+    toast.success(`Confirmed ${confirmed} speaker${confirmed === 1 ? "" : "s"}`);
+    refreshAll();
+  };
+
+  if (!data || !meeting) {
+    return (
+      <div className="space-y-3 p-8">
+        <Skeleton className="h-7 w-72" />
+        <Skeleton className="h-4 w-48" />
+        <Skeleton className="mt-6 h-32 w-full" />
+        <Skeleton className="h-64 w-full" />
+      </div>
+    );
+  }
+
+  const unnamed = data.speakers.filter((s) => s.status === "unknown" || s.status === "suggested");
+  const current = data.segments.findLast((s) => s.start <= player.time + 0.05);
+  const named = data.talk_time.map((t) => t.speaker);
+  const participants = named.filter((name) => !/^Speaker \d+|Call audio|Unknown/.test(name));
+  const duration = meeting.duration ?? data.segments.at(-1)?.end ?? 0;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <header className="flex select-none items-start gap-3 border-b px-6 py-4">
+        <Button size="icon" variant="ghost" className="mt-0.5 size-8" onClick={onBack} aria-label="Back">
+          <ArrowLeft className="size-4" />
+        </Button>
+        <div className="min-w-0 flex-1">
+          {editingTitle ? (
+            <Input
+              autoFocus
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              onBlur={() => void saveTitle()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void saveTitle();
+                if (event.key === "Escape") setEditingTitle(false);
+              }}
+              className="h-8 max-w-lg font-heading text-lg font-semibold"
+            />
+          ) : (
+            <button
+              onClick={() => {
+                setTitle(meeting.title);
+                setEditingTitle(true);
+              }}
+              className="group flex max-w-full items-center gap-2 text-left"
+              title="Rename"
+            >
+              <h1 className="truncate font-heading text-lg font-semibold tracking-tight">{meeting.title}</h1>
+              <Pencil className="size-3.5 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100" />
+            </button>
+          )}
+          <div className="mt-1 flex items-center gap-3 text-sm text-muted-foreground">
+            <span>
+              {when(meeting.started_at)}
+              {duration ? ` \u00b7 ${minutes(duration)}` : ""}
+              {named.length ? ` \u00b7 ${named.length} speaker${named.length === 1 ? "" : "s"}` : ""}
+            </span>
+            {participants.length > 0 && <AvatarStack names={participants} colorOf={colorOf} max={5} />}
+          </div>
+        </div>
+        <StatusBadge meeting={meeting} />
+        {!data.summary && data.segments.length > 0 && !processing && (
+          <Button size="sm" onClick={() => void summarize()}>
+            <Sparkles className="size-3.5" />
+            Summarize
+          </Button>
+        )}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="icon" variant="outline" className="size-8" aria-label="More">
+              <MoreHorizontal className="size-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuItem disabled={processing} onSelect={() => void reprocess()}>
+              <RotateCw className="size-4" />
+              Reprocess audio
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={copyTranscript}>
+              <ClipboardCopy className="size-4" />
+              Copy transcript
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onSelect={() => setConfirmDelete(true)}>
+              <Trash2 className="size-4" />
+              Delete meeting
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </header>
+
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="mx-auto max-w-4xl px-6 py-5">
+          {processing && (
+            <div className="mb-4 flex items-center gap-2 rounded-xl border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              {meeting.progress === "queued" ? "Waiting for the GPU..." : (meeting.progress ?? "Working...")}
+            </div>
+          )}
+          {meeting.status === "failed" && (
+            <div className="mb-4 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
+              Processing failed{meeting.progress ? `: ${meeting.progress.replace(/^failed: /, "")}` : "."}
+            </div>
+          )}
+
+          {data.segments.length > 0 && (
+            <SpeakerLanes
+              segments={data.segments}
+              talk={data.talk_time}
+              duration={player.duration || duration}
+              colorOf={colorOf}
+              time={player.time}
+              solo={solo}
+              onSeek={seek}
+              onSolo={setSolo}
+            />
+          )}
+
+          <Tabs value={tab ?? "transcript"} onValueChange={setTab} className="mt-5 gap-4">
+            <TabsList>
+              <TabsTrigger value="summary">Summary</TabsTrigger>
+              <TabsTrigger value="transcript">
+                Transcript
+                {unnamed.length > 0 && (
+                  <span className="ml-1.5 rounded-full bg-amber-500/20 px-1.5 text-[10px] text-amber-700 dark:text-amber-300">
+                    {unnamed.length}
+                  </span>
+                )}
+              </TabsTrigger>
+              <TabsTrigger value="speakers">Speakers</TabsTrigger>
+              <TabsTrigger value="ask">Ask</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="ask">
+              <AskPanel meetingId={id} onSeek={seek} />
+            </TabsContent>
+
+            <TabsContent value="summary">
+              <SummaryPanel
+                meetingId={id}
+                title={meeting.title}
+                summary={data.summary}
+                items={data.action_items}
+                me={data.me}
+                colorOf={colorOf}
+                onSeek={seek}
+                onChanged={() => void refresh()}
+              />
+            </TabsContent>
+
+            <TabsContent value="transcript">
+              {unnamed.length > 0 && !processing && (
+                <section className="mb-6">
+                  <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+                    <UserRoundSearch className="size-4" />
+                    {unnamed.length} speaker{unnamed.length === 1 ? "" : "s"} need{unnamed.length === 1 ? "s" : ""} a name
+                    <span className="font-normal text-muted-foreground">
+                      {"\u00b7"} play the sample, then name them once
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {unnamed.map((speaker) => (
+                      <WhoIsThis key={speaker.id} meetingId={id} speaker={speaker} people={people} onNamed={refreshAll} />
+                    ))}
+                  </div>
+                </section>
+              )}
+              <Transcript
+                segments={data.segments}
+                speakerNames={named}
+                people={people}
+                colorOf={colorOf}
+                currentId={current?.id}
+                playing={player.playing}
+                solo={solo}
+                onSeek={seek}
+                onChanged={refreshAll}
+              />
+            </TabsContent>
+
+            <TabsContent value="speakers">
+              <div className="grid gap-5 lg:grid-cols-[1fr_1.2fr]">
+                <div className="rounded-xl border bg-card p-4">
+                  <h3 className="mb-3 text-xs font-medium tracking-wide text-muted-foreground uppercase">Talk time</h3>
+                  <TalkTimeBars talk={data.talk_time} colorOf={colorOf} />
+                </div>
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">Voices</h3>
+                    <Button size="sm" variant="outline" onClick={() => void confirmAll()}>
+                      <Check className="size-3.5" />
+                      Confirm matches
+                    </Button>
+                  </div>
+                  <div className="divide-y overflow-hidden rounded-xl border">
+                    {data.speakers
+                      .filter((s) => s.status !== "minor" || (s.speech_seconds ?? 0) > 0)
+                      .map((speaker, index, list) => {
+                        // Diarization can split one person into two voices; say so instead of repeating the name.
+                        const nth = list.slice(0, index).filter((s) => s.display_name === speaker.display_name).length;
+                        return { speaker, label: nth ? `${speaker.display_name} (voice ${nth + 1})` : speaker.display_name };
+                      })
+                      .map(({ speaker, label }) => (
+                        <div key={speaker.id} className="flex items-center gap-3 px-3.5 py-2.5 text-sm">
+                          <span className={`size-2 rounded-full ${colorOf(speaker.display_name).dot}`} />
+                          <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {speaker.track === "mic" ? "Mic" : "Call"} {"\u00b7"} {minutes(speaker.speech_seconds)}
+                          </span>
+                          <Badge variant="outline" className="capitalize">
+                            {speaker.status === "auto" ? "recognized" : speaker.status}
+                            {speaker.match_score && speaker.status !== "confirmed"
+                              ? ` ${Math.round(speaker.match_score * 100)}%`
+                              : ""}
+                          </Badge>
+                          <Button size="icon" variant="ghost" className="size-7" title="Name this voice" onClick={() => setRenaming(speaker)}>
+                            <Pencil className="size-3.5" />
+                          </Button>
+                        </div>
+                      ))}
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Naming a voice teaches ZachCap what they sound like; it is recognized in later meetings.
+                  </p>
+                </div>
+              </div>
+            </TabsContent>
+          </Tabs>
+        </div>
+      </ScrollArea>
+
+      <audio
+        ref={audio}
+        src={src}
+        preload="metadata"
+        onTimeUpdate={(event) => onTime(event.currentTarget)}
+        onPlay={(event) => sync(event.currentTarget)}
+        onPause={(event) => sync(event.currentTarget)}
+        onRateChange={(event) => sync(event.currentTarget)}
+        onLoadedMetadata={(event) => {
+          const element = event.currentTarget;
+          const pending = pendingSeek.current;
+          pendingSeek.current = null;
+          if (pending) {
+            element.currentTime = pending.time;
+            if (pending.play) void element.play();
+          }
+          sync(element);
+        }}
+      />
+      {!processing && data.segments.length > 0 && (
+        <PlayerBar audio={audio} state={player} solo={solo} trackLabel={TRACK_LABEL[track]} onClearSolo={() => setSolo(null)} />
+      )}
+
+      <NamePrompt
+        open={renaming !== null}
+        title="Name this voice"
+        description="Everything this voice said gets the name, and ZachCap learns how they sound."
+        initial={renaming?.person_name ?? ""}
+        people={people}
+        onCancel={() => setRenaming(null)}
+        onSubmit={(name) => {
+          if (renaming) void nameSpeaker(renaming, name);
+          setRenaming(null);
+        }}
+      />
+      <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete this meeting?</DialogTitle>
+            <DialogDescription>
+              The recording, transcript, summary, action items and any voice samples learned from it are removed.
+              This can't be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmDelete(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={() => void remove()}>
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

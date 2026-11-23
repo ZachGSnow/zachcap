@@ -1,0 +1,30 @@
+{
+  "title": "Contoso firewall cutover sync",
+  "notes": "Synthetic meeting spoken by Windows TTS voices. 'You' is on the mic track; Dana and Mark are remote (system track).",
+  "lines": [
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "Okay, looks like everyone is here. Thanks for joining. The main thing today is the firewall cutover for Contoso and the VPN profile changes." },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "Sounds good. Quick update from my side. We moved the remaining firewall rules into the new policy on Thursday, and the test traffic looked clean." },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "system", "text": "Did that include the rules for the warehouse scanners? Those were the ones that broke last time." },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "Yes, I added them as a separate group. I also tagged them so we can find them faster if something goes wrong." },
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "Great. So what is left before we can schedule the cutover?" },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "system", "text": "Two things. First, the VPN profiles still point at the old gateway. Second, we need someone on site in case the internet circuit does not come back cleanly." },
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "I can push the new VPN profile through the management tool on Wednesday. Mark, can you confirm who is on site?" },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "system", "text": "I will check with the office manager tomorrow morning and send you a name by noon." },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "One more risk. The backup internet line is slower than we thought. If the main circuit fails during the change, video calls will be rough." },
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "Let's call that out in the change notice so nobody is surprised. Dana, can you draft the notice?" },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "Sure. I will have a draft by Tuesday end of day." },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "system", "text": "What time are we thinking for the cutover itself? Friday night still?" },
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "Friday at eight in the evening. That gives us the whole weekend to roll back if we need to." },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "Friday evening works for me. I will be online the whole time." },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "system", "text": "Same here. I will bring the console cable just in case we lose remote access." },
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "Perfect. Anything else we should cover?" },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "Just the license renewal. The firewall support contract expires at the end of next month." },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "system", "text": "I thought finance already approved that." },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "They approved the budget, but nobody has placed the order yet." },
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "I will follow up with finance and get the order placed this week." },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "system", "text": "Thanks. That would save us a headache in December." },
+    { "speaker": "You", "voice": "Microsoft David", "track": "mic", "text": "Okay, to recap. Dana drafts the change notice by Tuesday. I push the VPN profiles on Wednesday and handle the license order. Mark confirms the on site contact by noon tomorrow. The cutover is Friday evening." },
+    { "speaker": "Dana", "voice": "Microsoft Zira", "track": "system", "text": "Sounds right to me." },
+    { "speaker": "Mark", "voice": "Microsoft Mark", "track": "system", "text": "Works for me. Talk to you all on Friday." }
+  ]
+}
