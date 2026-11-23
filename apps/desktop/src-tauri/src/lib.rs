@@ -20,6 +20,9 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 #[cfg(all(desktop, debug_assertions))]
 use tauri_plugin_autostart as _;
 
+#[cfg(windows)]
+mod dictation_keys;
+
 /// Added to the sign-in launch: ZachCap starts in the tray instead of opening its window.
 const HIDDEN_ARG: &str = "--hidden";
 
@@ -158,8 +161,9 @@ struct Keys(Mutex<KeyState>);
 struct KeyStatus {
     action: String,
     keys: String,
-    /// "on" (held now), "free" (not needed now, and no other app has the keys), "off" (not
-    /// needed now, not checked), "taken" (another app has the keys) or "invalid".
+    /// "on" (held now), "shared" (held now, and another app has the same keys: it doesn't
+    /// get them meanwhile), "free" (not needed now, and no other app has the keys), "off"
+    /// (not needed now, not checked), "taken" (another app has the keys) or "invalid".
     state: &'static str,
 }
 
@@ -210,6 +214,10 @@ fn sync_keys(app: &AppHandle, retired: Vec<String>, probe: bool) -> Vec<KeyStatu
         .map(|(action, keys, wanted)| {
             let state = match parse_keys(&keys) {
                 None => "invalid",
+                #[cfg(windows)]
+                Some(shortcut) if action == "dictate" => {
+                    sync_dictation_keys(shortcuts, shortcut, &keys, wanted, probe)
+                }
                 Some(shortcut) => {
                     let held = shortcuts.is_registered(shortcut);
                     if wanted && !held {
@@ -245,6 +253,51 @@ fn sync_keys(app: &AppHandle, retired: Vec<String>, probe: bool) -> Vec<KeyStatu
             }
         })
         .collect()
+}
+
+/// Dictation's keys are read by a keyboard hook (dictation_keys), not registered: while
+/// they're held the main key never reaches the app in front, and letting go of any of them
+/// ends the dictation. Registering is only used to learn whether another app has them.
+#[cfg(windows)]
+fn sync_dictation_keys(
+    shortcuts: &tauri_plugin_global_shortcut::GlobalShortcut<tauri::Wry>,
+    shortcut: tauri_plugin_global_shortcut::Shortcut,
+    keys: &str,
+    wanted: bool,
+    probe: bool,
+) -> &'static str {
+    let Some(chord) = dictation_keys::Chord::parse(keys) else {
+        dictation_keys::listen(None);
+        return "invalid";
+    };
+    if shortcuts.is_registered(shortcut) {
+        let _ = shortcuts.unregister(shortcut);
+    }
+    let others_have_them = || {
+        let taken = shortcuts.register(shortcut).is_err();
+        if !taken {
+            let _ = shortcuts.unregister(shortcut);
+        }
+        taken
+    };
+    if wanted {
+        if !dictation_keys::listen(Some(chord)) {
+            eprintln!("The dictation keys couldn't be read: Windows refused the keyboard hook");
+            return "off";
+        }
+        if probe && others_have_them() {
+            "shared"
+        } else {
+            "on"
+        }
+    } else {
+        dictation_keys::listen(None);
+        match probe {
+            false => "off",
+            true if others_have_them() => "taken",
+            true => "free",
+        }
+    }
 }
 
 /// Which shortcut, if any, has these keys now.
@@ -588,8 +641,11 @@ pub fn run() {
                         .with_handler(move |app, shortcut, event| {
                             let pressed = event.state() == ShortcutState::Pressed;
                             let event = match action_for(app, shortcut) {
-                                // Dictation listens while the keys are held: down starts, up stops.
+                                // Dictation listens while the keys are held: down starts, up
+                                // stops. On Windows its keys come from the hook instead.
+                                #[cfg(not(windows))]
                                 Some("dictate") if pressed => "dictate-start",
+                                #[cfg(not(windows))]
                                 Some("dictate") => "dictate-stop",
                                 Some("record") if pressed => "toggle-recording",
                                 Some("bookmark") if pressed => "bookmark",
@@ -600,6 +656,13 @@ pub fn run() {
                         })
                         .build(),
                 )?;
+                #[cfg(windows)]
+                {
+                    let handle = app.handle().clone();
+                    dictation_keys::on_change(move |down| {
+                        let _ = handle.emit(if down { "dictate-start" } else { "dictate-stop" }, ());
+                    });
+                }
                 sync_keys(app.handle(), Vec::new(), false);
             }
 
