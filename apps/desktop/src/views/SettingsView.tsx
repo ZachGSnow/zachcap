@@ -1,6 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
-import { FolderOpen, KeyRound, Keyboard, Mic, Power, RefreshCw, ShieldCheck, Sparkles, Speaker, UserRound } from "lucide-react";
+import {
+  Copy,
+  FolderOpen,
+  KeyRound,
+  Keyboard,
+  Mic,
+  Plug,
+  Power,
+  RefreshCw,
+  ShieldCheck,
+  Sparkles,
+  Speaker,
+  UserRound,
+} from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -12,7 +25,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type Devices, type KeyStatus, type Settings } from "@/lib/engine";
-import { attempt } from "@/lib/feedback";
+import { attempt, copyText } from "@/lib/feedback";
 
 const KEYS = [
   {
@@ -192,6 +205,7 @@ export function SettingsView() {
   const { data: keys, refresh: refreshKeys } = usePoll(() => api<KeyStatus>("/api/keys"), 0);
   const { data: health } = usePoll(() => api<{ version: string; data: string }>("/api/health"), 0);
   const { data: devices, refresh: refreshDevices } = usePoll(() => api<Devices>("/api/devices"), 0);
+  const { data: mcp } = usePoll(() => api<{ claude_code: string; claude_desktop: string }>("/api/mcp"), 0);
   const [name, setName] = useState("");
   useEffect(() => setName(settings?.me.name ?? ""), [settings?.me.name]);
 
@@ -314,6 +328,38 @@ export function SettingsView() {
               options={(settings?.templates ?? []).map((t) => ({ value: t.id, label: t.label }))}
             />
           </Row>
+        </Section>
+
+        <Section icon={<Plug className="size-3.5" />} title="Use your meetings in Claude">
+          <div className="px-4 py-3.5">
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Add ZachCap to Claude Code or the Claude desktop app and ask about your meetings there. It's a read-only MCP
+              server that can search transcripts and read summaries, action items and notes; it can't change anything. What
+              it looks up goes to that app and its model, like anything else you share with it.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!mcp}
+                onClick={() => mcp && void copyText(mcp.claude_code, "Command copied: paste it in a terminal")}
+              >
+                <Copy className="size-3.5" />
+                Copy command for Claude Code
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!mcp}
+                onClick={() =>
+                  mcp && void copyText(mcp.claude_desktop, "Copied: add it to claude_desktop_config.json, then restart Claude")
+                }
+              >
+                <Copy className="size-3.5" />
+                Copy config for the Claude app
+              </Button>
+            </div>
+          </div>
         </Section>
 
         <Section icon={<KeyRound className="size-3.5" />} title="API keys">

@@ -139,12 +139,20 @@ SPEAKER_NAME = (
 
 
 class Store:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, readonly: bool = False) -> None:
         # FastAPI may open a request's connection on one worker thread and use it on another;
         # each connection still serves one request at a time, so that is safe.
-        self.db = sqlite3.connect(path or paths.database(), check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
+        path = path or paths.database()
         self._batch = 0
+        if readonly:
+            # For outside readers (the MCP server): SQLite itself refuses any write.
+            self.db = sqlite3.connect(
+                f"{Path(path).resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False
+            )
+            self.db.row_factory = sqlite3.Row
+            return
+        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self._migrate()
         if not self.db.execute("SELECT 1 FROM people WHERE is_me = 1").fetchone():

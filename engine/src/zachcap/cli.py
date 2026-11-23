@@ -232,12 +232,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.set_defaults(handler=None)
 
+    sub.add_parser(
+        "mcp", help="serve your meetings to Claude Desktop or Claude Code (read-only MCP, stdio)"
+    ).set_defaults(handler=None)
+
     p = sub.add_parser("keys", help="store API keys in Windows Credential Manager")
     p.add_argument("action", choices=["set", "status", "delete"])
     p.add_argument("name", nargs="?", choices=list(apikeys.KEYS))
     p.set_defaults(handler=cmd_keys)
 
     args = parser.parse_args(argv)
+    if args.command == "mcp":
+        from .mcp_server import run
+
+        run()
+        return 0
     if args.command == "serve":
         from .api import serve
 
