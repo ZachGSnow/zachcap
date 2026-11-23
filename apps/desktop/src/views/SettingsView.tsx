@@ -458,6 +458,12 @@ export function SettingsView() {
           <Row label="Bookmark this moment" help="While recording, from anywhere. Summaries make sure to cover it.">
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Ctrl + Alt + B</kbd>
           </Row>
+          <Row
+            label="Snapshot the call"
+            help="While recording: a picture of the call window, and the text Windows reads in it (an error message, a hostname), saved with the meeting's notes."
+          >
+            <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Ctrl + Alt + S</kbd>
+          </Row>
           <Row label="Play or pause" help="On a meeting's page.">
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Space</kbd>
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">K</kbd>

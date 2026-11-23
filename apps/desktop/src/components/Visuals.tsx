@@ -1,4 +1,4 @@
-import { Bookmark, Headphones } from "lucide-react";
+import { Bookmark, Camera, Headphones } from "lucide-react";
 import { memo, useMemo, type ReactNode } from "react";
 
 import type { Insights, Note, Segment, TalkTime } from "@/lib/engine";
@@ -133,17 +133,25 @@ export function SpeakerLanes({
                 <button
                   key={note.id}
                   onClick={() => onSeek(note.at)}
-                  title={`${clock(note.at)} ${note.text || "Bookmarked moment"}`}
-                  aria-label={`Note at ${clock(note.at)}`}
+                  title={`${clock(note.at)} ${
+                    note.kind === "snapshot"
+                      ? `Snapshot${note.text ? `: ${note.text.split("\n")[0]}` : ""}`
+                      : note.text || "Bookmarked moment"
+                  }`}
+                  aria-label={`${note.kind === "snapshot" ? "Snapshot" : "Note"} at ${clock(note.at)}`}
                   className="absolute top-0 -translate-x-1/2"
                   style={{ left: `${(note.at / length) * 100}%` }}
                 >
-                  <Bookmark
-                    className={cn(
-                      "size-3.5",
-                      note.kind === "bookmark" ? "fill-amber-400 text-amber-500" : "fill-muted text-muted-foreground",
-                    )}
-                  />
+                  {note.kind === "snapshot" ? (
+                    <Camera className="size-3.5 text-sky-600 dark:text-sky-400" />
+                  ) : (
+                    <Bookmark
+                      className={cn(
+                        "size-3.5",
+                        note.kind === "bookmark" ? "fill-amber-400 text-amber-500" : "fill-muted text-muted-foreground",
+                      )}
+                    />
+                  )}
                 </button>
               ))}
             </div>

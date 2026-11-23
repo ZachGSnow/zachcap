@@ -14,10 +14,18 @@ dependencies = [
     "keyring>=25",
     "mcp>=1.20",
     "numpy>=2.1",
+    "pillow>=11",
     "pyaudiowpatch>=0.2.12",
     "scipy>=1.14",
     "soundfile>=0.13",
     "uvicorn>=0.32",
+    "winrt-runtime>=3 ; sys_platform == 'win32'",
+    "winrt-windows-foundation>=3 ; sys_platform == 'win32'",
+    "winrt-windows-foundation-collections>=3 ; sys_platform == 'win32'",
+    "winrt-windows-globalization>=3 ; sys_platform == 'win32'",
+    "winrt-windows-graphics-imaging>=3 ; sys_platform == 'win32'",
+    "winrt-windows-media-ocr>=3 ; sys_platform == 'win32'",
+    "winrt-windows-storage-streams>=3 ; sys_platform == 'win32'",
 ]
 
 [project.scripts]

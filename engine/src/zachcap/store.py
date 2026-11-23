@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS meeting_notes (
     id          INTEGER PRIMARY KEY,
     meeting_id  INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
     at          REAL NOT NULL,                   -- seconds into the meeting
-    kind        TEXT NOT NULL DEFAULT 'note',    -- note|bookmark
+    kind        TEXT NOT NULL DEFAULT 'note',    -- note|bookmark|snapshot
     text        TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );

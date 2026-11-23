@@ -620,11 +620,53 @@ def create_app(token: str) -> FastAPI:
 
     @app.delete("/api/notes/{note_id}", dependencies=auth)
     def remove_note(note_id: int, store: Store = Depends(db)):
+        from . import snapshot
+
         note = store.note(note_id)
         store.delete_note(note_id)
         if note is not None:
+            if note["kind"] == "snapshot":  # its picture goes with it
+                meeting = store.meeting(note["meeting_id"])
+                if meeting is not None:
+                    snapshot.image_path(Path(meeting["folder"]), note_id).unlink(missing_ok=True)
             export.auto_export(store, note["meeting_id"])
         return {"deleted": note_id}
+
+    @app.get("/api/notes/{note_id}/image", dependencies=auth)
+    def note_image(note_id: int, store: Store = Depends(db)):
+        """A snapshot's picture (the app shows it with the note)."""
+        from . import snapshot
+
+        note = store.note(note_id)
+        meeting = store.meeting(note["meeting_id"]) if note is not None else None
+        path = snapshot.image_path(Path(meeting["folder"]), note_id) if meeting else None
+        if path is None or not path.exists():
+            raise HTTPException(status_code=404, detail="No picture for that note")
+        return FileResponse(path, media_type="image/png")
+
+    @app.post("/api/record/snapshot", dependencies=auth)
+    def record_snapshot(store: Store = Depends(db)):
+        """A snapshot of the call window, with the text Windows reads in it, as a note at
+        this moment of the recording."""
+        from . import snapshot
+
+        recorder = recording.get("recorder")
+        if recorder is None:
+            raise HTTPException(status_code=409, detail="Not recording")
+        meeting = store.meeting(recording["meeting_id"])
+        note_id = store.add_note(meeting["id"], recorder.elapsed, "snapshot", "")
+        try:
+            shot = snapshot.take(Path(meeting["folder"]), note_id)
+        except Exception as exc:
+            store.delete_note(note_id)
+            raise HTTPException(status_code=400, detail=f"Couldn't take a snapshot: {exc}") from exc
+        store.update_note(note_id, shot["text"])
+        recording["notes"] = recording.get("notes", 0) + 1
+        return {
+            **dict(store.note(note_id)),
+            "window": shot["window"],
+            "lines": len([line for line in shot["text"].splitlines() if line.strip()]),
+        }
 
     @app.post("/api/segments/{segment_id}/speaker", dependencies=auth)
     def reassign_segment(segment_id: int, body: LineSpeakerBody, store: Store = Depends(db)):

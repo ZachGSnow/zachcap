@@ -350,9 +350,9 @@ pub fn run() {
                 }
             });
 
-            // Ctrl+Alt+R starts or stops recording and Ctrl+Alt+B bookmarks the moment, from
-            // anywhere. Registered here, once, and handed to the page like the tray menu, so
-            // the window's state stays in sync.
+            // Ctrl+Alt+R starts or stops recording, Ctrl+Alt+B bookmarks the moment and
+            // Ctrl+Alt+S takes a snapshot of the call, from anywhere. Registered here, once, and
+            // handed to the page like the tray menu, so the window's state stays in sync.
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::{
@@ -360,6 +360,7 @@ pub fn run() {
                 };
                 let toggle = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyR);
                 let bookmark = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyB);
+                let snapshot = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyS);
                 app.handle().plugin(
                     tauri_plugin_global_shortcut::Builder::new()
                         .with_handler(move |app, shortcut, event| {
@@ -370,11 +371,17 @@ pub fn run() {
                                 let _ = app.emit("toggle-recording", ());
                             } else if shortcut == &bookmark {
                                 let _ = app.emit("bookmark", ());
+                            } else if shortcut == &snapshot {
+                                let _ = app.emit("snapshot", ());
                             }
                         })
                         .build(),
                 )?;
-                for (shortcut, keys) in [(toggle, "Ctrl+Alt+R"), (bookmark, "Ctrl+Alt+B")] {
+                for (shortcut, keys) in [
+                    (toggle, "Ctrl+Alt+R"),
+                    (bookmark, "Ctrl+Alt+B"),
+                    (snapshot, "Ctrl+Alt+S"),
+                ] {
                     if let Err(error) = app.global_shortcut().register(shortcut) {
                         // Another app may own the combination; the tray menu still works.
                         eprintln!("{keys} is unavailable: {error}");
@@ -384,10 +391,11 @@ pub fn run() {
 
             let record = MenuItem::with_id(app, "record", "Start or stop recording", true, None::<&str>)?;
             let mark = MenuItem::with_id(app, "bookmark", "Bookmark this moment", true, None::<&str>)?;
+            let shot = MenuItem::with_id(app, "snapshot", "Snapshot the call", true, None::<&str>)?;
             let open = MenuItem::with_id(app, "open", "Open ZachCap", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "Quit ZachCap", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&record, &mark, &open, &separator, &quit])?;
+            let menu = Menu::with_items(app, &[&record, &mark, &shot, &open, &separator, &quit])?;
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().cloned().expect("app icon"))
                 .tooltip("ZachCap")
@@ -400,6 +408,9 @@ pub fn run() {
                     }
                     "bookmark" => {
                         let _ = app.emit("bookmark", ());
+                    }
+                    "snapshot" => {
+                        let _ = app.emit("snapshot", ());
                     }
                     "open" => show_main(app),
                     "quit" => app.exit(0),

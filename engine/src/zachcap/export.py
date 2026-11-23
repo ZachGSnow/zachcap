@@ -35,6 +35,13 @@ def _stamp(seconds: float, separator: str) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}{separator}{ms % 1000:03d}"
 
 
+def _note_text(note) -> str:
+    if note["kind"] == "snapshot":
+        text = " / ".join(line.strip() for line in note["text"].splitlines() if line.strip())
+        return f"Snapshot: {text}" if text else "Snapshot (no text)"
+    return note["text"] or "Bookmarked moment"
+
+
 def markdown(store: Store, meeting_id: int) -> str:
     meeting = store.meeting(meeting_id)
     started = datetime.fromisoformat(meeting["started_at"])
@@ -65,7 +72,7 @@ def markdown(store: Store, meeting_id: int) -> str:
     notes = store.notes(meeting_id)
     if notes:
         lines += ["", "## My notes", ""]
-        lines += [f"- [{_clock(n['at'])}] {n['text'] or 'Bookmarked moment'}" for n in notes]
+        lines += [f"- [{_clock(n['at'])}] {_note_text(n)}" for n in notes]
     transcript = store.transcript(meeting_id)
     if transcript:
         lines += ["", "## Transcript", ""]
