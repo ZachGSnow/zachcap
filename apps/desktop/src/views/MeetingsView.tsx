@@ -1,12 +1,14 @@
 import { AudioLines, CalendarDays, ChevronRight, Circle, CircleCheck, Clock3, ListChecks, Loader2, Users } from "lucide-react";
 
+import { toggleAction } from "@/components/SummaryPanel";
 import { AvatarStack, StatCard } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { usePoll } from "@/hooks/usePoll";
-import { api, type KeyStatus, type Meeting, type Settings, type Stats } from "@/lib/engine";
-import { STATUS_LABEL, dayGroup, hours, minutes, personColor, when } from "@/lib/format";
+import { api, type ActionItem, type KeyStatus, type Meeting, type Settings, type Stats } from "@/lib/engine";
+import { STATUS_LABEL, day, dayGroup, hours, minutes, personColor, when } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 const GROUPS = ["Today", "Yesterday", "This week", "This month", "Earlier"];
 
@@ -55,7 +57,89 @@ function SetupChecklist({ keys, hasMeetings, onSettings, onImport }: { keys: Key
   );
 }
 
-export function MeetingsView({ onOpen, onSettings, onImport }: { onOpen: (id: number) => void; onSettings: () => void; onImport: () => void }) {
+/** Recorded meeting time per day, last two weeks, as bars. */
+function MeetingTime({ days }: { days: { day: string; seconds: number }[] }) {
+  const top = Math.max(...days.map((d) => d.seconds), 1);
+  const total = days.reduce((sum, d) => sum + d.seconds, 0);
+  return (
+    <div className="rounded-xl border bg-card p-4">
+      <div className="flex items-baseline justify-between">
+        <div className="text-sm font-medium">Meeting time</div>
+        <div className="text-xs text-muted-foreground">{hours(total)} in the last two weeks</div>
+      </div>
+      <div className="mt-4 flex h-24 items-end gap-1.5">
+        {days.map((d) => {
+          const date = new Date(`${d.day}T12:00:00`);
+          const weekend = date.getDay() === 0 || date.getDay() === 6;
+          return (
+            <div key={d.day} className="flex h-full flex-1 flex-col justify-end" title={`${day(`${d.day}T12:00:00`)}: ${minutes(d.seconds) || "no meetings"}`}>
+              <div
+                className={cn("w-full rounded-sm", d.seconds ? "bg-foreground/80" : weekend ? "bg-muted/50" : "bg-muted")}
+                style={{ height: d.seconds ? `${Math.max(6, (d.seconds / top) * 100)}%` : "4px" }}
+              />
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-1.5 flex justify-between text-[10px] text-muted-foreground">
+        <span>{day(`${days[0].day}T12:00:00`)}</span>
+        <span>Today</span>
+      </div>
+    </div>
+  );
+}
+
+/** My open action items and commitments, oldest meeting first, with a link to the moment. */
+function MyOpenItems({ me, onOpen }: { me: string; onOpen: (id: number, at?: number) => void }) {
+  const { data, refresh } = usePoll(() => api<{ me: string; items: ActionItem[] }>("/api/actions?status=open"), 10_000);
+  const mine = (data?.items ?? []).filter((item) => item.owner === me).slice(0, 5);
+  return (
+    <div className="rounded-xl border bg-card p-4">
+      <div className="flex items-baseline justify-between">
+        <div className="text-sm font-medium">Your open items</div>
+        <div className="text-xs text-muted-foreground">{mine.length ? `${mine.length} shown` : ""}</div>
+      </div>
+      {mine.length === 0 ? (
+        <p className="mt-6 text-center text-xs text-muted-foreground">Nothing open with your name on it.</p>
+      ) : (
+        <div className="mt-2 space-y-1">
+          {mine.map((item) => (
+            <div key={item.id} className="flex items-start gap-2 rounded-md p-1 hover:bg-muted/50">
+              <button
+                role="checkbox"
+                aria-checked={false}
+                aria-label={item.task}
+                title="Mark as done"
+                onClick={async () => {
+                  await toggleAction(item);
+                  await refresh();
+                }}
+                className="mt-0.5 size-3.5 shrink-0 rounded-[4px] border border-muted-foreground/40 hover:border-foreground"
+              />
+              <button onClick={() => onOpen(item.meeting_id, item.said_at ?? undefined)} className="min-w-0 flex-1 text-left">
+                <div className="truncate text-xs">{item.task}</div>
+                <div className="truncate text-[10px] text-muted-foreground">
+                  {item.meeting_title}
+                  {item.due ? ` · due ${item.due}` : ""}
+                </div>
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function MeetingsView({
+  onOpen,
+  onSettings,
+  onImport,
+}: {
+  onOpen: (id: number, at?: number) => void;
+  onSettings: () => void;
+  onImport: () => void;
+}) {
   const { data: meetings } = usePoll(() => api<Meeting[]>("/api/meetings"), 2000);
   const { data: stats } = usePoll(() => api<Stats>("/api/stats"), 5000);
   const { data: keys } = usePoll(() => api<KeyStatus>("/api/keys"), 10_000);
@@ -96,6 +180,17 @@ export function MeetingsView({ onOpen, onSettings, onImport }: { onOpen: (id: nu
             hint="by voice"
           />
         </div>
+
+        {stats && meetings && meetings.length > 0 && (
+          <div className="mt-3 grid gap-3 md:grid-cols-5">
+            <div className="md:col-span-3">
+              <MeetingTime days={stats.by_day} />
+            </div>
+            <div className="md:col-span-2">
+              <MyOpenItems me={me} onOpen={onOpen} />
+            </div>
+          </div>
+        )}
 
         {keys && meetings && (
           <SetupChecklist keys={keys} hasMeetings={meetings.length > 0} onSettings={onSettings} onImport={onImport} />

@@ -112,7 +112,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 78 tests: storage, matching, audio, capture, crash recovery, API, summaries, Ask
+uv run pytest -q             # 79 tests: storage, matching, audio, capture, crash recovery, API, summaries, Ask
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```

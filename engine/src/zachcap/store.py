@@ -7,6 +7,7 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import date, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -595,8 +596,31 @@ class Store:
         open_items = self.db.execute(
             "SELECT COUNT(*) FROM action_items WHERE status = 'open'"
         ).fetchone()[0]
-        people = self.db.execute("SELECT COUNT(*) FROM people WHERE is_me = 0").fetchone()[0]
-        return {**dict(one), "open_actions": open_items, "people": people}
+        # "Recognized by voice": people with a voiceprint, not every name typed in.
+        people = self.db.execute(
+            "SELECT COUNT(DISTINCT v.person_id) FROM voice_samples v "
+            "JOIN people p ON p.id = v.person_id WHERE p.is_me = 0"
+        ).fetchone()[0]
+        return {**dict(one), "open_actions": open_items, "people": people, "by_day": self.by_day()}
+
+    def by_day(self, days: int = 14, today: date | None = None) -> list[dict]:
+        """Recorded meeting time per day for the last `days` days, oldest first. Days are
+        the local dates the meetings were recorded on (the start of started_at)."""
+        today = today or date.today()
+        first = today - timedelta(days=days - 1)
+        totals: dict[str, float] = {}
+        for row in self.db.execute(
+            "SELECT substr(started_at, 1, 10) AS day, SUM(COALESCE(duration, 0)) AS seconds "
+            "FROM meetings WHERE status != 'recording' AND substr(started_at, 1, 10) >= ? "
+            "GROUP BY day",
+            (first.isoformat(),),
+        ):
+            totals[row["day"]] = row["seconds"]
+        return [
+            {"day": (first + timedelta(days=i)).isoformat(),
+             "seconds": round(totals.get((first + timedelta(days=i)).isoformat(), 0.0), 1)}
+            for i in range(days)
+        ]  # fmt: skip
 
     # editing ----------------------------------------------------------------
 
