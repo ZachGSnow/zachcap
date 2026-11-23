@@ -74,7 +74,27 @@ def test_file_names_are_safe_and_auto_export_follows_the_setting(meeting, tmp_pa
     vault.mkdir()
     store.set_setting("export_folder", str(vault))
     written = export.auto_export(store, meeting_id)
-    assert written == vault / "2026-11-20 0905 Cutover Phase 2.md"
+    assert written == vault / "2026-11-20 0905 Cutover Phase 2 (M1).md"
     assert "Send the notice" in written.read_text(encoding="utf-8")
     store.set_setting("export_folder", str(tmp_path / "gone"))
     assert export.auto_export(store, meeting_id) is None
+
+
+def test_the_export_folder_keeps_one_file_per_meeting(meeting, tmp_path: Path):
+    store, meeting_id = meeting
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    store.set_setting("export_folder", str(vault))
+    export.auto_export(store, meeting_id)
+    store.update_meeting(meeting_id, title="Firewall cutover")
+    export.auto_export(store, meeting_id)  # renamed: replaces its old file
+    # Same title, same minute: stopping and starting again within a minute does this.
+    twin = store.create_meeting('Cutover: "Phase 2"?', "2026-11-20T09:05:00", tmp_path / "b")
+    export.auto_export(store, twin)
+
+    assert sorted(p.name for p in vault.iterdir()) == [
+        f"2026-11-20 0905 Cutover Phase 2 (M{twin}).md",
+        f"2026-11-20 0905 Firewall cutover (M{meeting_id}).md",
+    ]
+    first = (vault / f"2026-11-20 0905 Firewall cutover (M{meeting_id}).md").read_text("utf-8")
+    assert "Send the notice" in first

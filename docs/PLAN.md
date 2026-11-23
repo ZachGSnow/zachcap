@@ -292,17 +292,19 @@ Each change went through its own pull request with green CI, after two rounds of
 | UI robustness | Interrupted jobs can be run again; failures are reported; notifications while in the tray; Space, seek and speed fixes; error boundary | Browser and desktop checks |
 | Performance | Memoized transcript rows, one shared menu, memoized lane bars | A 2,000-line meeting: worst UI stall during playback went from 2.7 s to 83 ms |
 | Shell | Single instance, Start with Windows (release builds), tray hint, red recording dot, engine restart banner, CSP, no opener plugin, `open_data_folder` takes no path | Release build checks |
-| Ask across meetings | Claude searches the library with read-only tools and cites `[M12 04:31]`; Brief me on a person | Real questions on the demo library: $0.02-0.05 each, every fact cited |
-| Words to know | Hotwords for Whisper (as a sentence), corrections, spellings for Claude | A bare comma list made Whisper drop every full stop (6 to 0); a sentence kept all 6 |
+| Ask across meetings | Claude searches the library with read-only tools and cites `[M12 04:31]`; Brief me on a person; after 10 rounds of lookups it answers from what it found, with tools off; tools say when they leave results out, and long transcripts come in parts | Real questions on the demo library: $0.02-0.05 each, every fact cited; the out-of-lookups turn checked against the API on synthetic meetings |
+| Words to know | Hotwords for Whisper (as a sentence), corrections in one pass (terms are text, so `CORP\admin` is safe), spellings for Claude; capitalization is fixed only for terms that can't be ordinary words (ConnectWise, M365, not Will or IT) | A bare comma list made Whisper drop every full stop (6 to 0); a sentence kept all 6. The longest list Settings takes, on 1,000 lines: 18 s before, 0.06 s now |
 | Kinds of meeting and recipes | Seven summary focuses; follow-up email, status update, ticket notes | A real follow-up email for $0.026 |
 | Notes, bookmarks, pause | Recording bar notes, Ctrl+Alt+B bookmarks, private pause that writes silence | A real 7 s recording: notes at 1.9 s and 3.1 s, tracks stayed in sync through the pause |
-| Exports | Markdown, text, SRT; export folder kept up to date | Downloads and the folder backfill on the demo library |
+| Exports | Markdown, text, SRT; export folder kept up to date, one file per meeting named with its id (M12), rewritten after any edit | Downloads and the folder backfill on the demo library; unit tests for renames and same-minute titles |
 | MCP server | `zachcap mcp`, five read-only tools, database opened read-only | A real stdio client listed the tools and searched |
 | Conversation stats | Pace, longest stretch, questions, talked over | Unit tests; demo meeting |
 | Privacy | Keep recordings for N days; mask contact details for Claude; heads-up text | Unit tests (retention touches only finished meetings in ZachCap's folder) |
 | Home page | Two weeks of meeting time; your open items | Browser check |
 
-Tests: 32 at v0.1, 79 now. CI no longer installs the GPU stack and checks `uv.lock`.
+The cost shown next to each answer prices every attempt at the rates of the model that ran it (a fallback included), cache reads at that model's own rate.
+
+Tests: 32 at v0.1, 95 now. CI no longer installs the GPU stack and checks `uv.lock`.
 
 Next: live captions on a small CPU model, one-app capture (process loopback), a weekly digest of
 open commitments, slide capture with on-device OCR, signed installer.

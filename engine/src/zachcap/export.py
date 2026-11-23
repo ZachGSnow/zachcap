@@ -1,12 +1,16 @@
 """Meetings as files: Markdown (summary, notes and transcript), plain text, and subtitles.
 
 An optional export folder (an Obsidian vault, say) gets a Markdown copy of every meeting,
-rewritten whenever it is processed or summarized.
+rewritten whenever the meeting changes. Each copy's name ends with the meeting's id, "(M12)",
+so a renamed meeting replaces its old file and two meetings never share one.
 """
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -98,12 +102,16 @@ def render(store: Store, meeting_id: int, fmt: str) -> str:
     raise ValueError(f"Unknown format {fmt!r}")
 
 
-def file_name(store: Store, meeting_id: int, fmt: str) -> str:
-    """A safe file name: date, time and title."""
+def file_name(store: Store, meeting_id: int, fmt: str, with_id: bool = False) -> str:
+    """A safe file name: date, time and title (and the meeting's id, for the export folder)."""
     meeting = store.meeting(meeting_id)
     started = datetime.fromisoformat(meeting["started_at"])
     title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", meeting["title"]).strip(" .") or "Meeting"
-    return f"{started:%Y-%m-%d %H%M} {title[:80]}.{fmt}"
+    tag = f" (M{meeting_id})" if with_id else ""
+    return f"{started:%Y-%m-%d %H%M} {title[:80]}{tag}.{fmt}"
+
+
+_writing = threading.Lock()  # exports run on request threads and in the background
 
 
 def auto_export(store: Store, meeting_id: int) -> Path | None:
@@ -112,9 +120,20 @@ def auto_export(store: Store, meeting_id: int) -> Path | None:
     folder = store.setting("export_folder")
     if not folder or not Path(folder).is_dir() or store.meeting(meeting_id) is None:
         return None
-    try:
-        target = Path(folder) / file_name(store, meeting_id, "md")
-        target.write_text(markdown(store, meeting_id), encoding="utf-8")
-        return target
-    except OSError:
-        return None
+    folder = Path(folder)
+    target = folder / file_name(store, meeting_id, "md", with_id=True)
+    partial = target.with_name(f"{target.stem}.partial")
+    with _writing:
+        try:
+            # Written whole, then moved into place: a notes app never reads half a file.
+            partial.write_text(markdown(store, meeting_id), encoding="utf-8")
+            os.replace(partial, target)
+        except OSError:
+            with contextlib.suppress(OSError):
+                partial.unlink(missing_ok=True)
+            return None
+        for old in folder.glob(f"* (M{meeting_id}).md"):  # the copy under an earlier title
+            if old != target:
+                with contextlib.suppress(OSError):  # open in another app: it goes next time
+                    old.unlink(missing_ok=True)
+    return target

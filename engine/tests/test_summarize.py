@@ -23,21 +23,28 @@ def meeting(tmp_path: Path):
     store.close()
 
 
-def fake_claude(monkeypatch, result: summarize.Summary, model: str = "claude-opus-5-5"):
+def fake_claude(
+    monkeypatch,
+    result: summarize.Summary,
+    model: str = "claude-opus-5-5",
+    usage=None,
+    written_usage=None,
+    written_stop: str = "end_turn",
+):
     """Stands in for anthropic.Anthropic, returning the real response's shape."""
     calls = {}
     response = SimpleNamespace(
         parsed_output=result,
         stop_reason="end_turn",
         model=model,
-        usage=SimpleNamespace(input_tokens=1000, output_tokens=200),
+        usage=usage or SimpleNamespace(input_tokens=1000, output_tokens=200),
     )
 
     written = SimpleNamespace(
         content=[SimpleNamespace(type="text", text="Subject: Cutover\n\nThanks, all.")],
-        stop_reason="end_turn",
+        stop_reason=written_stop,
         model=model,
-        usage=SimpleNamespace(input_tokens=1000, output_tokens=100),
+        usage=written_usage or SimpleNamespace(input_tokens=1000, output_tokens=100),
     )
 
     class Client:
@@ -187,3 +194,57 @@ def test_timestamps_become_seconds():
     assert summarize.to_seconds("01:01") == 61
     assert summarize.to_seconds("[1:02:03]") == 3723
     assert summarize.to_seconds("soon") is None
+
+
+def attempt(model, input_tokens, output_tokens, kind="message", cache_read=0):
+    """One entry of usage.iterations."""
+    return SimpleNamespace(
+        type=kind,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read,
+        cache_creation_input_tokens=0,
+    )
+
+
+def test_a_fallback_is_priced_at_each_model_that_ran(meeting, monkeypatch):
+    store, meeting_id = meeting
+    # Opus 5.5 declined before answering; Opus 4.8 ($5/$25) wrote the summary.
+    tries = [attempt(None, 1000, 0), attempt("claude-opus-4-8", 1000, 200, "fallback_message")]
+    usage = SimpleNamespace(input_tokens=1000, output_tokens=200, iterations=tries)
+    fake_claude(monkeypatch, sample_summary(), model="claude-opus-4-8", usage=usage)
+
+    summarize.summarize(store, meeting_id)
+
+    saved = store.summary(meeting_id)
+    assert saved["model"] == "claude-opus-4-8"
+    assert saved["cost_usd"] == pytest.approx((1000 * 4 + 1000 * 5 + 200 * 25) / 1e6)
+
+
+def test_cache_reads_are_priced_per_model(meeting, monkeypatch):
+    store, meeting_id = meeting
+    cached = SimpleNamespace(
+        input_tokens=100, output_tokens=100, cache_read_input_tokens=10_000,
+        cache_creation_input_tokens=0,
+    )  # fmt: skip
+    fake_claude(monkeypatch, sample_summary(), written_usage=cached)
+
+    written = summarize.recipe(store, meeting_id, "status")
+
+    # Opus 5.5 reads its cache at $0.20 per million tokens (0.05x), not a tenth of input.
+    assert written["cost_usd"] == pytest.approx((100 * 4 + 10_000 * 0.20 + 100 * 20) / 1e6)
+    assert summarize.usage_cost(cached, "claude-fable-5-1") == pytest.approx(
+        (100 * 10 + 10_000 * 0.25 + 100 * 50) / 1e6
+    )
+
+
+def test_a_document_cut_off_at_the_limit_says_so(meeting, monkeypatch):
+    store, meeting_id = meeting
+    calls = fake_claude(monkeypatch, sample_summary(), written_stop="max_tokens")
+
+    written = summarize.recipe(store, meeting_id, "email")
+
+    assert calls["max_tokens"] == summarize.MAX_TOKENS == 16_000
+    assert written["text"].startswith("Subject: Cutover")
+    assert written["text"].endswith(summarize.CUT_OFF)

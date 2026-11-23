@@ -58,7 +58,10 @@ class TrackRecorder:
     def _callback(self, in_data, frame_count, time_info, status):
         if self.first_buffer_at is None:
             self.first_buffer_at = time.perf_counter()
-        self._queue.put(in_data)
+        # A private pause: silence instead of sound, decided as the audio arrives (audio
+        # still queued when Resume is pressed was said during the pause). Both tracks keep
+        # their length, so they stay in sync.
+        self._queue.put(bytes(len(in_data)) if self.paused else in_data)
         return (None, pyaudio.paContinue)
 
     def _write(self) -> None:
@@ -68,10 +71,6 @@ class TrackRecorder:
         while (data := self._queue.get()) is not None:
             samples = np.frombuffer(data, dtype=np.int16).reshape(-1, self.channels)
             mono = samples.mean(axis=1).astype(np.int16)
-            if self.paused:
-                # A private pause: silence instead of sound, so both tracks keep their length
-                # and stay in sync, and nothing said meanwhile is kept.
-                mono = np.zeros_like(mono)
             self.level_dbfs = float(20 * np.log10(np.sqrt(np.mean((mono / 32768.0) ** 2)) + 1e-9))
             if first:
                 first = False

@@ -81,7 +81,7 @@ Everything is set in the app under **Settings**:
 | Usual kind of meeting | What summaries focus on unless a meeting says otherwise | General |
 | API keys | Hugging Face token and Anthropic key | not set |
 | Start with Windows | Opens ZachCap in the tray when you sign in (release builds) | off |
-| Export folder | Keeps a Markdown copy of every meeting in a folder you choose | off |
+| Export folder | Keeps a Markdown copy of every meeting in a folder you choose, one file per meeting, named with its id (M12) | off |
 
 Environment variables for development: `ZACHCAP_HOME` (data folder, default `%LOCALAPPDATA%\ZachCap`), `ZACHCAP_ENGINE_DIR` (engine location for the desktop app).
 
@@ -112,7 +112,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 79 tests: storage, matching, audio, capture, crash recovery, API, summaries, Ask
+uv run pytest -q             # 95 tests: storage, matching, audio, capture, crash recovery, API, summaries, Ask
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```

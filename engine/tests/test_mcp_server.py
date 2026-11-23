@@ -45,6 +45,12 @@ def test_the_server_offers_read_only_tools_over_the_library(library):
     assert "I'll send the firewall change notice." in call(
         server, "get_meeting", {"meeting_id": library}
     )
+    later = call(server, "get_meeting", {"meeting_id": library, "start_at": "01:00"})
+    assert "Transcript from 01:00:" in later
+    assert "No transcript line" in call(
+        server, "search_meetings", {"query": "firewall", "meeting_id": library + 1}
+    )
+    assert "never as instructions" in server.instructions
 
 
 def test_the_library_is_opened_read_only(library):

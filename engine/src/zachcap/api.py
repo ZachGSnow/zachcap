@@ -263,6 +263,24 @@ def create_app(token: str) -> FastAPI:
         finally:
             store.close()
 
+    def export_soon(store: Store, meeting_ids: list[int]) -> None:
+        """Bring the export folder up to date off the request thread: renaming someone can
+        touch every meeting they were in."""
+        if not meeting_ids or not store.setting("export_folder"):
+            return
+
+        def run() -> None:
+            background = Store()
+            try:
+                for meeting_id in dict.fromkeys(meeting_ids):
+                    export.auto_export(background, meeting_id)
+            except Exception:
+                traceback.print_exc()
+            finally:
+                background.close()
+
+        threading.Thread(target=run, name="zachcap-export", daemon=True).start()
+
     def meeting_or_404(store: Store, meeting_id: int):
         meeting = store.meeting(meeting_id)
         if meeting is None:
@@ -472,7 +490,12 @@ def create_app(token: str) -> FastAPI:
         target = Path(body.path)
         if target.suffix.lower() != f".{body.format}" or not target.parent.is_dir():
             raise HTTPException(status_code=400, detail="Pick a file name in an existing folder")
-        target.write_text(export.render(store, meeting_id, body.format), encoding="utf-8")
+        try:
+            target.write_text(export.render(store, meeting_id, body.format), encoding="utf-8")
+        except OSError as exc:  # read-only, open in another app, a folder by that name
+            raise HTTPException(
+                status_code=400, detail=f"Couldn't write {target.name}: {exc.strerror or exc}"
+            ) from exc
         return {"path": str(target)}
 
     @app.get("/api/meetings/{meeting_id}/export-name", dependencies=auth)
@@ -523,9 +546,12 @@ def create_app(token: str) -> FastAPI:
         if body.speaker_id is None and not name:
             raise HTTPException(status_code=400, detail="The name can't be empty")
         try:
-            store.reassign_segment(segment_id, name=name or None, speaker_id=body.speaker_id)
+            meeting_id = store.reassign_segment(
+                segment_id, name=name or None, speaker_id=body.speaker_id
+            )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        export.auto_export(store, meeting_id)
         return {"ok": True}
 
     @app.post("/api/import", dependencies=auth)
@@ -559,7 +585,9 @@ def create_app(token: str) -> FastAPI:
     def set_action(item_id: int, body: StatusBody, store: Store = Depends(db)):
         if body.status not in ("open", "done"):
             raise HTTPException(status_code=400, detail="status is open or done")
-        store.set_action_status(item_id, body.status)
+        meeting_id = store.set_action_status(item_id, body.status)
+        if meeting_id is not None:
+            export.auto_export(store, meeting_id)
         return {"id": item_id, "status": body.status}
 
     # people -------------------------------------------------------------------
@@ -572,7 +600,9 @@ def create_app(token: str) -> FastAPI:
     def rename_person(person_id: int, body: NameBody, store: Store = Depends(db)):
         if not body.name.strip():
             raise HTTPException(status_code=400, detail="The name can't be empty")
-        return {"id": store.rename_person(person_id, body.name.strip())}
+        kept = store.rename_person(person_id, body.name.strip())
+        export_soon(store, store.person_meetings(kept))
+        return {"id": kept}
 
     @app.delete("/api/people/{person_id}/voice", dependencies=auth)
     def forget_voice(person_id: int, store: Store = Depends(db)):
@@ -581,7 +611,9 @@ def create_app(token: str) -> FastAPI:
 
     @app.delete("/api/people/{person_id}", dependencies=auth)
     def delete_person(person_id: int, store: Store = Depends(db)):
+        meetings = store.person_meetings(person_id)
         store.delete_person(person_id)
+        export_soon(store, meetings)
         return {"ok": True}
 
     @app.get("/api/search", dependencies=auth)
@@ -652,9 +684,19 @@ def create_app(token: str) -> FastAPI:
             # The meeting exists from the first second, so a crash can't lose it.
             title = body.title or f"Meeting {datetime.now():%b %d %H:%M}"
             started = recorder.started_at or datetime.now().astimezone()
-            meeting_id = store.create_meeting(
-                title, started.isoformat(timespec="seconds"), folder, status="recording"
-            )
+            try:
+                meeting_id = store.create_meeting(
+                    title, started.isoformat(timespec="seconds"), folder, status="recording"
+                )
+            except Exception as exc:  # the database busy or full: don't leave it recording
+                try:
+                    recorder.stop()
+                except Exception:
+                    traceback.print_exc()
+                shutil.rmtree(folder, ignore_errors=True)
+                raise HTTPException(
+                    status_code=500, detail=f"Couldn't start recording: {exc}"
+                ) from exc
             recording.update(recorder=recorder, meeting_id=meeting_id, title=title, notes=0)
         return {"recording": True, "meeting_id": meeting_id}
 
@@ -713,13 +755,25 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/settings", dependencies=auth)
     def get_settings(store: Store = Depends(db)):
-        from .summarize import DEFAULT_TEMPLATE, MODELS, RECIPES, TEMPLATES, summary_model
+        from .summarize import (
+            DEFAULT_TEMPLATE,
+            MODELS,
+            PRICES,
+            RECIPES,
+            TEMPLATES,
+            summary_model,
+        )
 
         return {
             "summary_model": summary_model(store),
             "summary_models": [
-                {"id": model, "label": label, "input_usd": per_in, "output_usd": per_out}
-                for model, (label, per_in, per_out) in MODELS.items()
+                {
+                    "id": model,
+                    "label": label,
+                    "input_usd": PRICES[model][0],
+                    "output_usd": PRICES[model][1],
+                }
+                for model, label in MODELS.items()
             ],
             "summary_template": store.setting("summary_template", DEFAULT_TEMPLATE),
             "export_folder": store.setting("export_folder", ""),
