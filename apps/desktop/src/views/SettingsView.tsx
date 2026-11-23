@@ -324,6 +324,9 @@ export function SettingsView() {
           <Row label="Start or stop recording" help="Works from anywhere, even with ZachCap in the tray.">
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Ctrl + Alt + R</kbd>
           </Row>
+          <Row label="Bookmark this moment" help="While recording, from anywhere. Summaries make sure to cover it.">
+            <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Ctrl + Alt + B</kbd>
+          </Row>
           <Row label="Play or pause" help="On a meeting's page.">
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Space</kbd>
           </Row>

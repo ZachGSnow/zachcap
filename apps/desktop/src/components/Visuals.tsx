@@ -1,11 +1,12 @@
-import { Headphones } from "lucide-react";
+import { Bookmark, Headphones } from "lucide-react";
 import { memo, useMemo, type ReactNode } from "react";
 
-import type { Segment, TalkTime } from "@/lib/engine";
+import type { Note, Segment, TalkTime } from "@/lib/engine";
 import { clock, initials, minutes, type SpeakerColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const NO_SEGMENTS: Segment[] = [];
+const NO_NOTES: Note[] = [];
 
 export function PersonAvatar({
   name,
@@ -90,6 +91,7 @@ export function SpeakerLanes({
   colorOf,
   time,
   solo,
+  notes = NO_NOTES,
   onSeek,
   onSolo,
 }: {
@@ -99,6 +101,7 @@ export function SpeakerLanes({
   colorOf: (name: string) => SpeakerColor;
   time: number;
   solo: string | null;
+  notes?: Note[];
   onSeek: (seconds: number) => void;
   onSolo: (name: string | null) => void;
 }) {
@@ -119,6 +122,33 @@ export function SpeakerLanes({
   return (
     <div className="select-none rounded-xl border bg-card p-4">
       <div className="space-y-2">
+        {notes.length > 0 && (
+          <div className="flex items-center gap-3">
+            <div className="flex w-40 shrink-0 items-center gap-2 px-1.5 text-xs text-muted-foreground">
+              <Bookmark className="size-3" />
+              Your notes
+            </div>
+            <div className="relative h-4 flex-1">
+              {notes.map((note) => (
+                <button
+                  key={note.id}
+                  onClick={() => onSeek(note.at)}
+                  title={`${clock(note.at)} ${note.text || "Bookmarked moment"}`}
+                  aria-label={`Note at ${clock(note.at)}`}
+                  className="absolute top-0 -translate-x-1/2"
+                  style={{ left: `${(note.at / length) * 100}%` }}
+                >
+                  <Bookmark
+                    className={cn(
+                      "size-3.5",
+                      note.kind === "bookmark" ? "fill-amber-400 text-amber-500" : "fill-muted text-muted-foreground",
+                    )}
+                  />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {talk.map((t) => {
           const color = colorOf(t.speaker);
           const active = solo === t.speaker;

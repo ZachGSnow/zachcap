@@ -86,6 +86,7 @@ export type MeetingDetail = {
   speakers: Speaker[];
   segments: Segment[];
   summary: Summary | null;
+  notes: Note[];
   talk_time: TalkTime[];
   action_items: ActionItem[];
   me: string;
@@ -127,7 +128,11 @@ export type RecordState =
       levels: { mic: number; system: number };
       devices?: { mic: string; system: string };
       errors?: string[];
+      paused?: boolean;
+      notes?: number;
     };
+
+export type Note = { id: number; meeting_id: number; at: number; kind: "note" | "bookmark"; text: string };
 
 export type KeyStatus = Record<"anthropic" | "huggingface", string>;
 

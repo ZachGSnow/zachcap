@@ -169,6 +169,20 @@ def test_a_recipe_writes_a_document_from_the_meeting(meeting, monkeypatch):
         summarize.recipe(store, meeting_id, "poem")
 
 
+def test_summaries_cover_the_notes_taken_during_the_meeting(meeting, monkeypatch):
+    store, meeting_id = meeting
+    store.add_note(meeting_id, 61.5, "note", "Confirm the change window")
+    store.add_note(meeting_id, 90.0, "bookmark")
+    calls = fake_claude(monkeypatch, sample_summary())
+
+    summarize.summarize(store, meeting_id)
+
+    content = calls["messages"][0]["content"]
+    assert "Notes You took during the meeting" in content
+    assert "[01:01] Confirm the change window" in content
+    assert "[01:30] marked this moment as important" in content
+
+
 def test_timestamps_become_seconds():
     assert summarize.to_seconds("01:01") == 61
     assert summarize.to_seconds("[1:02:03]") == 3723

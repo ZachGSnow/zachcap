@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AskPanel } from "@/components/AskPanel";
+import { NotesPanel } from "@/components/NotesPanel";
 import { PlayerBar, type PlayerState } from "@/components/PlayerBar";
 import { SummaryPanel } from "@/components/SummaryPanel";
 import { NamePrompt, Transcript, WhoIsThis } from "@/components/Transcript";
@@ -368,6 +369,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
               colorOf={colorOf}
               time={player.time}
               solo={solo}
+              notes={data.notes}
               onSeek={seek}
               onSolo={setSolo}
             />
@@ -385,8 +387,20 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 )}
               </TabsTrigger>
               <TabsTrigger value="speakers">Speakers</TabsTrigger>
+              <TabsTrigger value="notes">
+                Notes
+                {data.notes.length > 0 && (
+                  <span className="ml-1.5 rounded-full bg-muted-foreground/15 px-1.5 text-[10px] tabular-nums">
+                    {data.notes.length}
+                  </span>
+                )}
+              </TabsTrigger>
               <TabsTrigger value="ask">Ask</TabsTrigger>
             </TabsList>
+
+            <TabsContent value="notes">
+              <NotesPanel meetingId={id} notes={data.notes} time={player.time} onSeek={seek} onChanged={() => void refresh()} />
+            </TabsContent>
 
             {/* Kept mounted, so questions and an answer still on its way survive a tab switch. */}
             <TabsContent value="ask" forceMount className="data-[state=inactive]:hidden">

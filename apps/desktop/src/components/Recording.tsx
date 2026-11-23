@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Circle, Mic, Square, TriangleAlert } from "lucide-react";
+import { Bookmark, Circle, Mic, Pause, Play, Square, TriangleAlert } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -19,12 +19,16 @@ import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type RecordState } from "@/lib/engine";
 import { announce, notify, windowShowing } from "@/lib/feedback";
 import { clock, levelPercent } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 type RecordingContext = {
   state: RecordState | undefined;
   start: (title: string) => Promise<void>;
   stop: () => Promise<number | undefined>;
   toggle: () => Promise<void>;
+  /** A note, or with no text a bookmark, at this moment of the recording. */
+  note: (text?: string) => Promise<boolean>;
+  pause: (paused: boolean) => Promise<void>;
 };
 
 const Context = createContext<RecordingContext | null>(null);
@@ -76,29 +80,65 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     }
   }, [start, stop]);
 
+  const note = useCallback(
+    async (text = "") => {
+      try {
+        const saved = await api<{ at: number }>("/api/record/note", {
+          method: "POST",
+          json: { text, kind: text.trim() ? "note" : "bookmark" },
+        });
+        void announce(text.trim() ? "Note saved" : "Bookmarked", `At ${clock(saved.at)} in the recording.`, "success");
+        await refresh();
+        return true;
+      } catch (error) {
+        void announce(text.trim() ? "Couldn't save the note" : "Couldn't bookmark", String(error), "error");
+        return false;
+      }
+    },
+    [refresh],
+  );
+
+  const pause = useCallback(
+    async (paused: boolean) => {
+      try {
+        await api("/api/record/pause", { method: "POST", json: { paused } });
+        await refresh();
+      } catch (error) {
+        void announce(paused ? "Couldn't pause" : "Couldn't resume", String(error), "error");
+      }
+    },
+    [refresh],
+  );
+
   // The tray icon's tooltip says when a recording is running, even with the window closed.
   const recording = state?.recording ?? false;
   useEffect(() => {
     if (isTauri()) void invoke("set_recording_indicator", { recording }).catch(() => undefined);
   }, [recording]);
 
-  // The tray menu and Ctrl+Alt+R (both registered by the Rust shell) toggle recording,
-  // even when the window is hidden in the tray.
+  // The tray menu, Ctrl+Alt+R and Ctrl+Alt+B (registered by the Rust shell) work even when
+  // the window is hidden in the tray.
   useEffect(() => {
     if (!isTauri()) return;
-    let unlisten: (() => void) | undefined;
+    const stops: (() => void)[] = [];
     let cancelled = false;
-    void listen("toggle-recording", () => void toggle()).then((stop) => {
-      if (cancelled) stop();
-      else unlisten = stop;
+    const on = (event: string, handler: () => void) =>
+      void listen(event, handler).then((stop) => {
+        if (cancelled) stop();
+        else stops.push(stop);
+      });
+    on("toggle-recording", () => void toggle());
+    on("bookmark", () => {
+      if (recording) void note();
+      else void announce("Not recording", "Bookmarks mark a moment of a recording. Press Ctrl+Alt+R to start one.");
     });
     return () => {
       cancelled = true;
-      unlisten?.();
+      stops.forEach((stop) => stop());
     };
-  }, [toggle]);
+  }, [toggle, note, recording]);
 
-  return <Context.Provider value={{ state, start, stop, toggle }}>{children}</Context.Provider>;
+  return <Context.Provider value={{ state, start, stop, toggle, note, pause }}>{children}</Context.Provider>;
 }
 
 /** Offers to record when a meeting app starts using the microphone (no Teams integration needed). */
@@ -220,9 +260,11 @@ function Meter({ label, dbfs }: { label: string; dbfs: number }) {
 }
 
 export function RecordingBar() {
-  const { state, stop } = useRecording();
+  const { state, stop, note, pause } = useRecording();
   const [stopping, setStopping] = useState(false);
+  const [text, setText] = useState("");
   if (!state?.recording) return null;
+  const paused = state.paused ?? false;
 
   const finish = async () => {
     setStopping(true);
@@ -236,26 +278,67 @@ export function RecordingBar() {
   };
 
   return (
-    <div className="flex select-none items-center gap-5 border-b bg-red-500/5 px-5 py-2.5">
-      <div className="flex items-center gap-2">
+    <div className={cn("flex select-none items-center gap-4 border-b px-5 py-2.5", paused ? "bg-amber-500/5" : "bg-red-500/5")}>
+      <div className="flex shrink-0 items-center gap-2">
         <span className="relative flex size-2.5">
-          <span className="absolute inline-flex size-full animate-ping rounded-full bg-red-500 opacity-60" />
-          <span className="relative inline-flex size-2.5 rounded-full bg-red-500" />
+          {!paused && <span className="absolute inline-flex size-full animate-ping rounded-full bg-red-500 opacity-60" />}
+          <span className={cn("relative inline-flex size-2.5 rounded-full", paused ? "bg-amber-500" : "bg-red-500")} />
         </span>
-        <span className="text-sm font-medium">{state.title || "Recording"}</span>
+        <span className="max-w-48 truncate text-sm font-medium">{paused ? "Paused" : state.title || "Recording"}</span>
         <span className="font-mono text-sm tabular-nums text-muted-foreground">{clock(state.elapsed)}</span>
       </div>
-      <div className="flex flex-col gap-1">
+      <div className={cn("flex shrink-0 flex-col gap-1", paused && "opacity-40")}>
         <Meter label="You" dbfs={state.levels.mic} />
         <Meter label="Meeting" dbfs={state.levels.system} />
       </div>
+      <form
+        className="flex min-w-40 flex-1 items-center gap-1.5"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (text.trim() && (await note(text.trim()))) setText("");
+        }}
+      >
+        <Input
+          aria-label="Note at this moment"
+          placeholder="Type a note, press Enter"
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          className="h-8 text-xs"
+        />
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          className="size-8 shrink-0"
+          title="Bookmark this moment (Ctrl+Alt+B)"
+          aria-label="Bookmark this moment"
+          onClick={() => void note()}
+        >
+          <Bookmark className="size-4" />
+        </Button>
+        {(state.notes ?? 0) > 0 && (
+          <span className="shrink-0 text-xs tabular-nums text-muted-foreground" title="Notes and bookmarks so far">
+            {state.notes}
+          </span>
+        )}
+      </form>
       {state.errors && state.errors.length > 0 && (
         <span className="flex min-w-0 items-center gap-1.5 text-xs text-destructive" title={state.errors.join("\n")}>
           <TriangleAlert className="size-3.5 shrink-0" />
           <span className="truncate">{state.errors[0]}</span>
         </span>
       )}
-      <Button size="sm" variant="destructive" className="ml-auto" disabled={stopping} onClick={() => void finish()}>
+      <Button
+        size="sm"
+        variant="outline"
+        className="shrink-0"
+        title={paused ? "Resume recording" : "Pause privately: nothing is recorded until you resume"}
+        onClick={() => void pause(!paused)}
+      >
+        {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
+        {paused ? "Resume" : "Pause"}
+      </Button>
+      <Button size="sm" variant="destructive" className="shrink-0" disabled={stopping} onClick={() => void finish()}>
         <Square className="size-3.5 fill-current" />
         {stopping ? "Saving..." : "Stop"}
       </Button>
