@@ -33,6 +33,7 @@ from . import (
     __version__,
     apikeys,
     audio,
+    dictation,
     digest,
     export,
     imports,
@@ -165,6 +166,7 @@ class SettingsBody(BaseModel):
     mask_before_claude: bool | None = None
     stop_when_call_ends: bool | None = None
     export_work_log: bool | None = None  # keep a daily and weekly work log in the export folder
+    dictation: bool | None = None  # hold Ctrl+Alt+D to dictate into any app
     also_answer_to: str | None = None  # other names you answer to, comma-separated
     watch_folder: str | None = None  # "" turns the watch folder off
     watch_existing: bool = False  # with watch_folder: import the files already there too
@@ -172,6 +174,10 @@ class SettingsBody(BaseModel):
 
 KEEP_AUDIO_CHOICES = (0, 7, 30, 90, 365)
 NO_STORE = {"Cache-Control": "no-store"}
+
+
+class DictateBody(BaseModel):
+    type: bool = True  # type the text into the app in front (False: only return it)
 
 
 class WorkLogBody(BaseModel):
@@ -269,11 +275,19 @@ def create_app(token: str) -> FastAPI:
     )
     worker = Worker()
     recording: dict = {}
+    dictator = dictation.Dictation()
+
+    def language_of(store: Store) -> str | None:
+        language = store.setting("language", "en")
+        return None if language == "auto" else language
+
     lock = threading.Lock()
 
     startup = Store()
     try:
         recover(startup, worker.submit)
+        if startup.setting(dictation.SETTING) == "1":  # ready before the keys are first held
+            dictator.transcriber.warm_up(language_of(startup))
     finally:
         startup.close()
 
@@ -1028,6 +1042,41 @@ def create_app(token: str) -> FastAPI:
             )
         return result
 
+    # Dictation ------------------------------------------------------------------------
+
+    @app.post("/api/dictate/start", dependencies=auth)
+    def dictate_start(store: Store = Depends(db)):
+        """The dictation keys went down: listen."""
+        if store.setting(dictation.SETTING) != "1":
+            raise HTTPException(status_code=400, detail="Dictation is off (Settings)")
+        try:
+            dictator.start(store.setting("mic_device") or None)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"Couldn't open the mic: {exc}") from exc
+        return {"listening": True}
+
+    @app.post("/api/dictate/stop", dependencies=auth)
+    def dictate_stop(body: DictateBody | None = None, store: Store = Depends(db)):
+        """The keys came up: transcribe what was said and type it where the cursor is."""
+        vocab = words.parse(store.setting("vocabulary"))
+        names = [p["name"] for p in store.people() if p["name"].lower() not in {"you", "me"}]
+        try:
+            return dictator.finish(
+                language_of(store),
+                vocab.hotwords(names),
+                fix=vocab.correct,
+                type_it=body.type if body else True,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/dictate/cancel", dependencies=auth)
+    def dictate_cancel():
+        dictator.cancel()
+        return {"listening": False}
+
     @app.get("/api/call", dependencies=auth)
     def call():
         """Apps using the microphone right now, so the app can offer to record."""
@@ -1146,6 +1195,7 @@ def create_app(token: str) -> FastAPI:
             # Offer to stop (with a countdown) when the call ends or after a long silence.
             "stop_when_call_ends": store.setting("stop_when_call_ends", "1") == "1",
             "export_work_log": store.setting("export_work_log") == "1",
+            "dictation": store.setting(dictation.SETTING) == "1",
             "soundcheck_passed": store.setting("soundcheck_passed"),
             "templates": prompts.choices(store, "template"),
             "recipes": prompts.choices(store, "recipe"),
@@ -1176,6 +1226,10 @@ def create_app(token: str) -> FastAPI:
             store.set_setting("mask_before_claude", "1" if body.mask_before_claude else "0")
         if body.stop_when_call_ends is not None:
             store.set_setting("stop_when_call_ends", "1" if body.stop_when_call_ends else "0")
+        if body.dictation is not None:
+            store.set_setting(dictation.SETTING, "1" if body.dictation else "0")
+            if body.dictation:  # loaded now, so the first dictation is quick
+                dictator.transcriber.warm_up(language_of(store))
         if body.export_work_log is not None:
             store.set_setting("export_work_log", "1" if body.export_work_log else "0")
             if body.export_work_log:  # today's and this week's, right away

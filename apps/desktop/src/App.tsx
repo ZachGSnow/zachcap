@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { DictationKeys } from "@/components/Dictation";
 import { CallWatcher, RecordingBar, RecordingProvider } from "@/components/Recording";
 import { Sidebar, type View } from "@/components/Sidebar";
 import { Button } from "@/components/ui/button";
@@ -245,6 +246,7 @@ function Shell() {
           {engineStopped && <EngineStopped message={engineStopped} onRestarted={() => setEngineStopped(null)} />}
           <RecordingBar />
           <CallWatcher />
+          <DictationKeys />
           <ErrorBoundary key={JSON.stringify(view)} onReset={() => setView({ name: "meetings" })}>
             {view.name === "meetings" && (
               <MeetingsView onOpen={openMeeting} onSettings={() => setView({ name: "settings" })} onImport={() => void chooseFile()} />

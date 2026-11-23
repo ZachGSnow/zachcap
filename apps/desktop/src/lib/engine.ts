@@ -212,6 +212,8 @@ export type Settings = {
   export_work_log: boolean;
   /** When a sound check last heard both sides (null: never). */
   soundcheck_passed: string | null;
+  /** Hold Ctrl+Alt+D to dictate into any app. */
+  dictation: boolean;
   templates: { id: string; label: string }[];
   recipes: { id: string; label: string }[];
   me: { id: number; name: string };
