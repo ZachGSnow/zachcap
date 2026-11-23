@@ -10,6 +10,8 @@ type Dictated = {
   took: number;
   typed: number;
   copied: boolean;
+  /** Something was said, and "scratch that" took it all back. */
+  taken_back?: boolean;
   /** Why it wasn't typed (it was copied instead), or null when it was. */
   why: "nowhere" | "keys" | "switched" | "admin" | "refused" | null;
 };
@@ -60,7 +62,9 @@ export function DictationKeys() {
             method: "POST",
             json: { type: true, id },
           });
-          if (!result.text) {
+          if (result.taken_back) {
+            void announce("Taken back", "You said scratch that, so nothing was typed.");
+          } else if (!result.text) {
             void announce("Didn't catch that", "Nothing was heard while the keys were held.", "warning");
           } else if (result.why && result.copied) {
             void announce("Copied instead", `${NOT_TYPED[result.why]} Paste with Ctrl+V.`, "warning");
