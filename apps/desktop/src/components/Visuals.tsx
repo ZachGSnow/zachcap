@@ -1,9 +1,11 @@
 import { Headphones } from "lucide-react";
-import type { ReactNode } from "react";
+import { memo, useMemo, type ReactNode } from "react";
 
 import type { Segment, TalkTime } from "@/lib/engine";
 import { clock, initials, minutes, type SpeakerColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
+
+const NO_SEGMENTS: Segment[] = [];
 
 export function PersonAvatar({
   name,
@@ -62,6 +64,24 @@ export function StatCard({ label, value, hint, icon }: { label: string; value: R
   );
 }
 
+/** The bars of one lane. Memoized, so playback only moves the playhead. */
+const LaneBars = memo(function LaneBars({ segments, dot, length }: { segments: Segment[]; dot: string; length: number }) {
+  return (
+    <>
+      {segments.map((s) => (
+        <div
+          key={s.id}
+          className={cn("absolute top-0.5 bottom-0.5 rounded-sm", dot)}
+          style={{
+            left: `${(s.start / length) * 100}%`,
+            width: `max(2px, ${((s.end - s.start) / length) * 100}%)`,
+          }}
+        />
+      ))}
+    </>
+  );
+});
+
 /** One lane per speaker: when each person talked, with a playhead and solo buttons. */
 export function SpeakerLanes({
   segments,
@@ -83,8 +103,18 @@ export function SpeakerLanes({
   onSolo: (name: string | null) => void;
 }) {
   const total = talk.reduce((sum, t) => sum + t.seconds, 0) || 1;
-  const length = Math.max(duration, ...segments.map((s) => s.end), 1);
+  const lastEnd = useMemo(() => segments.reduce((end, s) => Math.max(end, s.end), 0), [segments]);
+  const length = Math.max(duration, lastEnd, 1);
   const ticks = Array.from({ length: 5 }, (_, i) => (length * i) / 4);
+  const bySpeaker = useMemo(() => {
+    const lanes = new Map<string, Segment[]>();
+    for (const s of segments) {
+      const lane = lanes.get(s.speaker);
+      if (lane) lane.push(s);
+      else lanes.set(s.speaker, [s]);
+    }
+    return lanes;
+  }, [segments]);
 
   return (
     <div className="select-none rounded-xl border bg-card p-4">
@@ -117,18 +147,7 @@ export function SpeakerLanes({
                   onSeek(((event.clientX - box.left) / box.width) * length);
                 }}
               >
-                {segments
-                  .filter((s) => s.speaker === t.speaker)
-                  .map((s) => (
-                    <div
-                      key={s.id}
-                      className={cn("absolute top-0.5 bottom-0.5 rounded-sm", color.dot)}
-                      style={{
-                        left: `${(s.start / length) * 100}%`,
-                        width: `max(2px, ${((s.end - s.start) / length) * 100}%)`,
-                      }}
-                    />
-                  ))}
+                <LaneBars segments={bySpeaker.get(t.speaker) ?? NO_SEGMENTS} dot={color.dot} length={length} />
                 <div
                   className="pointer-events-none absolute top-[-3px] bottom-[-3px] w-px bg-foreground"
                   style={{ left: `${(time / length) * 100}%` }}
