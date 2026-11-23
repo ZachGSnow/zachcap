@@ -15,7 +15,7 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 
 ## Features
 
-- **Record any call** with one button or **Ctrl+Alt+R** from anywhere; the app lives in the tray. It notices when Teams or another app starts using your microphone and offers to record.
+- **Record any call** with one button or **Ctrl+Alt+R** from anywhere; the app lives in the tray and can start with Windows. It notices when Teams or another app starts using your microphone and offers to record.
 - **Import recordings** you already have (a Teams .mp4, .m4a, .mp3, .wav...), with an optional time range.
 - **Transcription on your GPU** with Whisper (`large-v3-turbo`): about 2-3 minutes per hour of audio on a 4 GB laptop GPU.
 - **Speaker separation and voice recognition**: a "Who's this?" card plays a short sample of each unknown voice; name them once and ZachCap recognizes them next time, including you on your own mic and people in the room with you.
@@ -64,6 +64,7 @@ Everything is set in the app under **Settings**:
 | Language | Whisper's language, or automatic detection | English |
 | Claude model | Opus 5.5, Sonnet 5.5 or Fable 5.1 | Opus 5.5 |
 | API keys | Hugging Face token and Anthropic key | not set |
+| Start with Windows | Opens ZachCap in the tray when you sign in (release builds) | off |
 
 Environment variables for development: `ZACHCAP_HOME` (data folder, default `%LOCALAPPDATA%\ZachCap`), `ZACHCAP_ENGINE_DIR` (engine location for the desktop app).
 
