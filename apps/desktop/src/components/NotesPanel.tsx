@@ -1,5 +1,5 @@
 import { Bookmark, NotebookPen, Plus, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,16 +24,20 @@ export function NotesPanel({
   onChanged: () => void;
 }) {
   const [text, setText] = useState("");
+  const saving = useRef(false);
 
   const add = async () => {
-    if (!text.trim()) return;
+    const value = text.trim();
+    if (!value || saving.current) return;
+    saving.current = true;
+    // Cleared right away, so a second Enter can't save it twice.
+    setText("");
     const added = await attempt("Couldn't save the note", () =>
-      api(`/api/meetings/${meetingId}/notes`, { method: "POST", json: { text: text.trim(), kind: "note", at: time } }),
+      api(`/api/meetings/${meetingId}/notes`, { method: "POST", json: { text: value, kind: "note", at: time } }),
     );
-    if (added) {
-      setText("");
-      onChanged();
-    }
+    saving.current = false;
+    if (added) onChanged();
+    else setText((typed) => (typed ? `${value} ${typed}` : value));
   };
 
   const remove = async (note: Note) => {

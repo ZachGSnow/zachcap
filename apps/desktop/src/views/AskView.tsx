@@ -1,78 +1,27 @@
 import { ArrowUp, Loader2, MessagesSquare, RotateCcw } from "lucide-react";
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { toast } from "sonner";
+import { useEffect, useRef, useState } from "react";
 
-import { Answer, type CitedMeetings } from "@/components/Answer";
+import { Answer } from "@/components/Answer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import type { LibraryAsk } from "@/hooks/useLibraryAsk";
 import { usePoll } from "@/hooks/usePoll";
 import { api, type Person } from "@/lib/engine";
 import { modelLabel } from "@/components/SummaryPanel";
 
-export type LibraryExchange = {
-  question: string;
-  answer?: string;
-  meetings?: CitedMeetings;
-  cost?: number;
-  model?: string;
-  failed?: boolean;
-};
-
-type LibraryAnswer = { answer: string; meetings: CitedMeetings; cost_usd: number; model: string };
-
 /** Questions about every meeting. Claude searches the transcripts, summaries and action
  * items with read-only tools and cites the moments, which open the meeting. */
-export function AskView({
-  history,
-  setHistory,
-  initialQuestion,
-  onOpen,
-}: {
-  history: LibraryExchange[];
-  setHistory: Dispatch<SetStateAction<LibraryExchange[]>>;
-  initialQuestion?: string;
-  onOpen: (meetingId: number, at?: number) => void;
-}) {
+export function AskView({ library, onOpen }: { library: LibraryAsk; onOpen: (meetingId: number, at?: number) => void }) {
+  const { history, busy, ask, reset } = library;
   const [question, setQuestion] = useState("");
-  const [busy, setBusy] = useState(false);
   const { data: people } = usePoll(() => api<Person[]>("/api/people"), 0);
   const bottom = useRef<HTMLDivElement>(null);
 
-  const ask = async (text: string) => {
-    const asked = text.trim();
-    if (!asked || busy) return;
-    setQuestion("");
-    setBusy(true);
-    // Earlier answers go along, so follow-up questions ("and Mark?") make sense.
-    const earlier = history
-      .filter((e) => e.answer)
-      .slice(-6)
-      .map((e) => ({ question: e.question, answer: e.answer! }));
-    setHistory((h) => [...h, { question: asked }]);
-    try {
-      const result = await api<LibraryAnswer>("/api/ask", { method: "POST", json: { question: asked, history: earlier } });
-      setHistory((h) =>
-        h.map((e, i) =>
-          i === h.length - 1 ? { ...e, answer: result.answer, meetings: result.meetings, cost: result.cost_usd, model: result.model } : e,
-        ),
-      );
-    } catch (error) {
-      toast.error("Couldn't get an answer", { description: String(error) });
-      setHistory((h) => h.map((e, i) => (i === h.length - 1 ? { ...e, failed: true } : e)));
-    } finally {
-      setBusy(false);
-    }
+  const submit = (text: string) => {
+    if (!text.trim() || busy) return;
+    if (ask(text)) setQuestion("");
   };
-
-  // "Brief me" on a person opens this page with a question to ask right away (once).
-  const asked = useRef(false);
-  useEffect(() => {
-    if (initialQuestion && !asked.current) {
-      asked.current = true;
-      void ask(initialQuestion);
-    }
-  }, [initialQuestion]);
 
   useEffect(() => {
     // A block body: newer WebView2 builds return a Promise from scrollIntoView, and an
@@ -101,7 +50,7 @@ export function AskView({
               </p>
             </div>
             {history.length > 0 && (
-              <Button size="sm" variant="outline" disabled={busy} onClick={() => setHistory([])}>
+              <Button size="sm" variant="outline" disabled={busy} onClick={reset}>
                 <RotateCcw className="size-3.5" />
                 New conversation
               </Button>
@@ -119,7 +68,7 @@ export function AskView({
               </p>
               <div className="mt-5 flex max-w-xl flex-wrap justify-center gap-2">
                 {starters.map((starter) => (
-                  <Button key={starter} size="sm" variant="outline" onClick={() => void ask(starter)}>
+                  <Button key={starter} size="sm" variant="outline" onClick={() => submit(starter)}>
                     {starter}
                   </Button>
                 ))}
@@ -128,8 +77,8 @@ export function AskView({
           )}
 
           <div className="mt-6 space-y-5">
-            {history.map((exchange, index) => (
-              <div key={index} className="space-y-2">
+            {history.map((exchange) => (
+              <div key={exchange.id} className="space-y-2">
                 <div className="ml-auto w-fit max-w-[80%] rounded-2xl rounded-br-sm bg-foreground px-3.5 py-2 text-sm text-background">
                   {exchange.question}
                 </div>
@@ -139,6 +88,8 @@ export function AskView({
                       <Answer
                         text={exchange.answer}
                         meetings={exchange.meetings}
+                        // A bare [04:31] names no meeting here, so it isn't a link.
+                        localTimes={false}
                         onCite={(meetingId, at) => meetingId != null && onOpen(meetingId, at ?? undefined)}
                       />
                       <div className="mt-2 text-[10px] text-muted-foreground">
@@ -165,18 +116,19 @@ export function AskView({
         className="border-t bg-background px-8 py-3"
         onSubmit={(event) => {
           event.preventDefault();
-          void ask(question);
+          submit(question);
         }}
       >
         <div className="mx-auto flex max-w-3xl gap-2">
           <Input
             autoFocus
+            aria-label="Your question"
             placeholder="Ask about any meeting: who, what, when, what's still open"
             value={question}
             onChange={(event) => setQuestion(event.target.value)}
             className="h-10"
           />
-          <Button type="submit" size="icon" className="size-10 shrink-0" disabled={busy || !question.trim()}>
+          <Button type="submit" size="icon" className="size-10 shrink-0" aria-label="Ask" disabled={busy || !question.trim()}>
             {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
           </Button>
         </div>

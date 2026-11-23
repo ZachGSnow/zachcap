@@ -17,7 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type RecordState } from "@/lib/engine";
-import { announce, copyText, notify, windowShowing } from "@/lib/feedback";
+import { announce, copyText, notify, windowInFront } from "@/lib/feedback";
 import { clock, levelPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -33,6 +33,9 @@ type RecordingContext = {
   /** A note, or with no text a bookmark, at this moment of the recording. */
   note: (text?: string) => Promise<boolean>;
   pause: (paused: boolean) => Promise<void>;
+  /** The note being typed in the recording bar. Stopping saves it into this meeting. */
+  draft: string;
+  setDraft: (next: string | ((current: string) => string)) => void;
 };
 
 const Context = createContext<RecordingContext | null>(null);
@@ -57,13 +60,31 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     [refresh],
   );
 
+  const [draft, setDraftState] = useState("");
+  const draftNow = useRef("");
+  const setDraft = useCallback((next: string | ((current: string) => string)) => {
+    const text = typeof next === "function" ? next(draftNow.current) : next;
+    draftNow.current = text;
+    setDraftState(text);
+  }, []);
+
   const stop = useCallback(async () => {
+    // A note typed but not sent yet belongs to this meeting, not the next one.
+    const typed = draftNow.current.trim();
+    if (typed) {
+      try {
+        await api("/api/record/note", { method: "POST", json: { text: typed, kind: "note" } });
+        setDraft("");
+      } catch (error) {
+        void announce("Couldn't save the note you were typing", String(error), "error");
+      }
+    }
     const { meeting_id } = await api<{ meeting_id: number }>("/api/record/stop", { method: "POST" });
     await refresh();
     void announce("Recording saved", "Transcribing and finding speakers...", "success");
     onSaved(meeting_id);
     return meeting_id;
-  }, [refresh, onSaved]);
+  }, [refresh, onSaved, setDraft]);
 
   const busy = useRef(false);
   const toggle = useCallback(async () => {
@@ -116,9 +137,13 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
 
   // The tray icon's tooltip says when a recording is running, even with the window closed.
   const recording = state?.recording ?? false;
+  const recordingNow = useRef(recording);
   useEffect(() => {
+    recordingNow.current = recording;
     if (isTauri()) void invoke("set_recording_indicator", { recording }).catch(() => undefined);
-  }, [recording]);
+    // A half-typed note never carries over into the next recording.
+    if (!recording) setDraft("");
+  }, [recording, setDraft]);
 
   // The tray menu, Ctrl+Alt+R and Ctrl+Alt+B (registered by the Rust shell) work even when
   // the window is hidden in the tray.
@@ -133,16 +158,19 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
       });
     on("toggle-recording", () => void toggle());
     on("bookmark", () => {
-      if (recording) void note();
+      if (recordingNow.current) void note();
       else void announce("Not recording", "Bookmarks mark a moment of a recording. Press Ctrl+Alt+R to start one.");
     });
     return () => {
       cancelled = true;
       stops.forEach((stop) => stop());
     };
-  }, [toggle, note, recording]);
+    // Read from a ref, so starting or stopping doesn't re-subscribe (and drop a key press).
+  }, [toggle, note]);
 
-  return <Context.Provider value={{ state, start, stop, toggle, note, pause }}>{children}</Context.Provider>;
+  return (
+    <Context.Provider value={{ state, start, stop, toggle, note, pause, draft, setDraft }}>{children}</Context.Provider>
+  );
 }
 
 /** Offers to record when a meeting app starts using the microphone (no Teams integration needed). */
@@ -161,8 +189,8 @@ export function CallWatcher() {
     // Recording already (or stopped while still on the call): don't offer this call again.
     prompted.current = key;
     if (recording) return;
-    if (!(await windowShowing())) {
-      // Toasts wait in a hidden window; a Windows notification is seen right away.
+    if (!(await windowInFront())) {
+      // On a call the window is usually hidden or behind it; a notification is seen there.
       await notify(`${apps[0]} is using your microphone`, "Press Ctrl+Alt+R to record this call.");
       return;
     }
@@ -249,7 +277,7 @@ function Meter({ label, dbfs }: { label: string; dbfs: number }) {
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
       <span className="w-14 text-right">{label}</span>
-      <div className="flex h-2 w-32 gap-px">
+      <div className="flex h-2 w-20 gap-px">
         {Array.from({ length: 16 }, (_, i) => (
           <div
             key={i}
@@ -263,10 +291,12 @@ function Meter({ label, dbfs }: { label: string; dbfs: number }) {
   );
 }
 
+/** One row when there's room. In a narrower window the note field gets a row of its own and
+ * the level meters go, so Pause and Stop always stay on screen. */
 export function RecordingBar() {
-  const { state, stop, note, pause } = useRecording();
+  const { state, stop, note, pause, draft, setDraft } = useRecording();
   const [stopping, setStopping] = useState(false);
-  const [text, setText] = useState("");
+  const saving = useRef(false);
   if (!state?.recording) return null;
   const paused = state.paused ?? false;
 
@@ -281,81 +311,100 @@ export function RecordingBar() {
     }
   };
 
+  const saveNote = async () => {
+    const text = draft.trim();
+    if (!text || saving.current) return;
+    saving.current = true;
+    // Cleared right away, so a second Enter can't save it twice and the next note can be typed.
+    setDraft("");
+    try {
+      if (!(await note(text))) setDraft((typed) => (typed ? `${text} ${typed}` : text));
+    } finally {
+      saving.current = false;
+    }
+  };
+
   return (
-    <div className={cn("flex select-none items-center gap-4 border-b px-5 py-2.5", paused ? "bg-amber-500/5" : "bg-red-500/5")}>
-      <div className="flex shrink-0 items-center gap-2">
-        <span className="relative flex size-2.5">
-          {!paused && <span className="absolute inline-flex size-full animate-ping rounded-full bg-red-500 opacity-60" />}
-          <span className={cn("relative inline-flex size-2.5 rounded-full", paused ? "bg-amber-500" : "bg-red-500")} />
-        </span>
-        <span className="max-w-48 truncate text-sm font-medium">{paused ? "Paused" : state.title || "Recording"}</span>
-        <span className="font-mono text-sm tabular-nums text-muted-foreground">{clock(state.elapsed)}</span>
-      </div>
-      <div className={cn("flex shrink-0 flex-col gap-1", paused && "opacity-40")}>
-        <Meter label="You" dbfs={state.levels.mic} />
-        <Meter label="Meeting" dbfs={state.levels.system} />
-      </div>
-      <form
-        className="flex min-w-40 flex-1 items-center gap-1.5"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          if (text.trim() && (await note(text.trim()))) setText("");
-        }}
-      >
-        <Input
-          aria-label="Note at this moment"
-          placeholder="Type a note, press Enter"
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          className="h-8 text-xs"
-        />
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          className="size-8 shrink-0"
-          title="Bookmark this moment (Ctrl+Alt+B)"
-          aria-label="Bookmark this moment"
-          onClick={() => void note()}
+    <div className={cn("@container select-none border-b", paused ? "bg-amber-500/5" : "bg-red-500/5")}>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-2.5">
+        <div className="flex min-w-0 shrink-0 items-center gap-2">
+          <span className="relative flex size-2.5">
+            {!paused && <span className="absolute inline-flex size-full animate-ping rounded-full bg-red-500 opacity-60" />}
+            <span className={cn("relative inline-flex size-2.5 rounded-full", paused ? "bg-amber-500" : "bg-red-500")} />
+          </span>
+          <span className="max-w-40 truncate text-sm font-medium">{paused ? "Paused" : state.title || "Recording"}</span>
+          <span className="font-mono text-sm tabular-nums text-muted-foreground">{clock(state.elapsed)}</span>
+        </div>
+        <div className={cn("hidden shrink-0 flex-col gap-1 @3xl:flex", paused && "opacity-40")}>
+          <Meter label="You" dbfs={state.levels.mic} />
+          <Meter label="Meeting" dbfs={state.levels.system} />
+        </div>
+        <form
+          className="order-last flex basis-full items-center gap-1.5 @4xl:order-none @4xl:min-w-36 @4xl:flex-1 @4xl:basis-0"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void saveNote();
+          }}
         >
-          <Bookmark className="size-4" />
-        </Button>
-        {(state.notes ?? 0) > 0 && (
-          <span className="shrink-0 text-xs tabular-nums text-muted-foreground" title="Notes and bookmarks so far">
-            {state.notes}
+          <Input
+            aria-label="Note at this moment"
+            placeholder="Type a note, press Enter"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            className="h-8 text-xs"
+          />
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="size-8 shrink-0"
+            title="Bookmark this moment (Ctrl+Alt+B)"
+            aria-label="Bookmark this moment"
+            onClick={() => void note()}
+          >
+            <Bookmark className="size-4" />
+          </Button>
+          {(state.notes ?? 0) > 0 && (
+            <span className="shrink-0 text-xs tabular-nums text-muted-foreground" title="Notes and bookmarks so far">
+              {state.notes}
+            </span>
+          )}
+        </form>
+        {state.errors && state.errors.length > 0 && (
+          <span
+            className="order-last flex min-w-0 basis-full items-center gap-1.5 text-xs text-destructive"
+            title={state.errors.join("\n")}
+          >
+            <TriangleAlert className="size-3.5 shrink-0" />
+            <span className="truncate">{state.errors[0]}</span>
           </span>
         )}
-      </form>
-      {state.errors && state.errors.length > 0 && (
-        <span className="flex min-w-0 items-center gap-1.5 text-xs text-destructive" title={state.errors.join("\n")}>
-          <TriangleAlert className="size-3.5 shrink-0" />
-          <span className="truncate">{state.errors[0]}</span>
-        </span>
-      )}
-      <Button
-        size="icon"
-        variant="ghost"
-        className="size-8 shrink-0"
-        title="Copy a heads-up to paste in the meeting chat"
-        aria-label="Copy a heads-up that you're recording"
-        onClick={() => void copyText(HEADS_UP, "Heads-up copied: paste it in the meeting chat")}
-      >
-        <Megaphone className="size-4" />
-      </Button>
-      <Button
-        size="sm"
-        variant="outline"
-        className="shrink-0"
-        title={paused ? "Resume recording" : "Pause privately: nothing is recorded until you resume"}
-        onClick={() => void pause(!paused)}
-      >
-        {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
-        {paused ? "Resume" : "Pause"}
-      </Button>
-      <Button size="sm" variant="destructive" className="shrink-0" disabled={stopping} onClick={() => void finish()}>
-        <Square className="size-3.5 fill-current" />
-        {stopping ? "Saving..." : "Stop"}
-      </Button>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <Button
+            size="icon"
+            variant="ghost"
+            className="size-8"
+            title="Copy a heads-up to paste in the meeting chat"
+            aria-label="Copy a heads-up that you're recording"
+            onClick={() => void copyText(HEADS_UP, "Heads-up copied: paste it in the meeting chat")}
+          >
+            <Megaphone className="size-4" />
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            title={paused ? "Resume recording" : "Pause privately: nothing is recorded until you resume"}
+            onClick={() => void pause(!paused)}
+          >
+            {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
+            {paused ? "Resume" : "Pause"}
+          </Button>
+          <Button size="sm" variant="destructive" disabled={stopping} onClick={() => void finish()}>
+            <Square className="size-3.5 fill-current" />
+            {stopping ? "Saving..." : "Stop"}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

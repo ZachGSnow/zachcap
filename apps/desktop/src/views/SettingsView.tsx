@@ -248,11 +248,12 @@ export function SettingsView() {
     await refresh();
   };
 
-  const chooseExportFolder = async () => {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const folder = await open({ directory: true, title: "Export meetings to" });
-    if (typeof folder === "string") await save({ export_folder: folder });
-  };
+  const chooseExportFolder = () =>
+    attempt("Couldn't choose the folder", async () => {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const folder = await open({ directory: true, title: "Export meetings to" });
+      if (typeof folder === "string") await save({ export_folder: folder });
+    });
 
   const deviceOptions = (list: { name: string; default: boolean }[] | undefined) => [
     { value: "", label: `Windows default${list?.find((d) => d.default) ? ` (${list.find((d) => d.default)!.name})` : ""}` },

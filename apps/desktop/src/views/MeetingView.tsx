@@ -60,7 +60,11 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   const audio = useRef<HTMLAudioElement>(null);
   const [player, setPlayer] = useState<PlayerState>({ playing: false, time: 0, duration: 0, rate: 1 });
   const [solo, setSolo] = useState<string | null>(null);
-  const [tab, setTab] = useState<string | null>(null);
+  // A cited moment (from Ask, search or an action item) opens on the transcript at that line.
+  const [tab, setTab] = useState<string | null>(at != null ? "transcript" : null);
+  // The kind of meeting picked for the summary; null leaves it to the engine (this meeting's
+  // kind, or the usual kind from Settings).
+  const [kind, setKind] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [title, setTitle] = useState("");
   const [renaming, setRenaming] = useState<Speaker | null>(null);
@@ -176,13 +180,13 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
     }
   };
 
-  const summarize = async (template?: string) => {
+  const summarize = async () => {
     if (summarizing) return;
     setTab("summary");
     setSummarizing(true);
     const toastId = toast.loading("Summarizing with Claude...");
     try {
-      await api(`/api/meetings/${id}/summary`, { method: "POST", json: { template: template ?? null } });
+      await api(`/api/meetings/${id}/summary`, { method: "POST", json: { template: kind } });
       toast.success("Summary ready", { id: toastId });
       await refresh();
     } catch (error) {
@@ -460,9 +464,10 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 colorOf={colorOf}
                 templates={settings?.templates ?? []}
                 recipes={settings?.recipes ?? []}
-                template={meeting.template ?? settings?.summary_template ?? "general"}
+                kind={kind ?? meeting.template ?? settings?.summary_template ?? "general"}
+                onKindChange={setKind}
                 summarizing={summarizing}
-                onSummarize={(template) => void summarize(template)}
+                onSummarize={() => void summarize()}
                 onSeek={seek}
                 onChanged={() => void refresh()}
               />
@@ -492,6 +497,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 colorOf={colorOf}
                 currentId={current?.id}
                 playing={player.playing}
+                focusAt={at}
                 solo={solo}
                 onSeek={seek}
                 onChanged={refreshAll}

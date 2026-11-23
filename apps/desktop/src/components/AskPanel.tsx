@@ -1,5 +1,5 @@
 import { ArrowUp, Loader2, MessageCircleQuestion } from "lucide-react";
-import { memo, useState } from "react";
+import { memo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Answer } from "@/components/Answer";
@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/engine";
 
-type Exchange = { question: string; answer?: string; cost?: number; failed?: boolean };
+type Exchange = { id: number; question: string; answer?: string; cost?: number; failed?: boolean };
 
 const STARTERS = ["What did I commit to?", "What was decided?", "Were there any risks or blockers?", "Who owns the next steps?"];
 
@@ -16,22 +16,28 @@ export const AskPanel = memo(function AskPanel({ meetingId, onSeek }: { meetingI
   const [question, setQuestion] = useState("");
   const [history, setHistory] = useState<Exchange[]>([]);
   const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
+  const nextId = useRef(1);
 
   const ask = async (text: string) => {
-    if (!text.trim() || busy) return;
+    if (!text.trim() || inFlight.current) return;
+    inFlight.current = true;
+    const id = nextId.current++;
+    const update = (patch: Partial<Exchange>) => setHistory((h) => h.map((e) => (e.id === id ? { ...e, ...patch } : e)));
     setQuestion("");
     setBusy(true);
-    setHistory((h) => [...h, { question: text.trim() }]);
+    setHistory((h) => [...h, { id, question: text.trim() }]);
     try {
       const result = await api<{ answer: string; cost_usd: number }>(`/api/meetings/${meetingId}/ask`, {
         method: "POST",
         json: { question: text.trim() },
       });
-      setHistory((h) => h.map((e, i) => (i === h.length - 1 ? { ...e, answer: result.answer, cost: result.cost_usd } : e)));
+      update({ answer: result.answer, cost: result.cost_usd });
     } catch (error) {
       toast.error("Couldn't get an answer", { description: String(error) });
-      setHistory((h) => h.map((e, i) => (i === h.length - 1 ? { ...e, failed: true } : e)));
+      update({ failed: true });
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };
@@ -57,15 +63,19 @@ export const AskPanel = memo(function AskPanel({ meetingId, onSeek }: { meetingI
         </div>
       )}
       <div className="space-y-4">
-        {history.map((exchange, index) => (
-          <div key={index} className="space-y-2">
+        {history.map((exchange) => (
+          <div key={exchange.id} className="space-y-2">
             <div className="ml-auto w-fit max-w-[80%] rounded-2xl rounded-br-sm bg-foreground px-3.5 py-2 text-sm text-background">
               {exchange.question}
             </div>
             <div className="max-w-[90%] rounded-2xl rounded-bl-sm border bg-card px-3.5 py-2.5">
               {exchange.answer ? (
                 <>
-                  <Answer text={exchange.answer} onCite={(_, at) => at != null && onSeek(at)} />
+                  <Answer
+                    text={exchange.answer}
+                    // A moment of another meeting ([M12 04:31]) isn't one to seek to here.
+                    onCite={(other, at) => (other == null || other === meetingId) && at != null && onSeek(at)}
+                  />
                   {exchange.cost != null && (
                     <div className="mt-1.5 text-[10px] text-muted-foreground">${exchange.cost.toFixed(4)}</div>
                   )}
@@ -90,12 +100,13 @@ export const AskPanel = memo(function AskPanel({ meetingId, onSeek }: { meetingI
         }}
       >
         <Input
+          aria-label="Your question about this meeting"
           placeholder="Ask anything about this meeting"
           value={question}
           onChange={(event) => setQuestion(event.target.value)}
           className="h-10"
         />
-        <Button type="submit" size="icon" className="size-10 shrink-0" disabled={busy || !question.trim()}>
+        <Button type="submit" size="icon" className="size-10 shrink-0" aria-label="Ask" disabled={busy || !question.trim()}>
           {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
         </Button>
       </form>
