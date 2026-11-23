@@ -59,9 +59,10 @@ def _time_range(started: datetime, seconds: float | None) -> str:
 def build(store: Store, period: str, day: date, client: str | None = None) -> dict:
     """The work log for the day or week containing ``day`` (only ``client``'s meetings, if
     given)."""
-    from . import clients
+    from . import clients, topics
 
     start, end = period_range(period, day)
+    said = topics.counts(store)
     me = store.me()["name"]
     # Only the period's meetings are read: the log is rebuilt on every change to one of them.
     meetings = store.meetings_between(start.isoformat(), end.isoformat())
@@ -100,6 +101,15 @@ def build(store: Store, period: str, day: date, client: str | None = None) -> di
                 "status": meeting["status"],
                 "ticket": store.column(meeting, "ticket"),
                 "client": client_of[meeting["id"]]["client"],
+                # Topics said in it, most said first.
+                "topics": sorted(
+                    (
+                        {"topic": name, "count": per[meeting["id"]]}
+                        for name, per in said.items()
+                        if meeting["id"] in per
+                    ),
+                    key=lambda topic: -topic["count"],
+                ),
             }
         )
     every = [m for listed in days.values() for m in listed]
@@ -209,6 +219,9 @@ def markdown(log: dict, cite: bool = False) -> str:
             if m["people"]:
                 lines += [f"With {', '.join(m['people'])}.", ""]
             lines.append(m["overview"] or "Not summarized yet.")
+            if m.get("topics"):
+                named = ", ".join(f"{t['topic']} ({t['count']})" for t in m["topics"])
+                lines += ["", f"Topics: {named}."]
             if m["decisions"]:
                 lines += ["", "Decisions:"] + [f"- {d}" for d in m["decisions"]]
             if m["items"]:

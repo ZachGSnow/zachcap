@@ -1,4 +1,4 @@
-import { AtSign, Check, EyeOff, MoreHorizontal, Pencil, Play, Search, UserRoundSearch } from "lucide-react";
+import { AtSign, Check, EyeOff, Hash, MoreHorizontal, Pencil, Play, Search, UserRoundSearch } from "lucide-react";
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { api, mediaUrl, type Mention, type Person, type Segment, type Speaker } from "@/lib/engine";
+import { api, mediaUrl, type Mention, type Person, type Segment, type Speaker, type TopicFound } from "@/lib/engine";
 import { attempt } from "@/lib/feedback";
 import { clock, minutes, type SpeakerColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -382,6 +382,7 @@ export const Transcript = memo(function Transcript({
   focusAt,
   solo,
   mentions,
+  topics,
   onSeek,
   onChanged,
   onRedact,
@@ -397,6 +398,8 @@ export const Transcript = memo(function Transcript({
   solo: string | null;
   /** Lines by others that say your name: marked, and a filter to show only them. */
   mentions?: Mention[];
+  /** Topics said in the meeting: a filter for each shows only its lines, marked. */
+  topics?: TopicFound[];
   onSeek: (seconds: number) => void;
   onChanged: () => void;
   /** Opens the redaction dialog for the moment this line was said; ``from`` is the line's
@@ -421,15 +424,22 @@ export const Transcript = memo(function Transcript({
 
   const [onlyMentions, setOnlyMentions] = useState(false);
   const mentioned = useMemo(() => new Map((mentions ?? []).map((m) => [m.segment_id, m.spans])), [mentions]);
+  // One topic's lines only, marked (instead of the name marks) while it's picked.
+  const [onlyTopic, setOnlyTopic] = useState<string | null>(null);
+  const topicLines = useMemo(() => {
+    const topic = (topics ?? []).find((t) => t.topic === onlyTopic);
+    return new Map((topic?.lines ?? []).map((line) => [line.segment_id, line.spans]));
+  }, [topics, onlyTopic]);
   const shown = useMemo(() => {
     const needle = filter.trim().toLowerCase();
     return segments.filter(
       (s) =>
         (!needle || s.text.toLowerCase().includes(needle) || s.speaker.toLowerCase().includes(needle)) &&
         (!solo || s.speaker === solo) &&
-        (!onlyMentions || mentioned.has(s.id)),
+        (!onlyMentions || mentioned.has(s.id)) &&
+        (!onlyTopic || topicLines.has(s.id)),
     );
-  }, [segments, filter, solo, onlyMentions, mentioned]);
+  }, [segments, filter, solo, onlyMentions, mentioned, onlyTopic, topicLines]);
 
   useEffect(() => {
     if (!playing) return;
@@ -522,8 +532,8 @@ export const Transcript = memo(function Transcript({
 
   return (
     <div>
-      <div className="mb-3 flex items-center gap-2">
-        <div className="relative min-w-0 flex-1">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <div className="relative min-w-48 flex-1">
           <Search className="pointer-events-none absolute top-2.5 left-2.5 size-4 text-muted-foreground" />
           <Input
             placeholder="Filter the transcript"
@@ -541,12 +551,32 @@ export const Transcript = memo(function Transcript({
             className="h-9 shrink-0"
             aria-pressed={onlyMentions}
             title={onlyMentions ? "Show every line" : "Show only the lines where someone said your name"}
-            onClick={() => setOnlyMentions(!onlyMentions)}
+            onClick={() => {
+              setOnlyTopic(null);
+              setOnlyMentions(!onlyMentions);
+            }}
           >
             <AtSign className="size-3.5" />
             Said your name ({mentioned.size})
           </Button>
         )}
+        {(topics ?? []).map((topic) => (
+          <Button
+            key={topic.topic}
+            size="sm"
+            variant={onlyTopic === topic.topic ? "default" : "outline"}
+            className="h-9 shrink-0"
+            aria-pressed={onlyTopic === topic.topic}
+            title={onlyTopic === topic.topic ? "Show every line" : `Show only the lines about ${topic.topic}`}
+            onClick={() => {
+              setOnlyMentions(false);
+              setOnlyTopic(onlyTopic === topic.topic ? null : topic.topic);
+            }}
+          >
+            <Hash className="size-3.5" />
+            {topic.topic} ({topic.count})
+          </Button>
+        ))}
       </div>
       {shown.length === 0 && (
         <p className="py-6 text-center text-sm text-muted-foreground">
@@ -561,7 +591,7 @@ export const Transcript = memo(function Transcript({
             color={colorOf(segment.speaker)}
             current={(currentId === segment.id && playing) || segment.id === focusId}
             editing={segment.id === editingId}
-            spans={mentioned.get(segment.id)}
+            spans={onlyTopic ? topicLines.get(segment.id) : mentioned.get(segment.id)}
             onSeek={onSeek}
             onPickSpeaker={pickSpeaker}
             onLineMenu={lineMenu}
