@@ -70,3 +70,36 @@ def test_unknown_speakers_tracks_and_gaps_keep_lines_apart():
         row(None, 5.6, 6.0, "Six"),  # unassigned words are never merged
     ]
     assert len(merge_same_person(rows, who)) == 6
+
+
+def test_words_to_know_are_spelled_before_the_database_is_locked(tmp_path: Path, monkeypatch):
+    from zachcap import vocabulary
+    from zachcap.diarize import Diarization
+    from zachcap.transcript import Turn, Word
+
+    store = Store(tmp_path / "test.db")
+    store.set_setting("vocabulary", "Proxmox: prox mocks")
+    meeting = store.create_meeting("Sync", "2026-11-22T20:00:00", tmp_path)
+    said = [Word(0.0, 0.3, " The"), Word(0.3, 0.6, " prox"), Word(0.6, 0.9, " mocks"),
+            Word(0.9, 1.2, " host.")]  # fmt: skip
+    monkeypatch.setattr(pipeline, "_load_tracks", lambda folder, log: {"system": np.zeros(16000)})
+    monkeypatch.setattr(pipeline, "_transcribe", lambda *args: {"system": said})
+    monkeypatch.setattr(
+        pipeline,
+        "_diarize",
+        lambda tracks, words, log: ({"system": Diarization([Turn(0.0, 1.2, "system")], {})}, False),
+    )
+    while_locked = []
+    correct = vocabulary.Vocabulary.correct
+
+    def watched(self, text):
+        while_locked.append(store._batch > 0)
+        return correct(self, text)
+
+    monkeypatch.setattr(vocabulary.Vocabulary, "correct", watched)
+
+    pipeline.process(store, meeting, log=lambda message: None)
+
+    assert [row["text"] for row in store.transcript(meeting)] == ["The Proxmox host."]
+    assert while_locked and not any(while_locked)
+    store.close()

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from zachcap import capture, pipeline
 from zachcap.api import create_app
 from zachcap.store import Store
+from zachcap.voiceprint import Match
 
 
 @pytest.fixture
@@ -126,6 +127,35 @@ def test_a_recording_is_a_meeting_from_its_first_second(client: TestClient, monk
     assert client.post("/api/record/stop", headers=AUTH).status_code == 409
 
 
+def test_a_start_the_database_refuses_leaves_nothing_recording(client: TestClient, monkeypatch):
+    import sqlite3
+
+    started: list[FakeRecorder] = []
+
+    class Tracked(FakeRecorder):
+        stopped = False
+
+        def start(self) -> None:
+            super().start()
+            started.append(self)
+
+        def stop(self) -> dict:
+            self.stopped = True
+            return super().stop()
+
+    def busy(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(capture, "Recorder", Tracked)
+    monkeypatch.setattr(Store, "create_meeting", busy)
+
+    refused = client.post("/api/record/start", headers=AUTH, json={})
+
+    assert refused.status_code == 500 and "database is locked" in refused.json()["detail"]
+    assert started[0].stopped and not started[0].folder.exists()
+    assert client.get("/api/record", headers=AUTH).json() == {"recording": False}
+
+
 def test_startup_finishes_what_a_crash_left_behind(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
     processed: list[int] = []
@@ -242,6 +272,11 @@ def test_exports_to_a_download_a_chosen_file_and_a_folder(client: TestClient, tm
         json={"format": "md", "path": str(chosen.with_suffix(".txt"))},
     )
     assert wrong.status_code == 400
+    taken = tmp_path / "out" / "taken.md"
+    taken.mkdir()  # a folder with the name picked: Windows refuses to write it
+    picked = {"format": "md", "path": str(taken)}
+    blocked = client.post(f"/api/meetings/{meeting_id}/export", headers=AUTH, json=picked)
+    assert blocked.status_code == 400 and "Couldn't write taken.md" in blocked.json()["detail"]
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -253,7 +288,50 @@ def test_exports_to_a_download_a_chosen_file_and_a_folder(client: TestClient, tm
     )
     settings = client.put("/api/settings", headers=AUTH, json={"export_folder": str(vault)}).json()
     assert settings["export_folder"] == str(vault)
-    assert [p.name for p in vault.iterdir()] == ["2026-11-20 0900 Weekly sync.md"]  # backfilled
+    backfilled = [p.name for p in vault.iterdir()]
+    assert backfilled == ["2026-11-20 0900 Weekly sync (M1).md"]
+
+
+def test_the_export_folder_follows_every_change(client: TestClient, tmp_path: Path):
+    store = Store()
+    meeting_id = store.create_meeting("Weekly sync", "2026-11-20T09:00:00", tmp_path / "audio")
+    dana = store.person_id("Dana")
+    named = store.add_speaker(
+        meeting_id, "system", "Dana", None, 10.0, None, Match(dana, 1.0, "confirmed")
+    )
+    unnamed = store.add_speaker(
+        meeting_id, "system", "Speaker 2", None, 5.0, None, Match(None, 0.0, "unknown")
+    )
+    store.add_segments(
+        meeting_id,
+        [
+            (named, "system", 1.0, 4.0, "I'll send the notice.", 0.9),
+            (named, "system", 5.0, 6.0, "Thanks, all.", 0.9),
+        ],
+    )
+    summary = {"overview": "The notice goes out.", "decisions": [], "open_questions": []}
+    store.save_summary(meeting_id, "claude-opus-5-5", summary, 1, 1, 0.0)
+    store.replace_action_items(meeting_id, [{"owner": "Dana", "task": "Send the notice"}])
+    [item] = store.action_items(meeting_id=meeting_id)
+    line = store.transcript(meeting_id)[1]
+    store.close()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    client.put("/api/settings", headers=AUTH, json={"export_folder": str(vault)})
+    copy = vault / "2026-11-20 0900 Weekly sync (M1).md"
+
+    client.patch(f"/api/actions/{item['id']}", headers=AUTH, json={"status": "done"})
+    assert "- [x] **Dana**: Send the notice" in copy.read_text(encoding="utf-8")
+
+    moved = {"speaker_id": unnamed}
+    client.post(f"/api/segments/{line['id']}/speaker", headers=AUTH, json=moved)
+    assert "**[00:05] Speaker 2:** Thanks, all." in copy.read_text(encoding="utf-8")
+
+    client.patch(f"/api/people/{dana}", headers=AUTH, json={"name": "Dana Lee"})
+    deadline = time.monotonic() + 5  # renames export in the background
+    while "Dana Lee:" not in copy.read_text(encoding="utf-8") and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert "**[00:01] Dana Lee:** I'll send the notice." in copy.read_text(encoding="utf-8")
 
 
 def test_settings_show_how_to_add_zachcap_to_claude(client: TestClient, tmp_path: Path):

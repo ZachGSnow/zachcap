@@ -12,13 +12,27 @@ from pydantic import BaseModel, Field
 from . import apikeys, privacy, vocabulary
 from .store import Store
 
-# Model id -> (label, USD per million input tokens, per million output tokens).
-# Prices are list prices, used only for the cost shown next to each summary.
+# The models to choose from in Settings.
 MODELS = {
-    "claude-opus-5-5": ("Claude Opus 5.5", 4.00, 20.00),
-    "claude-sonnet-5-5": ("Claude Sonnet 5.5", 2.00, 10.00),
-    "claude-fable-5-1": ("Claude Fable 5.1", 10.00, 50.00),
+    "claude-opus-5-5": "Claude Opus 5.5",
+    "claude-sonnet-5-5": "Claude Sonnet 5.5",
+    "claude-fable-5-1": "Claude Fable 5.1",
 }
+# USD per million tokens: input, output and cache reads. List prices, used only for the cost
+# shown next to each answer; writing the cache costs 1.25x input. The last three are what a
+# server-side fallback can answer with when the chosen model declines a request.
+PRICES = {
+    "claude-opus-5-5": (4.00, 20.00, 0.20),
+    "claude-sonnet-5-5": (2.00, 10.00, 0.20),
+    "claude-fable-5-1": (10.00, 50.00, 0.25),
+    "claude-opus-5": (5.00, 25.00, 0.50),
+    "claude-opus-4-8": (5.00, 25.00, 0.50),
+    "claude-sonnet-5": (2.00, 10.00, 0.20),
+}
+CACHE_WRITE = 1.25
+# Room for the answer and the thinking before it, which Opus 5.5 always does.
+MAX_TOKENS = 16_000
+CUT_OFF = "\n\n(Cut off: this ran longer than ZachCap allows.)"
 # In a side-by-side test Opus 5.5 caught an implicit commitment Sonnet 5.5 missed,
 # for about $0.08 per meeting hour.
 DEFAULT_MODEL = "claude-opus-5-5"
@@ -215,7 +229,7 @@ def ask(store: Store, meeting_id: int, question: str) -> dict:
     client = anthropic.Anthropic(api_key=key)
     response = client.beta.messages.create(
         model=model,
-        max_tokens=4000,
+        max_tokens=MAX_TOKENS,
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
         output_config={"effort": "low"},
@@ -236,18 +250,17 @@ def ask(store: Store, meeting_id: int, question: str) -> dict:
     )
     if response.stop_reason == "refusal":
         raise RuntimeError("Claude didn't answer that question.")
-    answer = "".join(block.text for block in response.content if block.type == "text").strip()
-    served_by = response.model if response.model in MODELS else model
-    usage = response.usage
-    cached = getattr(usage, "cache_read_input_tokens", 0) or 0
-    created = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    # Cache reads cost a tenth of input; writes 1.25x (5-minute cache).
-    effective_input = usage.input_tokens + cached * 0.1 + created * 1.25
     return {
-        "answer": answer,
-        "model": served_by,
-        "cost_usd": cost_usd(served_by, round(effective_input), usage.output_tokens),
+        "answer": reply_text(response) or "Claude didn't answer that question.",
+        "model": response.model or model,
+        "cost_usd": usage_cost(response.usage, model),
     }
+
+
+def reply_text(response) -> str:
+    """The text of a reply, marked when it was cut off at the token limit."""
+    text = "".join(block.text for block in response.content if block.type == "text").strip()
+    return text + CUT_OFF if text and response.stop_reason == "max_tokens" else text
 
 
 def summary_model(store: Store) -> str:
@@ -255,9 +268,33 @@ def summary_model(store: Store) -> str:
     return model if model in MODELS else DEFAULT_MODEL
 
 
-def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    _, per_input, per_output = MODELS.get(model, MODELS[DEFAULT_MODEL])
-    return (input_tokens * per_input + output_tokens * per_output) / 1_000_000
+def _prices(model: str | None) -> tuple[float, float, float] | None:
+    """A model's prices. A dated id ("claude-opus-5-5-20261101") goes by its base id."""
+    known = [m for m in PRICES if model and (model == m or model.startswith(f"{m}-"))]
+    return PRICES[max(known, key=len)] if known else None
+
+
+def usage_cost(usage, model: str) -> float:
+    """What one response cost in USD, each attempt at the prices of the model that ran it.
+
+    With a server-side fallback, usage.iterations has an entry per attempt (a declined one
+    too, so this is the most it can have cost); top-level usage covers only the attempt
+    that answered. model: the model that was asked.
+    """
+    total = 0.0
+    for attempt in getattr(usage, "iterations", None) or [usage]:
+        per_in, per_out, per_read = (
+            _prices(getattr(attempt, "model", None)) or _prices(model) or PRICES[DEFAULT_MODEL]
+        )
+        written = getattr(attempt, "cache_creation_input_tokens", 0) or 0
+        read = getattr(attempt, "cache_read_input_tokens", 0) or 0
+        total += (
+            attempt.input_tokens * per_in
+            + written * per_in * CACHE_WRITE
+            + read * per_read
+            + attempt.output_tokens * per_out
+        )
+    return total / 1_000_000
 
 
 def meeting_template(store: Store, meeting, requested: str | None = None) -> str:
@@ -284,7 +321,7 @@ def summarize(store: Store, meeting_id: int, template: str | None = None) -> dic
     client = anthropic.Anthropic(api_key=key)
     response = client.beta.messages.parse(
         model=model,
-        max_tokens=8000,
+        max_tokens=MAX_TOKENS,
         # If a safety classifier declines, Anthropic re-runs the request on its
         # recommended fallback model instead of failing.
         betas=["server-side-fallback-2026-07-01"],
@@ -307,8 +344,7 @@ def summarize(store: Store, meeting_id: int, template: str | None = None) -> dic
 
     usage = response.usage
     # A server-side fallback can answer with another model; price what actually ran.
-    served_by = response.model if response.model in MODELS else model
-    cost = cost_usd(served_by, usage.input_tokens, usage.output_tokens)
+    cost = usage_cost(usage, model)
     result = {**response.parsed_output.model_dump(), "template": template}
     store.update_meeting(meeting_id, template=template)
     store.save_summary(
@@ -343,7 +379,7 @@ def recipe(store: Store, meeting_id: int, name: str) -> dict:
     client = anthropic.Anthropic(api_key=key)
     response = client.beta.messages.create(
         model=model,
-        max_tokens=3000,
+        max_tokens=MAX_TOKENS,
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
         output_config={"effort": "low"},
@@ -359,16 +395,12 @@ def recipe(store: Store, meeting_id: int, name: str) -> dict:
             }
         ],
     )
-    if response.stop_reason == "refusal":
+    text = reply_text(response)
+    if response.stop_reason == "refusal" or not text:
         raise RuntimeError("Claude didn't write that.")
-    served_by = response.model if response.model in MODELS else model
-    usage = response.usage
-    cached = getattr(usage, "cache_read_input_tokens", 0) or 0
-    created = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    effective_input = usage.input_tokens + cached * 0.1 + created * 1.25
     return {
         "title": RECIPES[name][0],
-        "text": "".join(b.text for b in response.content if b.type == "text").strip(),
-        "model": served_by,
-        "cost_usd": cost_usd(served_by, round(effective_input), usage.output_tokens),
+        "text": text,
+        "model": response.model or model,
+        "cost_usd": usage_cost(response.usage, model),
     }

@@ -354,16 +354,21 @@ class Store:
             (query, limit),
         ).fetchall()
 
-    def search_lines(self, query: str, limit: int = 25) -> list[sqlite3.Row]:
-        """Whole transcript lines matching a full-text query, best matches first."""
+    def search_lines(
+        self, query: str, limit: int = 25, meeting_id: int | None = None
+    ) -> list[sqlite3.Row]:
+        """Whole transcript lines matching a full-text query (in one meeting, or all), best
+        matches first."""
+        one = "AND s.meeting_id = ? " if meeting_id is not None else ""
         return self.db.execute(
             f"SELECT s.meeting_id, m.title, m.started_at, s.start, {SPEAKER_NAME} AS speaker, "
             "s.text FROM segments_fts f JOIN segments s ON s.id = f.rowid "
             "JOIN meetings m ON m.id = s.meeting_id "
             "LEFT JOIN meeting_speakers ms ON ms.id = s.meeting_speaker_id "
             "LEFT JOIN people p ON p.id = ms.person_id "
-            "WHERE segments_fts MATCH ? AND m.status != 'recording' ORDER BY rank LIMIT ?",
-            (query, limit),
+            f"WHERE segments_fts MATCH ? AND m.status != 'recording' {one}"
+            "ORDER BY rank LIMIT ?",
+            (query, *([meeting_id] if meeting_id is not None else []), limit),
         ).fetchall()
 
     # people and voiceprints -------------------------------------------------
@@ -511,13 +516,18 @@ class Store:
             params,
         ).fetchall()
 
-    def set_action_status(self, item_id: int, status: str) -> None:
+    def set_action_status(self, item_id: int, status: str) -> int | None:
+        """Mark an item open or done. Returns its meeting, or None if there's no such item."""
         self.db.execute(
             "UPDATE action_items SET status = ?, "
             "done_at = CASE WHEN ? = 'done' THEN datetime('now') ELSE NULL END WHERE id = ?",
             (status, status, item_id),
         )
         self._commit()
+        row = self.db.execute(
+            "SELECT meeting_id FROM action_items WHERE id = ?", (item_id,)
+        ).fetchone()
+        return row["meeting_id"] if row else None
 
     # notes and bookmarks ----------------------------------------------------
 
@@ -642,6 +652,16 @@ class Store:
         self._commit()
         return existing
 
+    def person_meetings(self, person_id: int) -> list[int]:
+        """The meetings someone was named in."""
+        return [
+            row["meeting_id"]
+            for row in self.db.execute(
+                "SELECT DISTINCT meeting_id FROM meeting_speakers WHERE person_id = ?",
+                (person_id,),
+            )
+        ]
+
     def forget_voice(self, person_id: int) -> None:
         self.db.execute("DELETE FROM voice_samples WHERE person_id = ?", (person_id,))
         self._commit()
@@ -662,9 +682,9 @@ class Store:
 
     def reassign_segment(
         self, segment_id: int, name: str | None = None, speaker_id: int | None = None
-    ) -> None:
+    ) -> int:
         """Give one transcript line to another voice of the same meeting (speaker_id), even
-        an unnamed one, or to a person by name (created if new)."""
+        an unnamed one, or to a person by name (created if new). Returns the meeting."""
         segment = self.db.execute("SELECT * FROM segments WHERE id = ?", (segment_id,)).fetchone()
         if segment is None:
             raise ValueError("No such line")
@@ -680,6 +700,7 @@ class Store:
             "UPDATE segments SET meeting_speaker_id = ? WHERE id = ?", (speaker_id, segment_id)
         )
         self._commit()
+        return segment["meeting_id"]
 
     def _speaker_for_person(self, segment: sqlite3.Row, name: str) -> int:
         me = self.me()

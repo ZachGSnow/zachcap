@@ -149,3 +149,24 @@ def test_a_disk_error_is_reported_and_the_queue_keeps_draining(tmp_path: Path, m
     assert mic.failed and mic._queue.qsize() == 0
     assert any("No space left" in error for error in recorder.errors())
     recorder.stop()
+
+
+def test_audio_captured_during_a_pause_stays_silent_after_resume(tmp_path: Path, monkeypatch):
+    import numpy as np
+    import soundfile as sf
+
+    fake = fake_pyaudio()
+    monkeypatch.setattr(capture, "pyaudio", fake)
+    track = capture.TrackRecorder("mic", MIC, tmp_path, chunk_seconds=300)
+    loud = np.full(1024, 8000, np.int16).tobytes()
+
+    # Two buffers arrive while paused and are written only after Resume (a slow disk).
+    track.paused = True
+    track._callback(loud, 1024, None, 0)
+    track._callback(loud, 1024, None, 0)
+    track.paused = False
+    track.start(fake.PyAudio())
+    track.stop()
+
+    audio, _ = sf.read(tmp_path / "mic-000.flac", dtype="int16")
+    assert len(audio) == 2 * 1024 and not audio.any()

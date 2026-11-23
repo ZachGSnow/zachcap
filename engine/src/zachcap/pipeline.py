@@ -51,17 +51,21 @@ def process(store: Store, meeting_id: int, log: Log = print) -> str:
 
         from .diarize import EMBEDDING_MODEL
 
+        # Words to know are applied before the write below, which locks the database.
+        spelled = {u.text: vocab.correct(u.text) for utts in utterances.values() for u in utts}
+
+        def fix(text: str) -> str:
+            return spelled.get(text, text)
+
         with store.transaction():
             if store.meeting(meeting_id) is None:
                 log("the meeting was deleted while it was being processed")
                 return "deleted"
             store.clear_results(meeting_id)
             if separated:
-                _store_results(
-                    store, meeting_id, utterances, diarized, EMBEDDING_MODEL, vocab.correct
-                )
+                _store_results(store, meeting_id, utterances, diarized, EMBEDDING_MODEL, fix)
             else:
-                _store_unseparated(store, meeting_id, utterances, vocab.correct)
+                _store_unseparated(store, meeting_id, utterances, fix)
             store.update_meeting(meeting_id, duration=round(duration, 3))
             status = store.refresh_status(meeting_id)
         done = f"done in {time.perf_counter() - started:.0f} s"
