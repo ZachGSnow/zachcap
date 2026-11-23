@@ -96,7 +96,11 @@ export function WorkLogView({ onOpen }: { onOpen: (meetingId: number) => void })
 
   const save = async () => {
     try {
-      const { path } = await api<{ path: string }>("/api/worklog/save", { method: "POST", json: { period, day } });
+      // The log as shown: one client's, when one is picked.
+      const { path } = await api<{ path: string }>("/api/worklog/save", {
+        method: "POST",
+        json: { period, day, client: client || null },
+      });
       toast.success("Saved to the export folder", { description: path });
     } catch (e) {
       toast.error("Couldn't save the work log", { description: String(e) });

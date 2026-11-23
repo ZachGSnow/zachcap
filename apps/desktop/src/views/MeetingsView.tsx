@@ -12,7 +12,7 @@ import {
   Ticket,
   Users,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { toggleAction } from "@/components/SummaryPanel";
 import { AvatarStack, StatCard } from "@/components/Visuals";
@@ -177,9 +177,11 @@ export function MeetingsView({
   const shortcutKeys = useKeys();
   // Narrow the list to one client's meetings (offered once any meeting has a client).
   const [client, setClient] = useState("");
-  const clientNames = [...new Set((meetings ?? []).map((m) => m.client).filter((c): c is string => !!c))].sort((a, b) =>
-    a.localeCompare(b),
-  );
+  // The same list the work log offers; a choice that's no longer there is let go of.
+  const { data: clientNames = [] } = usePoll(() => api<string[]>("/api/clients"), 10_000);
+  useEffect(() => {
+    if (client && !clientNames.some((name) => name.toLowerCase() === client.toLowerCase())) setClient("");
+  }, [client, clientNames]);
   const shown = client ? meetings?.filter((m) => m.client?.toLowerCase() === client.toLowerCase()) : meetings;
 
   return (

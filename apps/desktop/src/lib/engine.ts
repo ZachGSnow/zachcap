@@ -26,6 +26,8 @@ export type Meeting = {
   /** Its client: set on it, or (inferred) the one its people all work for. */
   client?: string | null;
   client_inferred?: boolean;
+  /** Set on it by you: with no client, that's "no client". */
+  client_set?: boolean;
 };
 
 /** A ticket number found in a meeting, and where: offered to pick as its ticket. */

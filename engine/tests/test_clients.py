@@ -48,7 +48,12 @@ def store(tmp_path: Path):
 def test_a_meeting_is_for_the_client_its_people_work_for(store: Store):
     found = clients.of_meetings(store, store.meetings())
     ids = store.ids
-    assert found[ids["cutover"]] == {"client": "Contoso", "inferred": True, "clients": ["Contoso"]}
+    assert found[ids["cutover"]] == {
+        "client": "Contoso",
+        "inferred": True,
+        "set": False,
+        "clients": ["Contoso"],
+    }
     both = found[ids["both"]]
     assert both["client"] is None and sorted(both["clients"]) == ["Contoso", "Fabrikam"]
     assert found[ids["nobody"]]["client"] is None
@@ -118,11 +123,70 @@ def test_clients_through_the_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
     changed = client.patch(f"/api/meetings/{meeting_id}", headers=AUTH, json={"client": "Fabrikam"})
     assert (changed.json()["client"], changed.json()["client_inferred"]) == ("Fabrikam", False)
-    back = client.patch(f"/api/meetings/{meeting_id}", headers=AUTH, json={"client": ""})
-    assert (back.json()["client"], back.json()["client_inferred"]) == ("Contoso", True)
+    none = client.patch(f"/api/meetings/{meeting_id}", headers=AUTH, json={"client": ""})
+    assert (none.json()["client"], none.json()["client_set"]) == (None, True)  # "no client"
+    again = client.patch(f"/api/meetings/{meeting_id}", headers=AUTH, json={"client": "contoso"})
+    assert again.json()["client"] == "Contoso"  # the spelling already in use
 
     log = client.get(
         "/api/worklog", headers=AUTH, params={"day": "2026-11-23", "client": "Fabrikam"}
     )
     assert log.json()["totals"]["meetings"] == 0
+    store.close()
+
+
+def test_a_meeting_keeps_its_client_when_its_people_move_on(store: Store, tmp_path: Path):
+    ids = store.ids
+    dana = store.person_id("Dana")
+    clients.keep_history(store, dana)  # what moving Dana to another client does first
+    store.set_client(dana, "Fabrikam")
+    assert clients.of_meeting(store, store.meeting(ids["cutover"]))["client"] == "Contoso"
+    later = meeting(store, tmp_path, "Later", "2026-11-24T09:00:00-05:00", ["Dana"])
+    assert clients.of_meeting(store, store.meeting(later))["client"] == "Fabrikam"
+
+
+def test_one_spelling_per_client_whoever_speaks_first(store: Store, tmp_path: Path):
+    # Dana "Contoso" and Mark "contoso" (the fixture): one client, spelled the common way.
+    store.set_client(store.person_id("Lee"), "CONTOSO")
+    early = meeting(store, tmp_path, "Mark first", "2026-11-24T09:00:00-05:00", ["Mark", "Dana"])
+    assert clients.of_meeting(store, store.meeting(early))["client"] == "Contoso"
+    assert clients.known(store) == ["Contoso"]
+    store.set_client(store.person_id("Lee"), "\u00c9lectricit\u00e9 Nord")
+    store.set_client(store.person_id("Mark"), "\u00e9lectricit\u00e9 nord")
+    joint = meeting(store, tmp_path, "Lee and Mark", "2026-11-24T11:00:00-05:00", ["Lee", "Mark"])
+    assert clients.of_meeting(store, store.meeting(joint))["clients"] == [
+        "\u00c9lectricit\u00e9 Nord"
+    ]
+    assert clients.matches({"client": "Contoso"}, "") and clients.matches({"client": None}, " ")
+
+
+def test_merging_removing_and_saving_keep_clients(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    client = TestClient(create_app("test-token"))
+    store = Store()
+    first = meeting(store, tmp_path, "Cutover", "2026-11-23T09:00:00-05:00", ["Mark Smith"])
+    second = meeting(store, tmp_path, "Review", "2026-11-23T11:00:00-05:00", ["Lee"])
+    smith, lee = store.person_id("Mark Smith"), store.person_id("Lee")
+    client.put(f"/api/people/{smith}/client", headers=AUTH, json={"client": "Contoso"})
+    store.person_id("Mark")  # someone already called Mark, with no client
+
+    client.patch(f"/api/people/{smith}", headers=AUTH, json={"name": "Mark"})  # a merge
+    assert store.person(store.person_id("Mark"))["org"] == "Contoso"  # the client went along
+    assert client.get("/api/meetings", headers=AUTH).json()[-1]["client"] == "Contoso"
+
+    client.put(f"/api/people/{lee}/client", headers=AUTH, json={"client": "Fabrikam"})
+    client.delete(f"/api/people/{lee}", headers=AUTH)
+    review = next(m for m in client.get("/api/meetings", headers=AUTH).json() if m["id"] == second)
+    assert review["client"] == "Fabrikam"  # removed, but the meeting keeps its client
+
+    folder = tmp_path / "exports"
+    folder.mkdir()
+    client.put("/api/settings", headers=AUTH, json={"export_folder": str(folder)})
+    saved = client.post(
+        "/api/worklog/save", headers=AUTH, json={"day": "2026-11-23", "client": "Fabrikam"}
+    ).json()["path"]
+    assert Path(saved).name == "Work log 2026-11-23 Fabrikam.md"
+    text = Path(saved).read_text(encoding="utf-8")
+    assert "Review" in text and "Cutover" not in text  # only that client's meetings
+    assert first
     store.close()

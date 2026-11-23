@@ -6,7 +6,9 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, timedelta
@@ -36,6 +38,7 @@ CREATE TABLE IF NOT EXISTS meetings (
     audio_removed_at TEXT,                          -- set when old audio was deleted
     ticket      TEXT,                               -- the service ticket it was about
     client      TEXT,                               -- set on it; else from its people
+    client_source TEXT,                             -- 'user' (yours), 'auto' (kept as was)
     ticket_source TEXT,                             -- 'auto' (filled in), 'user' (yours)
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -197,6 +200,8 @@ END;
 
 # What a redacted line says instead.
 REDACTED = "[redacted]"
+_by_lines: dict = {}  # (library, name) -> (lines version, value): see Store.by_lines
+_by_lines_lock = threading.Lock()
 LAST_MEETING_ID = "last_meeting_id"  # the highest meeting id ever given out
 LAST_NOTE_ID = "last_note_id"  # the highest note id ever given out
 
@@ -235,7 +240,14 @@ class Store:
     def _migrate(self) -> None:
         """Columns added after a database was created (CREATE TABLE IF NOT EXISTS skips them)."""
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(meetings)")}
-        for column in ("template", "audio_removed_at", "ticket", "client", "ticket_source"):
+        for column in (
+            "template",
+            "audio_removed_at",
+            "ticket",
+            "client",
+            "ticket_source",
+            "client_source",
+        ):
             if column not in columns:
                 self.db.execute(f"ALTER TABLE meetings ADD COLUMN {column} TEXT")
                 self.db.commit()
@@ -782,7 +794,13 @@ class Store:
         ).fetchall()
 
     def participants(self, meeting_ids: list[int] | None = None) -> dict[int, list[str]]:
-        """Named people per meeting, most talkative first (for some meetings, or all)."""
+        """Named people per meeting, most talkative first (for some meetings, or all: worked
+        out once per change to the lines, voices or people)."""
+        if meeting_ids is None:
+            return self.by_lines("participants", lambda: self._participants(None))
+        return self._participants(meeting_ids)
+
+    def _participants(self, meeting_ids: list[int] | None) -> dict[int, list[str]]:
         only = ""
         if meeting_ids is not None:
             if not meeting_ids:
@@ -800,34 +818,64 @@ class Store:
             result.setdefault(row["meeting_id"], []).append(row["name"])
         return result
 
-    def meeting_clients(self, meeting_ids: list[int]) -> dict[int, list[str]]:
-        """The clients of the people named in each meeting (not you), most talkative first."""
-        if not meeting_ids:
-            return {}
-        result: dict[int, list[str]] = {}
+    def by_lines(self, name: str, compute):
+        """A value worked out from the lines, voices and people (the meeting list's
+        participants and clients), kept until one of them changes."""
+        version = self.lines_version()
+        if version is None:
+            return compute()
+        key = (str(self.path), name)
+        with _by_lines_lock:
+            kept = _by_lines.get(key)
+            if kept is not None and kept[0] == version:
+                return kept[1]
+        value = compute()
+        with _by_lines_lock:
+            _by_lines[key] = (version, value)
+        return value
+
+    def meeting_clients(self) -> dict[int, list[str]]:
+        """The clients of the people named in each meeting (not you), most talkative first,
+        one spelling each; worked out once per change to the lines, voices or people."""
+        return self.by_lines("meeting_clients", self._meeting_clients)
+
+    def _meeting_clients(self) -> dict[int, list[str]]:
+        spelling = {name.casefold(): name for name in self.client_names()}
+        seconds: dict[int, dict[str, float]] = {}
         for row in self.db.execute(
             "SELECT s.meeting_id, p.org, SUM(s.end - s.start) AS seconds FROM segments s "
             "JOIN meeting_speakers ms ON ms.id = s.meeting_speaker_id "
             "JOIN people p ON p.id = ms.person_id "
             "WHERE ms.status IN ('auto', 'confirmed') AND p.is_me = 0 "
-            "AND COALESCE(p.org, '') != '' "
-            f"AND s.meeting_id IN ({', '.join('?' * len(meeting_ids))}) "
-            "GROUP BY s.meeting_id, p.org COLLATE NOCASE ORDER BY s.meeting_id, seconds DESC",
-            meeting_ids,
+            "AND COALESCE(p.org, '') != '' GROUP BY s.meeting_id, p.id"
         ):
-            result.setdefault(row["meeting_id"], []).append(row["org"])
-        return result
+            name = row["org"].casefold()  # compared in Python: SQLite folds only ASCII
+            per = seconds.setdefault(row["meeting_id"], {})
+            per[name] = per.get(name, 0.0) + (row["seconds"] or 0.0)
+        return {
+            meeting_id: [
+                spelling.get(name, name) for name in sorted(per, key=lambda n: (-per[n], n))
+            ]
+            for meeting_id, per in seconds.items()
+        }
 
     def client_names(self) -> list[str]:
-        """Every client named on a person or a meeting, alphabetically (one spelling each)."""
-        rows = self.db.execute(
-            "SELECT org AS name FROM people WHERE COALESCE(org, '') != '' "
-            "UNION SELECT client FROM meetings WHERE COALESCE(client, '') != ''"
-        ).fetchall()
-        names: dict[str, str] = {}
-        for row in rows:
-            names.setdefault(row["name"].lower(), row["name"])
-        return sorted(names.values(), key=str.lower)
+        """Every client named on a person or a meeting, alphabetically: one spelling each,
+        the one most used (an all-capitals one only when it's the only one)."""
+        try:
+            rows = self.db.execute(
+                "SELECT org AS name FROM people WHERE COALESCE(org, '') != '' "
+                "UNION ALL SELECT client FROM meetings WHERE COALESCE(client, '') != ''"
+            ).fetchall()
+        except sqlite3.OperationalError:  # a library from before meetings had clients
+            rows = self.db.execute(
+                "SELECT org AS name FROM people WHERE COALESCE(org, '') != ''"
+            ).fetchall()
+        used = Counter(row["name"] for row in rows)
+        best: dict[str, str] = {}
+        for name in sorted(used, key=lambda n: (-used[n], n.isupper(), n)):
+            best.setdefault(name.casefold(), name)
+        return sorted(best.values(), key=str.casefold)
 
     def set_client(self, person_id: int, client: str | None) -> None:
         self.db.execute("UPDATE people SET org = ? WHERE id = ?", (client or None, person_id))

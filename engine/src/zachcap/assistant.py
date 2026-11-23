@@ -167,6 +167,11 @@ def meeting_detail(store: Store, meeting_id: int, start_at: str | None = None) -
         return f"There is no meeting M{meeting_id}."
     begin = to_seconds(start_at) if start_at else None
     parts = [f'M{meeting_id} "{meeting["title"]}" on {_day(meeting["started_at"])}']
+    from . import clients
+
+    client = clients.of_meeting(store, meeting)["client"]
+    if client:
+        parts[0] += f", client {client}"
     if store.column(meeting, "ticket"):
         parts[0] += f", ticket {store.column(meeting, 'ticket')}"
     summary = store.summary(meeting_id)

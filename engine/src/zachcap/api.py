@@ -202,6 +202,7 @@ class DictateBody(BaseModel):
 class WorkLogBody(BaseModel):
     period: str = "day"
     day: str | None = None  # YYYY-MM-DD, today if not given
+    client: str | None = None  # one client's log (as the page shows it)
 
 
 def work_log_period(period: str, day: str | None) -> tuple[str, date]:
@@ -464,6 +465,7 @@ def create_app(token: str) -> FastAPI:
                 # Its client: the one set on it, else the one its people all work for.
                 "client": client_of[m["id"]]["client"],
                 "client_inferred": client_of[m["id"]]["inferred"],
+                "client_set": client_of[m["id"]]["set"],
             }
             for m in meetings
         ]
@@ -481,6 +483,7 @@ def create_app(token: str) -> FastAPI:
                 "progress": worker.progress.get(meeting_id),
                 "client": client["client"],
                 "client_inferred": client["inferred"],
+                "client_set": client["set"],
             },
             # The clients of the people in it, and every client named so far (to pick from).
             "clients_heard": client["clients"],
@@ -524,11 +527,13 @@ def create_app(token: str) -> FastAPI:
                 changes["ticket_source"] = tickets.YOURS  # set or taken off: yours to keep
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if body.client is not None:
+        if body.client is not None:  # yours to keep; "" is "no client"
             try:
-                changes["client"] = clients.checked(body.client) or None
+                name = clients.checked(body.client)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            changes["client"] = clients.canonical(store, name) if name else None
+            changes["client_source"] = clients.YOURS
         if changes:
             store.update_meeting(meeting_id, **changes)
             if "ticket" not in changes:
@@ -541,6 +546,7 @@ def create_app(token: str) -> FastAPI:
             "ticket": meeting["ticket"],
             "client": client["client"],
             "client_inferred": client["inferred"],
+            "client_set": client["set"],
         }
 
     @app.delete("/api/meetings/{meeting_id}", dependencies=auth)
@@ -571,7 +577,9 @@ def create_app(token: str) -> FastAPI:
     def save_work_log(body: WorkLogBody, store: Store = Depends(db)):
         if not store.setting("export_folder"):
             raise HTTPException(status_code=400, detail="Choose an export folder in Settings first")
-        path = export.save_work_log(store, *work_log_period(body.period, body.day))
+        path = export.save_work_log(
+            store, *work_log_period(body.period, body.day), client=body.client or None
+        )
         if path is None:
             raise HTTPException(status_code=400, detail="Couldn't write to the export folder")
         return {"path": str(path)}
@@ -986,6 +994,14 @@ def create_app(token: str) -> FastAPI:
     def rename_person(person_id: int, body: NameBody, store: Store = Depends(db)):
         if not body.name.strip():
             raise HTTPException(status_code=400, detail="The name can't be empty")
+        into = store.person_id(body.name.strip(), create=False)
+        if into is not None and into != person_id:  # a merge: the client goes with them
+            merged, keeping = store.person(person_id), store.person(into)
+            if merged and keeping and merged["org"]:
+                if not keeping["org"]:
+                    store.set_client(into, merged["org"])
+                elif keeping["org"].casefold() != merged["org"].casefold():
+                    clients.keep_history(store, person_id)
         kept = store.rename_person(person_id, body.name.strip())
         export_soon(store, store.person_meetings(kept))
         return {"id": kept}
@@ -999,6 +1015,10 @@ def create_app(token: str) -> FastAPI:
             client = clients.checked(body.client)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        client = clients.canonical(store, client) if client else ""
+        before = store.person(person_id)["org"]
+        if before and before.casefold() != client.casefold():
+            clients.keep_history(store, person_id)  # their past meetings stay as they were
         store.set_client(person_id, client)
         export_soon(store, store.person_meetings(person_id))
         return {"client": client or None}
@@ -1015,6 +1035,7 @@ def create_app(token: str) -> FastAPI:
     @app.delete("/api/people/{person_id}", dependencies=auth)
     def delete_person(person_id: int, store: Store = Depends(db)):
         meetings = store.person_meetings(person_id)
+        clients.keep_history(store, person_id)  # their meetings keep the client they had
         store.delete_person(person_id)
         export_soon(store, meetings)
         return {"ok": True}

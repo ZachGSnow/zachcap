@@ -1,5 +1,5 @@
 import { Building2 } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -16,7 +16,7 @@ export function ClientList({ id, known }: { id: string; known: string[] }) {
 }
 
 /** A client's name, shown and changed in place: a button that becomes a box offering the
- * clients named so far. Saving "" takes it off. */
+ * clients named so far. Saving "" takes it off (for a meeting: "no client"). */
 export function ClientField({
   value,
   known,
@@ -35,11 +35,25 @@ export function ClientField({
 }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState("");
+  // What it was when the box opened, and what was saved until the page catches up: a quick
+  // reopen shows the new name, and leaving the box unchanged saves nothing.
+  const [opened, setOpened] = useState("");
+  const [saved, setSaved] = useState<string | null>(null);
+  useEffect(() => setSaved(null), [value]);
+  const button = useRef<HTMLButtonElement>(null);
   const listId = useId();
+  const shown = saved !== null ? saved || null : value;
 
-  const save = () => {
+  const close = () => {
     setEditing(false);
-    if (text.trim() !== (inferred ? "" : (value ?? ""))) onSave(text.trim());
+    requestAnimationFrame(() => button.current?.focus());
+  };
+  const save = () => {
+    close();
+    const wanted = text.trim();
+    if (wanted === opened) return;
+    setSaved(wanted);
+    onSave(wanted);
   };
 
   if (editing) {
@@ -49,13 +63,14 @@ export function ClientField({
           autoFocus
           list={listId}
           value={text}
+          maxLength={80}
           placeholder="Client"
           aria-label="Client"
           onChange={(event) => setText(event.target.value)}
           onBlur={save}
           onKeyDown={(event) => {
             if (event.key === "Enter") save();
-            if (event.key === "Escape") setEditing(false);
+            if (event.key === "Escape") close();
           }}
           className="h-6 w-40 text-xs"
         />
@@ -65,19 +80,22 @@ export function ClientField({
   }
   return (
     <button
+      ref={button}
       title={hint}
       onClick={() => {
-        setText(inferred ? "" : (value ?? ""));
+        const start = inferred && saved === null ? "" : (shown ?? "");
+        setText(start);
+        setOpened(start);
         setEditing(true);
       }}
       className={cn(
         "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs transition-colors hover:bg-muted hover:text-foreground",
-        value && !inferred && "border text-foreground",
-        value && inferred && "border border-dashed",
+        shown && !(inferred && saved === null) && "border text-foreground",
+        shown && inferred && saved === null && "border border-dashed",
       )}
     >
       <Building2 className="size-3" />
-      {value ?? empty}
+      {shown ?? empty}
     </button>
   );
 }
