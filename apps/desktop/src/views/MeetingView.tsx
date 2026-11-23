@@ -355,7 +355,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
               )}
               <Transcript
                 segments={data.segments}
-                speakerNames={named}
+                speakers={data.speakers}
                 people={people}
                 colorOf={colorOf}
                 currentId={current?.id}

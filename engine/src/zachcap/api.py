@@ -40,6 +40,11 @@ class NameBody(BaseModel):
     name: str
 
 
+class LineSpeakerBody(BaseModel):
+    name: str | None = None  # a person, by name
+    speaker_id: int | None = None  # or a voice of the same meeting, named or not
+
+
 class TitleBody(BaseModel):
     title: str
 
@@ -114,6 +119,7 @@ def recover(store: Store, submit: Callable[[int], None]) -> None:
     middle of processing."""
     for meeting in store.meetings_with_status("recording"):
         store.update_meeting(meeting["id"], status="recorded")
+    store.delete_orphan_voice_samples()
     known = {Path(folder).resolve() for folder in store.meeting_folders()}
     for folder in sorted(paths.meetings_dir().iterdir()):
         if not folder.is_dir() or not RECORDING_FOLDER.fullmatch(folder.name):
@@ -333,11 +339,12 @@ def create_app(token: str) -> FastAPI:
         return Response(buffer.getvalue(), media_type="audio/wav")
 
     @app.post("/api/segments/{segment_id}/speaker", dependencies=auth)
-    def reassign_segment(segment_id: int, body: NameBody, store: Store = Depends(db)):
-        if not body.name.strip():
+    def reassign_segment(segment_id: int, body: LineSpeakerBody, store: Store = Depends(db)):
+        name = (body.name or "").strip()
+        if body.speaker_id is None and not name:
             raise HTTPException(status_code=400, detail="The name can't be empty")
         try:
-            store.reassign_segment(segment_id, body.name.strip())
+            store.reassign_segment(segment_id, name=name or None, speaker_id=body.speaker_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"ok": True}
@@ -525,22 +532,33 @@ def create_app(token: str) -> FastAPI:
     return app
 
 
+_playback_locks: dict[Path, threading.Lock] = {}
+_playback_locks_guard = threading.Lock()
+
+
 def _playback_file(folder: Path, track: str = "mix") -> Path:
     """16 kHz mono audio for the player, built once and cached next to the recording.
 
     "mix" is everything; "mic" and "system" let the app isolate one side of the call.
+    Built under a lock and moved into place when complete, so a second request or a
+    crash mid-build can never serve a half-written file.
     """
     target = folder / ("playback.flac" if track == "mix" else f"playback-{track}.flac")
-    if not target.exists():
-        names = ("mic", "system") if track == "mix" else (track,)
-        tracks = [t for t in (audio.load_track(folder, n) for n in names) if t is not None]
-        if not tracks:
-            raise HTTPException(status_code=404, detail="Audio missing")
-        mix = np.zeros(max(len(t) for t in tracks), np.float32)
-        for t in tracks:
-            mix[: len(t)] += t
-        peak = float(np.abs(mix).max()) or 1.0
-        sf.write(target, mix / max(peak, 1.0), audio.RATE, subtype="PCM_16")
+    with _playback_locks_guard:
+        lock = _playback_locks.setdefault(target, threading.Lock())
+    with lock:
+        if not target.exists():
+            names = ("mic", "system") if track == "mix" else (track,)
+            tracks = [t for t in (audio.load_track(folder, n) for n in names) if t is not None]
+            if not tracks:
+                raise HTTPException(status_code=404, detail="Audio missing")
+            mix = np.zeros(max(len(t) for t in tracks), np.float32)
+            for t in tracks:
+                mix[: len(t)] += t
+            peak = float(np.abs(mix).max()) or 1.0
+            partial = target.with_name(f"{target.stem}.partial.flac")
+            sf.write(partial, mix / max(peak, 1.0), audio.RATE, subtype="PCM_16")
+            partial.replace(target)
     return target
 
 

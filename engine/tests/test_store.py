@@ -140,3 +140,91 @@ def test_settings_and_stats(tmp_path: Path):
         1,
     )
     store.close()
+
+
+def test_correcting_a_name_moves_the_voiceprint(tmp_path: Path):
+    from zachcap import pipeline
+
+    store = Store(tmp_path / "test.db")
+    meeting = store.create_meeting("Sync", "2026-11-22T20:00:00", tmp_path)
+    voice = np.array([0.6, 0.8, 0.0, 0.0], np.float32)
+    speaker = store.add_speaker(
+        meeting, "system", "Speaker 1", voice, 9.0, None, Match(None, 0.0, "unknown")
+    )
+
+    pipeline.name_speaker(store, meeting, str(speaker), "Mark")  # a slip
+    pipeline.name_speaker(store, meeting, str(speaker), "Dana")  # corrected
+
+    from zachcap.diarize import EMBEDDING_MODEL
+
+    assert list(store.voice_library(EMBEDDING_MODEL)) == [store.person_id("Dana")]
+    store.close()
+
+
+def test_empty_voiceprints_are_not_learned(tmp_path: Path):
+    store = Store(tmp_path / "test.db")
+    meeting = store.create_meeting("Sync", "2026-11-22T20:00:00", tmp_path)
+    store.add_voice_sample(store.person_id("Dana"), meeting, np.zeros(4), "test-model", 5.0)
+    assert store.voice_library("test-model") == {}
+    store.close()
+
+
+def test_regenerating_a_summary_keeps_what_was_ticked_off(tmp_path: Path):
+    store = Store(tmp_path / "test.db")
+    meeting, _ = make_meeting(store, tmp_path)
+    store.replace_action_items(
+        meeting,
+        [
+            {"owner": "Speaker 2", "task": "Send the firewall change window to the team"},
+            {"owner": "You", "task": "Book the server room"},
+        ],
+    )
+    first, second = store.action_items(meeting_id=meeting)
+    store.set_action_status(first["id"], "done")
+    store.set_action_status(second["id"], "done")
+    done_at = store.action_items(meeting_id=meeting)[0]["done_at"]
+
+    # Speaker 2 is now named and the task reworded; "Book the server room" was dropped.
+    store.replace_action_items(
+        meeting,
+        [
+            {"owner": "Dana", "task": "Send the firewall change window to the team."},
+            {"owner": "Mark", "task": "Order the new switch"},
+        ],
+    )
+
+    items = {row["task"]: row for row in store.action_items(meeting_id=meeting)}
+    assert items["Send the firewall change window to the team."]["status"] == "done"
+    assert items["Send the firewall change window to the team."]["done_at"] == done_at
+    assert items["Order the new switch"]["status"] == "open"
+    assert items["Book the server room"]["status"] == "done"  # kept, not lost
+    store.close()
+
+
+def test_a_line_can_move_to_an_unnamed_voice_without_inventing_a_person(tmp_path: Path):
+    store = Store(tmp_path / "test.db")
+    meeting, _ = make_meeting(store, tmp_path)
+    unnamed = store.add_speaker(
+        meeting, "system", "Speaker 2", np.ones(4), 3.0, None, Match(None, 0.0, "unknown")
+    )
+    line = store.transcript(meeting)[0]
+
+    store.reassign_segment(line["id"], speaker_id=unnamed)
+
+    assert store.transcript(meeting)[0]["speaker"] == "Speaker 2"
+    assert "Speaker 2" not in [p["name"] for p in store.people()]
+    other = store.create_meeting("Other", "2026-11-23T09:00:00", tmp_path)
+    stranger = store.add_speaker(
+        other, "system", "Speaker 1", None, 1.0, None, Match(None, 0.0, "unknown")
+    )
+    with pytest.raises(ValueError):
+        store.reassign_segment(line["id"], speaker_id=stranger)
+    store.close()
+
+
+def test_voices_learned_from_deleted_meetings_are_forgotten(tmp_path: Path):
+    store = Store(tmp_path / "test.db")
+    store.add_voice_sample(store.person_id("Dana"), 99, np.ones(4), "test-model", 5.0)
+    assert store.delete_orphan_voice_samples() == 1
+    assert store.voice_library("test-model") == {}
+    store.close()

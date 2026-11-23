@@ -91,8 +91,12 @@ class Diarizer:
         embeddings: dict[str, np.ndarray] = {}
         centroids = output.speaker_embeddings
         for i, label in enumerate(output.speaker_diarization.labels()):
-            if centroids is not None and i < len(centroids) and np.all(np.isfinite(centroids[i])):
-                embeddings[label] = np.asarray(centroids[i], dtype=np.float32)
+            if centroids is None or i >= len(centroids):
+                continue
+            vector = np.asarray(centroids[i], dtype=np.float32)
+            # pyannote fills in zeros for speakers it couldn't embed; those match no one.
+            if np.all(np.isfinite(vector)) and np.linalg.norm(vector) > 1e-6:
+                embeddings[label] = vector
         turns = [
             Turn(segment.start, segment.end, label)
             for segment, _, label in output.exclusive_speaker_diarization.itertracks(

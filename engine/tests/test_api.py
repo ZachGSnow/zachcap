@@ -146,3 +146,25 @@ def test_startup_finishes_what_a_crash_left_behind(tmp_path: Path, monkeypatch):
     recovered = listed["Recovered recording Nov 21 10:00"]
     assert set(listed) == {"Cut off", "Busy", "Done", "Recovered recording Nov 21 10:00"}
     assert sorted(processed) == sorted([cut_off, busy, recovered["id"]])
+
+
+def test_the_player_never_gets_a_half_written_file(tmp_path: Path):
+    import threading
+
+    import numpy as np
+    import soundfile as sf
+
+    from zachcap.api import _playback_file
+
+    sf.write(tmp_path / "system.flac", np.zeros(16000 * 5, np.float32), 16000)
+    built: list[Path] = []
+    threads = [
+        threading.Thread(target=lambda: built.append(_playback_file(tmp_path))) for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(set(built)) == 1 and sf.info(built[0]).frames == 16000 * 5
+    assert not list(tmp_path.glob("*.partial.flac"))
