@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 export type View =
   | { name: "meetings" }
   | { name: "meeting"; id: number; at?: number }
-  | { name: "ask"; question?: string; nonce?: number }
+  | { name: "ask" }
   | { name: "actions" }
   | { name: "people" }
   | { name: "search" }

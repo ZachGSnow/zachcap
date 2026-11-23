@@ -15,21 +15,22 @@ export async function notify(title: string, body: string) {
   }
 }
 
-/** Whether the user can see the window: not closed to the tray, not minimized. */
-export async function windowShowing(): Promise<boolean> {
+/** Whether the user is looking at the window: shown (not in the tray or minimized) and in
+ * front. Behind a full-screen Teams call it counts as unseen, so hotkeys get a notification. */
+export async function windowInFront(): Promise<boolean> {
   if (document.visibilityState === "hidden") return false;
   if (!isTauri()) return true;
   try {
     const window = getCurrentWindow();
-    return (await window.isVisible()) && !(await window.isMinimized());
+    return (await window.isVisible()) && !(await window.isMinimized()) && (await window.isFocused());
   } catch {
     return true;
   }
 }
 
-/** A toast in the window, or a Windows notification while ZachCap sits in the tray. */
+/** A toast in the window, or a Windows notification when the window isn't in front. */
 export async function announce(title: string, body?: string, kind: "info" | "success" | "error" = "info") {
-  if (await windowShowing()) {
+  if (await windowInFront()) {
     const show = kind === "error" ? toast.error : kind === "success" ? toast.success : toast;
     show(title, body ? { description: body } : undefined);
   } else {

@@ -1,5 +1,5 @@
 import { Check, Copy, Loader2, Mail, Megaphone, MessageSquareQuote, RotateCw, Sparkles, Ticket } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 import { PersonAvatar } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
@@ -143,19 +143,27 @@ function KindPicker({ templates, value, onChange }: { templates: Choice[]; value
   );
 }
 
+/** One "write from this meeting" request; results from an older run are ignored. */
+type RecipeRun = { id: number; recipe: Choice; result?: RecipeResult; error?: string };
+
 /** A document Claude wrote from the meeting, ready to copy. */
 function RecipeDialog({
+  open,
   run,
   onClose,
+  onRewrite,
 }: {
-  run: { label: string; result?: RecipeResult; error?: string } | null;
+  open: boolean;
+  run: RecipeRun | null;
   onClose: () => void;
+  onRewrite: (recipe: Choice) => void;
 }) {
+  const writing = run !== null && !run.result && !run.error;
   return (
-    <Dialog open={run !== null} onOpenChange={(open) => !open && onClose()}>
+    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{run?.label}</DialogTitle>
+          <DialogTitle>{run?.recipe.label}</DialogTitle>
           <DialogDescription>Written by Claude from this meeting. Read it over before you send it.</DialogDescription>
         </DialogHeader>
         {run?.error ? (
@@ -177,6 +185,10 @@ function RecipeDialog({
           <Button variant="outline" onClick={onClose}>
             Close
           </Button>
+          <Button variant="outline" disabled={writing} onClick={() => run && onRewrite(run.recipe)}>
+            <RotateCw className="size-4" />
+            Write again
+          </Button>
           <Button disabled={!run?.result} onClick={() => run?.result && void copyText(run.result.text, "Copied")}>
             <Copy className="size-4" />
             Copy
@@ -196,7 +208,8 @@ export function SummaryPanel({
   colorOf,
   templates,
   recipes,
-  template,
+  kind,
+  onKindChange,
   summarizing,
   onSummarize,
   onSeek,
@@ -210,32 +223,50 @@ export function SummaryPanel({
   colorOf: (name: string) => SpeakerColor;
   templates: Choice[];
   recipes: Choice[];
-  /** The kind of meeting this one was summarized as, or the default. */
-  template: string;
+  /** The kind of meeting picked, else the one this meeting was summarized as, else the usual
+   * kind. Owned by the meeting page, so its header Summarize button uses it too. */
+  kind: string;
+  onKindChange: (kind: string) => void;
   /** Owned by the meeting page, so its header button and this panel can't both start one. */
   summarizing: boolean;
-  onSummarize: (template?: string) => void;
+  onSummarize: () => void;
   onSeek: (seconds: number) => void;
   onChanged: () => void;
 }) {
-  const [kind, setKind] = useState(template);
-  useEffect(() => setKind(template), [template]);
-  const [run, setRun] = useState<{ label: string; result?: RecipeResult; error?: string } | null>(null);
+  // Each document kept per recipe while the page is open: reopening shows the one written (or
+  // still being written) instead of paying for another.
+  const [runs, setRuns] = useState<Record<string, RecipeRun>>({});
+  const [shown, setShown] = useState<string | null>(null);
+  // Separate from which one is shown, so the dialog keeps its content while it closes.
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const nextRun = useRef(1);
 
   const toggle = async (item: ActionItem) => {
     await toggleAction(item);
     onChanged();
   };
 
-  // Started from the click (not an effect), so it runs exactly once.
+  // Started from a click (not an effect), so it runs exactly once.
   const write = async (recipe: Choice) => {
-    setRun({ label: recipe.label });
+    const id = nextRun.current++;
+    const settle = (patch: Partial<RecipeRun>) =>
+      setRuns((all) => (all[recipe.id]?.id === id ? { ...all, [recipe.id]: { ...all[recipe.id], ...patch } } : all));
+    setRuns((all) => ({ ...all, [recipe.id]: { id, recipe } }));
+    setShown(recipe.id);
+    setDialogOpen(true);
     try {
-      const result = await api<RecipeResult>(`/api/meetings/${meetingId}/recipe`, { method: "POST", json: { recipe: recipe.id } });
-      setRun((current) => (current?.label === recipe.label ? { label: recipe.label, result } : current));
+      settle({ result: await api<RecipeResult>(`/api/meetings/${meetingId}/recipe`, { method: "POST", json: { recipe: recipe.id } }) });
     } catch (error) {
-      setRun((current) => (current?.label === recipe.label ? { label: recipe.label, error: String(error) } : current));
+      settle({ error: String(error) });
     }
+  };
+
+  const openRecipe = (recipe: Choice) => {
+    const run = runs[recipe.id];
+    if (run && !run.error) {
+      setShown(recipe.id);
+      setDialogOpen(true);
+    } else void write(recipe);
   };
 
   if (!summary) {
@@ -250,8 +281,8 @@ export function SummaryPanel({
           commitments and who said what. Pick the kind of meeting to set the focus.
         </p>
         <div className="mt-5 flex items-center gap-2">
-          <KindPicker templates={templates} value={kind} onChange={setKind} />
-          <Button disabled={summarizing} onClick={() => onSummarize(kind)}>
+          <KindPicker templates={templates} value={kind} onChange={onKindChange} />
+          <Button disabled={summarizing} onClick={onSummarize}>
             {summarizing ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
             {summarizing ? "Summarizing..." : "Summarize with Claude"}
           </Button>
@@ -280,8 +311,8 @@ export function SummaryPanel({
             <Copy className="size-3.5" />
             Copy
           </Button>
-          <KindPicker templates={templates} value={kind} onChange={setKind} />
-          <Button size="sm" variant="outline" disabled={summarizing} onClick={() => onSummarize(kind)}>
+          <KindPicker templates={templates} value={kind} onChange={onKindChange} />
+          <Button size="sm" variant="outline" disabled={summarizing} onClick={onSummarize}>
             {summarizing ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
             Regenerate
           </Button>
@@ -294,7 +325,7 @@ export function SummaryPanel({
           {recipes.map((recipe) => {
             const Icon = RECIPE_ICON[recipe.id] ?? Sparkles;
             return (
-              <Button key={recipe.id} size="sm" variant="ghost" className="h-7 border" onClick={() => void write(recipe)}>
+              <Button key={recipe.id} size="sm" variant="ghost" className="h-7 border" onClick={() => openRecipe(recipe)}>
                 <Icon className="size-3.5" />
                 {recipe.label}
               </Button>
@@ -302,7 +333,12 @@ export function SummaryPanel({
           })}
         </div>
       )}
-      <RecipeDialog run={run} onClose={() => setRun(null)} />
+      <RecipeDialog
+        open={dialogOpen}
+        run={shown ? (runs[shown] ?? null) : null}
+        onClose={() => setDialogOpen(false)}
+        onRewrite={(recipe) => void write(recipe)}
+      />
 
       <p className="mt-5 text-[15px] leading-relaxed">{c.overview}</p>
 

@@ -1,5 +1,5 @@
 import { Check, Play, Search, UserRoundSearch } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -186,6 +186,7 @@ const TranscriptRow = memo(function TranscriptRow({
   return (
     <div
       data-current={current || undefined}
+      data-segment={segment.id}
       className={cn(
         "group grid grid-cols-[3.5rem_10rem_1fr] items-start gap-3 rounded-lg px-2 py-1.5 transition-colors",
         current ? "bg-muted" : "hover:bg-muted/40",
@@ -219,6 +220,7 @@ export const Transcript = memo(function Transcript({
   colorOf,
   currentId,
   playing,
+  focusAt,
   solo,
   onSeek,
   onChanged,
@@ -229,6 +231,8 @@ export const Transcript = memo(function Transcript({
   colorOf: (name: string) => SpeakerColor;
   currentId: number | undefined;
   playing: boolean;
+  /** A cited moment to show when the page opens: that line is scrolled to and marked. */
+  focusAt?: number;
   solo: string | null;
   onSeek: (seconds: number) => void;
   onChanged: () => void;
@@ -237,6 +241,9 @@ export const Transcript = memo(function Transcript({
   const [moving, setMoving] = useState<Segment | null>(null);
   // One menu for every line, opened next to the name that was clicked.
   const [menu, setMenu] = useState<{ segment: Segment; x: number; y: number } | null>(null);
+  // The name that opened the menu gets focus back when it closes (keyboard users).
+  const anchor = useRef<HTMLElement | null>(null);
+  const menuLabel = useId();
   const list = useRef<HTMLDivElement>(null);
 
   const shown = useMemo(() => {
@@ -253,8 +260,25 @@ export const Transcript = memo(function Transcript({
     list.current?.querySelector("[data-current]")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [currentId, playing]);
 
-  const pickSpeaker = useCallback((segment: Segment, anchor: HTMLElement) => {
-    const box = anchor.getBoundingClientRect();
+  // The cited line stays marked until playback takes over the highlight.
+  const [focusId, setFocusId] = useState<number | null>(null);
+  const focused = useRef(false);
+  useEffect(() => {
+    if (focusAt == null || focused.current || segments.length === 0) return;
+    focused.current = true;
+    setFocusId((segments.findLast((s) => s.start <= focusAt + 0.05) ?? segments[0]).id);
+  }, [focusAt, segments]);
+  useEffect(() => {
+    if (focusId == null) return;
+    list.current?.querySelector(`[data-segment="${focusId}"]`)?.scrollIntoView({ block: "center" });
+  }, [focusId]);
+  useEffect(() => {
+    if (playing) setFocusId(null);
+  }, [playing]);
+
+  const pickSpeaker = useCallback((segment: Segment, from: HTMLElement) => {
+    anchor.current = from;
+    const box = from.getBoundingClientRect();
     const parent = list.current?.getBoundingClientRect();
     setMenu({ segment, x: box.left - (parent?.left ?? 0), y: box.bottom - (parent?.top ?? 0) });
   }, []);
@@ -309,7 +333,7 @@ export const Transcript = memo(function Transcript({
             key={segment.id}
             segment={segment}
             color={colorOf(segment.speaker)}
-            current={currentId === segment.id && playing}
+            current={(currentId === segment.id && playing) || segment.id === focusId}
             onSeek={onSeek}
             onPickSpeaker={pickSpeaker}
           />
@@ -323,8 +347,19 @@ export const Transcript = memo(function Transcript({
             />
           </DropdownMenuTrigger>
           {menu && (
-            <DropdownMenuContent align="start" className="w-56">
-              <DropdownMenuLabel className="text-xs text-muted-foreground">Who said this?</DropdownMenuLabel>
+            <DropdownMenuContent
+              align="start"
+              className="w-56"
+              aria-labelledby={menuLabel}
+              onCloseAutoFocus={(event) => {
+                // Radix would focus the hidden anchor, which can't take focus.
+                event.preventDefault();
+                anchor.current?.focus({ preventScroll: true });
+              }}
+            >
+              <DropdownMenuLabel id={menuLabel} className="text-xs text-muted-foreground">
+                Who said this?
+              </DropdownMenuLabel>
               {voices
                 .filter((voice) => voice.speakerId !== menu.segment.meeting_speaker_id && voice.label !== menu.segment.speaker)
                 .map((voice) => (

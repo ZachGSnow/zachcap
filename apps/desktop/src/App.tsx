@@ -18,11 +18,12 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useLibraryAsk } from "@/hooks/useLibraryAsk";
 import { usePoll } from "@/hooks/usePoll";
 import { api, connect, isTauri, waitForEngine, type Meeting, type Stats } from "@/lib/engine";
 import { notify } from "@/lib/feedback";
 import { ActionsView } from "@/views/ActionsView";
-import { AskView, type LibraryExchange } from "@/views/AskView";
+import { AskView } from "@/views/AskView";
 import { MeetingView } from "@/views/MeetingView";
 import { MeetingsView } from "@/views/MeetingsView";
 import { PeopleView } from "@/views/PeopleView";
@@ -168,8 +169,9 @@ function Shell() {
   const [importPath, setImportPath] = useState<string | null>(null);
   const { data: stats, error: engineError } = usePoll(() => api<Stats>("/api/stats"), 5000);
   const [engineStopped, setEngineStopped] = useState<string | null>(null);
-  // Kept here, so the conversation is still there after looking at a meeting it cited.
-  const [askHistory, setAskHistory] = useState<LibraryExchange[]>([]);
+  // Kept here, so the conversation (and an answer still on its way) survives looking at
+  // a meeting it cited.
+  const library = useLibraryAsk();
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -209,6 +211,14 @@ function Shell() {
   // Stable, so the recording provider doesn't re-subscribe to the hotkey on every render.
   const onSaved = useCallback((id: number) => setView({ name: "meeting", id }), []);
 
+  // "Brief me" on a person asks the question right away and shows the Ask page.
+  const brief = (name: string) => {
+    if (!library.ask(briefQuestion(name))) {
+      toast("Still answering your last question", { description: "Ask for the brief again when it's done." });
+    }
+    setView({ name: "ask" });
+  };
+
   const chooseFile = async () => {
     if (isTauri()) {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -241,18 +251,10 @@ function Shell() {
             {view.name === "meeting" && (
               <MeetingView key={`${view.id}-${view.at ?? ""}`} id={view.id} at={view.at} onBack={() => setView({ name: "meetings" })} />
             )}
-            {view.name === "ask" && (
-              <AskView
-                key={view.nonce ?? 0}
-                history={askHistory}
-                setHistory={setAskHistory}
-                initialQuestion={view.question}
-                onOpen={openMeeting}
-              />
-            )}
+            {view.name === "ask" && <AskView library={library} onOpen={openMeeting} />}
             {view.name === "actions" && <ActionsView onOpen={openMeeting} />}
             {view.name === "people" && (
-              <PeopleView onBrief={(name) => setView({ name: "ask", question: briefQuestion(name), nonce: Date.now() })} />
+              <PeopleView onBrief={brief} />
             )}
             {view.name === "search" && <SearchView onOpen={openMeeting} />}
             {view.name === "settings" && <SettingsView />}
