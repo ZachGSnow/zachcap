@@ -39,10 +39,23 @@ export function StatusBadge({ meeting }: { meeting: Meeting }) {
   return <Badge variant="outline">{STATUS_LABEL[meeting.status]}</Badge>;
 }
 
-function SetupChecklist({ keys, hasMeetings, onSettings, onImport }: { keys: KeyStatus; hasMeetings: boolean; onSettings: () => void; onImport: () => void }) {
+function SetupChecklist({
+  keys,
+  hasMeetings,
+  soundChecked,
+  onSettings,
+  onImport,
+}: {
+  keys: KeyStatus;
+  hasMeetings: boolean;
+  soundChecked: boolean;
+  onSettings: () => void;
+  onImport: () => void;
+}) {
   const steps = [
     { done: keys.huggingface !== "not set", label: "Add a Hugging Face token", hint: "Tells speakers apart. Free; accept the model's terms first.", action: onSettings },
     { done: keys.anthropic !== "not set", label: "Add your Anthropic API key", hint: "Summaries, action items and Ask. A few cents per meeting.", action: onSettings },
+    { done: soundChecked, label: "Check your sound", hint: "Four seconds in Settings: your mic and the computer's audio, heard before a call depends on it.", action: onSettings },
     { done: hasMeetings, label: "Record or import your first meeting", hint: "Press Record (Ctrl+Alt+R) on a call, or import a Teams recording.", action: onImport },
   ];
   if (steps.every((s) => s.done)) return null;
@@ -203,8 +216,14 @@ export function MeetingsView({
           </div>
         )}
 
-        {keys && meetings && (
-          <SetupChecklist keys={keys} hasMeetings={meetings.length > 0} onSettings={onSettings} onImport={onImport} />
+        {keys && meetings && settings && (
+          <SetupChecklist
+            keys={keys}
+            hasMeetings={meetings.length > 0}
+            soundChecked={settings.soundcheck_passed !== null}
+            onSettings={onSettings}
+            onImport={onImport}
+          />
         )}
 
         {!meetings && (

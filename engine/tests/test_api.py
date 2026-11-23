@@ -672,3 +672,28 @@ def test_the_watch_folder_settings(client: TestClient, tmp_path: Path):
     assert [f["name"] for f in failed] == ["broken.mp3"] and failed[0]["error"]
     off = client.put("/api/settings", headers=AUTH, json={"watch_folder": ""}).json()
     assert off["watch_folder"] == "" and off["watch_folder_failed"] == []
+
+
+def test_a_sound_check_reports_both_sides_and_keeps_nothing(client: TestClient, monkeypatch):
+    from zachcap import soundcheck
+
+    calls = []
+
+    def fake_run(mic_name=None, output_name=None):
+        calls.append((mic_name, output_name))
+        heard = {"device": "Speakers", "peak_dbfs": -30.0, "heard": True}
+        return {"mic": {**heard, "device": "Mic"}, "system": heard, "played": True, "errors": []}
+
+    monkeypatch.setattr(soundcheck, "run", fake_run)
+    assert client.get("/api/settings", headers=AUTH).json()["soundcheck_passed"] is None
+
+    result = client.post("/api/soundcheck", headers=AUTH).json()
+    assert result["mic"]["heard"] and result["system"]["device"] == "Speakers"
+    assert calls == [(None, None)]  # every speaker and headset, the default mic
+    assert client.get("/api/settings", headers=AUTH).json()["soundcheck_passed"]
+
+    monkeypatch.setattr(capture, "Recorder", FakeRecorder)
+    monkeypatch.setattr(pipeline, "process", lambda *args, **kwargs: "ready")
+    client.post("/api/record/start", headers=AUTH, json={})
+    assert client.post("/api/soundcheck", headers=AUTH).status_code == 409  # not mid-meeting
+    client.post("/api/record/stop", headers=AUTH)

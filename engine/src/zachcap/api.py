@@ -886,6 +886,8 @@ def create_app(token: str) -> FastAPI:
         with lock:
             if recording.get("recorder") is not None:
                 raise HTTPException(status_code=409, detail="Already recording")
+            if recording.get("checking"):
+                raise HTTPException(status_code=409, detail="A sound check is running")
             folder = paths.meetings_dir() / datetime.now().strftime("%Y-%m-%d_%H%M%S")
             recorder = Recorder(
                 folder,
@@ -933,6 +935,33 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=409, detail="Not recording")
         worker.submit(meeting_id)
         return {"meeting_id": meeting_id}
+
+    @app.post("/api/soundcheck", dependencies=auth)
+    def sound_check(store: Store = Depends(db)):
+        """A few seconds recorded as a meeting would be, with a short Windows sound, to show
+        the microphone and the computer's audio are both heard. Nothing is kept."""
+        from . import soundcheck
+
+        with lock:
+            if recording.get("recorder") is not None:
+                raise HTTPException(status_code=409, detail="Not while recording")
+            if recording.get("checking"):
+                raise HTTPException(status_code=409, detail="A sound check is already running")
+            recording["checking"] = True
+        try:
+            result = soundcheck.run(
+                mic_name=store.setting("mic_device") or None,
+                output_name=store.setting("output_device") or None,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"The sound check failed: {exc}") from exc
+        finally:
+            recording.pop("checking", None)
+        if result["mic"]["heard"] and result["system"]["heard"]:
+            store.set_setting(
+                soundcheck.SETTING, datetime.now().astimezone().isoformat(timespec="seconds")
+            )
+        return result
 
     @app.get("/api/call", dependencies=auth)
     def call():
@@ -1052,6 +1081,7 @@ def create_app(token: str) -> FastAPI:
             # Offer to stop (with a countdown) when the call ends or after a long silence.
             "stop_when_call_ends": store.setting("stop_when_call_ends", "1") == "1",
             "export_work_log": store.setting("export_work_log") == "1",
+            "soundcheck_passed": store.setting("soundcheck_passed"),
             "templates": prompts.choices(store, "template"),
             "recipes": prompts.choices(store, "recipe"),
             "language": store.setting("language", "en"),

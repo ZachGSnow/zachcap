@@ -194,6 +194,8 @@ export type Settings = {
   stop_when_call_ends: boolean;
   /** Keep a daily and weekly work log in the export folder too. */
   export_work_log: boolean;
+  /** When a sound check last heard both sides (null: never). */
+  soundcheck_passed: string | null;
   templates: { id: string; label: string }[];
   recipes: { id: string; label: string }[];
   me: { id: number; name: string };
@@ -329,3 +331,6 @@ export type WorkLog = {
   waiting_on: WorkLogItem[];
   markdown: string;
 };
+
+export type SoundCheckSide = { device: string; peak_dbfs: number | null; heard: boolean };
+export type SoundCheckResult = { mic: SoundCheckSide; system: SoundCheckSide; played: boolean; errors: string[] };
