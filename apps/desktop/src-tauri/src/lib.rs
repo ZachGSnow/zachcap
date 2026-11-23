@@ -144,6 +144,37 @@ fn hold_recording_shortcuts(app: &AppHandle, recording: bool) {
     }
 }
 
+/// Ctrl+Alt+D: hold to dictate. Held only while dictation is on in Settings.
+#[cfg(desktop)]
+fn dictation_shortcut() -> tauri_plugin_global_shortcut::Shortcut {
+    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
+    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyD)
+}
+
+/// Dictation turned on or off in Settings (the page says so at start and on every change).
+#[tauri::command]
+fn set_dictation(app: AppHandle, enabled: bool) {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_global_shortcut::GlobalShortcutExt;
+        let shortcuts = app.global_shortcut();
+        let shortcut = dictation_shortcut();
+        let held = shortcuts.is_registered(shortcut);
+        let result = if enabled && !held {
+            shortcuts.register(shortcut)
+        } else if !enabled && held {
+            shortcuts.unregister(shortcut)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            eprintln!("Ctrl+Alt+D is unavailable: {error}");
+        }
+    }
+    #[cfg(not(desktop))]
+    let _ = (app, enabled);
+}
+
 /// The app icon with a red recording dot (and a white ring) in its bottom-right corner.
 fn with_red_dot(icon: &Image<'_>) -> Image<'static> {
     let (width, height) = (icon.width(), icon.height());
@@ -401,9 +432,22 @@ pub fn run() {
                 };
                 let toggle = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyR);
                 let [(bookmark, _), (snapshot, _)] = recording_shortcuts();
+                let dictate = dictation_shortcut();
                 app.handle().plugin(
                     tauri_plugin_global_shortcut::Builder::new()
                         .with_handler(move |app, shortcut, event| {
+                            // Dictation listens while the keys are held: down starts, up stops.
+                            if shortcut == &dictate {
+                                let _ = app.emit(
+                                    if event.state() == ShortcutState::Pressed {
+                                        "dictate-start"
+                                    } else {
+                                        "dictate-stop"
+                                    },
+                                    (),
+                                );
+                                return;
+                            }
                             if event.state() != ShortcutState::Pressed {
                                 return;
                             }
@@ -481,7 +525,8 @@ pub fn run() {
             engine_exited,
             restart_engine,
             open_data_folder,
-            set_recording_indicator
+            set_recording_indicator,
+            set_dictation
         ])
         .build(tauri::generate_context!())
         .expect("error while building ZachCap")

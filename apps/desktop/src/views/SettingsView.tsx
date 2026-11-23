@@ -5,6 +5,7 @@ import {
   FolderOpen,
   KeyRound,
   Keyboard,
+  MessageSquareText,
   Mic,
   Palette,
   Plug,
@@ -67,6 +68,7 @@ type SettingsChange = Partial<{
   mask_before_claude: boolean;
   stop_when_call_ends: boolean;
   export_work_log: boolean;
+  dictation: boolean;
   also_answer_to: string;
   watch_folder: string;
   /** With watch_folder: import the recordings already there too. */
@@ -631,6 +633,25 @@ export function SettingsView() {
 
         <Section icon={<Palette className="size-3.5" />} title="Appearance">
           <ThemeRow />
+        </Section>
+
+        <Section icon={<MessageSquareText className="size-3.5" />} title="Dictation">
+          <Row
+            label="Hold Ctrl+Alt+D to dictate"
+            help="In any app: hold the keys, speak, let go, and what you said is typed where your cursor is, spelled with your Words to know. Transcribed on this computer (a small model, ready a few seconds after you turn this on); nothing is recorded or kept."
+          >
+            <Switch
+              className="ml-auto"
+              aria-label="Hold Ctrl+Alt+D to dictate"
+              checked={settings?.dictation ?? false}
+              onCheckedChange={(on) => void save({ dictation: on })}
+            />
+          </Row>
+          {settings?.dictation && (
+            <Row label="Try it here" help="Click in the box, hold Ctrl+Alt+D and say something.">
+              <Textarea aria-label="Try dictation here" placeholder="Hold Ctrl+Alt+D and speak" className="min-h-16 text-sm" />
+            </Row>
+          )}
         </Section>
 
         <Section icon={<Keyboard className="size-3.5" />} title="Shortcuts">

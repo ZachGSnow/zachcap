@@ -25,6 +25,7 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 - **Summaries with names** from Claude (Opus 5.5 by default): overview, decisions, action items marked as commitments or assignments with due dates, who said what, open questions and topics. Every item links to the moment it was said. Pick the **kind of meeting** (1:1, standup, customer call, project status, incident or troubleshooting, interview) to set what the summary focuses on; **edit them or add your own** in Settings (a vendor call, a client's quarterly review).
 - **Write from a meeting** in one click: a follow-up email, a status update, or notes for a service ticket, ready to copy. Edit these or add your own documents (a client's ticket format, a time entry).
 - **Action item tracker** across all meetings, with Open/Done, "Mine", and commitments vs assigned tasks.
+- **Dictation in any app** (optional): hold **Ctrl+Alt+D**, speak, let go, and what you said is typed where your cursor is, spelled with your Words to know: ticket notes, replies, chat. Transcribed on this computer by a small model on the CPU, so it works during a call and never waits for the GPU; nothing is recorded or kept.
 - **Work log** for a day or a week: each meeting with who was there, what came of it and its action items, plus a **draft time entry** per meeting rounded up to 15 minutes, ready to copy into a time sheet or ticket. Built from your summaries, free and instant; it can also be kept in the export folder, and Ask and the MCP server can read it.
 - **Ask across all your meetings**: "What did I commit to this week?", "What's still open with Dana?". Claude searches your transcripts, summaries and action items with read-only tools and links every fact to the moment it was said. **Brief me** on a person prepares you for your next meeting with them. Each meeting also has its own Ask tab.
 - **History and search**: every meeting, searchable by anything anyone said.
@@ -85,6 +86,7 @@ Everything is set in the app under **Settings**:
 | Kinds of meeting, one-click documents | Edit the built-in ones (and reset them), or add your own with your own instructions | As shipped |
 | API keys | Hugging Face token and Anthropic key | not set |
 | Start with Windows | Opens ZachCap in the tray when you sign in (release builds) | off |
+| Dictation | Hold Ctrl+Alt+D in any app to type what you say | off |
 | Sound check | Four seconds recorded as a meeting would be, with a short sound halfway, played where the computer's audio is recorded from (a quiet tone on a chosen output device): shows your mic and the computer's audio are both heard (nothing is kept) | - |
 | Stop when the call ends | Count down and stop when the call app lets go of the mic and it goes quiet, or after ten quiet minutes | on |
 | Theme | Light, dark, or the same as Windows | Same as Windows |
@@ -146,7 +148,7 @@ Researched and planned in [docs/PLAN.md](docs/PLAN.md#13-next-from-competitor-re
 - Capture health warnings, keeping the PC awake while recording, and a smart stop when the call ends
 - Your own summary templates and one-click documents; redact a moment (a password read aloud); fix a line's words
 - A daily and weekly digest with draft time entries; markers where your name was said; a watch folder for recordings
-- Later: push-to-talk dictation for ticket notes, live transcript, signed installer
+- Later: a "ticket note" dictation mode that tidies what you said with Claude, live transcript, signed installer
 
 ## License
 
