@@ -6,6 +6,7 @@ import {
   KeyRound,
   Keyboard,
   Mic,
+  Palette,
   Plug,
   Power,
   RefreshCw,
@@ -26,6 +27,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type Devices, type KeyStatus, type Settings } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
+import { getTheme, setTheme, type Theme } from "@/lib/theme";
 
 const KEYS = [
   {
@@ -51,6 +53,29 @@ type SettingsChange = Partial<{
   keep_audio_days: number;
   mask_before_claude: boolean;
 }>;
+
+const THEMES: { value: Theme; label: string }[] = [
+  { value: "system", label: "Same as Windows" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
+
+function ThemeRow() {
+  const [theme, setChoice] = useState<Theme>(getTheme);
+  return (
+    <Row label="Theme" help="Light, dark, or whatever Windows is set to.">
+      <Select
+        label="Theme"
+        value={theme}
+        onChange={(value) => {
+          setTheme(value as Theme);
+          setChoice(value as Theme);
+        }}
+        options={THEMES}
+      />
+    </Row>
+  );
+}
 
 const KEEP_AUDIO = [
   { value: "0", label: "Forever" },
@@ -389,6 +414,10 @@ export function SettingsView() {
           </Section>
         )}
 
+        <Section icon={<Palette className="size-3.5" />} title="Appearance">
+          <ThemeRow />
+        </Section>
+
         <Section icon={<Keyboard className="size-3.5" />} title="Shortcuts">
           <Row label="Start or stop recording" help="Works from anywhere, even with ZachCap in the tray.">
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Ctrl + Alt + R</kbd>
@@ -398,6 +427,15 @@ export function SettingsView() {
           </Row>
           <Row label="Play or pause" help="On a meeting's page.">
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Space</kbd>
+            <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">K</kbd>
+          </Row>
+          <Row label="Back or forward 5 seconds" help="On a meeting's page.">
+            <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Left</kbd>
+            <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Right</kbd>
+          </Row>
+          <Row label="Back or forward 10 seconds" help="On a meeting's page.">
+            <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">J</kbd>
+            <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">L</kbd>
           </Row>
         </Section>
 

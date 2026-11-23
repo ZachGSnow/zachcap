@@ -1,8 +1,9 @@
-import { Headphones, Pause, Play, RotateCcw, RotateCw, X } from "lucide-react";
+import { FastForward, Headphones, Pause, Play, RotateCcw, RotateCw, X } from "lucide-react";
 import type { RefObject } from "react";
 
 import { Button } from "@/components/ui/button";
 import { clock } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 const SPEEDS = [1, 1.25, 1.5, 2];
 
@@ -13,12 +14,17 @@ export function PlayerBar({
   state,
   solo,
   trackLabel,
+  skipSilences,
+  onSkipSilences,
   onClearSolo,
 }: {
   audio: RefObject<HTMLAudioElement | null>;
   state: PlayerState;
   solo: string | null;
   trackLabel: string;
+  /** Jump over pauses longer than a moment while playing. */
+  skipSilences: boolean;
+  onSkipSilences: (on: boolean) => void;
   onClearSolo: () => void;
 }) {
   const element = () => audio.current;
@@ -77,6 +83,17 @@ export function PlayerBar({
       ) : (
         <span className="text-xs text-muted-foreground">{trackLabel}</span>
       )}
+      <Button
+        size="icon"
+        variant="ghost"
+        className={cn("size-8", skipSilences && "bg-muted text-foreground")}
+        aria-pressed={skipSilences}
+        aria-label="Skip silences"
+        title={skipSilences ? "Skipping silences: click to play every pause" : "Skip silences"}
+        onClick={() => onSkipSilences(!skipSilences)}
+      >
+        <FastForward className={cn("size-3.5", !skipSilences && "opacity-60")} />
+      </Button>
       <Button size="sm" variant="ghost" className="w-12 font-mono text-xs" onClick={cycleSpeed} title="Playback speed">
         {state.rate}x
       </Button>

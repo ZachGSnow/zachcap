@@ -52,6 +52,33 @@ import { StatusBadge } from "@/views/MeetingsView";
 type Track = "mix" | "mic" | "system";
 const TRACK_LABEL: Record<Track, string> = { mix: "Everyone", mic: "Your mic only", system: "Call audio only" };
 
+/** Pauses longer than this are skipped when "skip silences" is on. */
+const SILENCE_GAP = 1.5;
+const SKIP_KEY = "zachcap-skip-silences";
+
+/** Stretches where anyone is talking: lines merged when they overlap or nearly touch. */
+function speechSpans(segments: { start: number; end: number }[]): { start: number; end: number }[] {
+  const spans: { start: number; end: number }[] = [];
+  for (const segment of [...segments].sort((a, b) => a.start - b.start)) {
+    const last = spans.at(-1);
+    if (last && segment.start <= last.end + 0.3) last.end = Math.max(last.end, segment.end);
+    else spans.push({ start: segment.start, end: segment.end });
+  }
+  return spans;
+}
+
+/** The first stretch of speech that hasn't ended by ``time`` (binary search). */
+function nextSpan(spans: { start: number; end: number }[], time: number) {
+  let lo = 0;
+  let hi = spans.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (spans[mid].end <= time) lo = mid + 1;
+    else hi = mid;
+  }
+  return spans[lo];
+}
+
 export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBack: () => void }) {
   const [busy, setBusy] = useState(false);
   const { data, error, refresh } = usePoll(() => api<MeetingDetail>(`/api/meetings/${id}`), busy ? 1500 : 0, id);
@@ -60,6 +87,11 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   const audio = useRef<HTMLAudioElement>(null);
   const [player, setPlayer] = useState<PlayerState>({ playing: false, time: 0, duration: 0, rate: 1 });
   const [solo, setSolo] = useState<string | null>(null);
+  const [skipSilences, setSkipSilences] = useState(() => localStorage.getItem(SKIP_KEY) === "1");
+  useEffect(() => {
+    if (skipSilences) localStorage.setItem(SKIP_KEY, "1");
+    else localStorage.removeItem(SKIP_KEY);
+  }, [skipSilences]);
   // A cited moment (from Ask, search or an action item) opens on the transcript at that line.
   const [tab, setTab] = useState<string | null>(at != null ? "transcript" : null);
   // The kind of meeting picked for the summary; null leaves it to the engine (this meeting's
@@ -97,6 +129,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
     () => (solo ? (data?.segments ?? []).filter((s) => s.speaker === solo) : []),
     [solo, data?.segments],
   );
+  const spans = useMemo(() => speechSpans(data?.segments ?? []), [data?.segments]);
   const track: Track = useMemo(() => {
     if (!solo || soloSegments.length === 0) return "mix";
     const tracks = new Set(soloSegments.map((s) => s.track));
@@ -139,6 +172,10 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
           toast(`That was ${solo}'s last line`, { description: "Play starts again from their first." });
         }
       }
+    } else if (skipSilences && !element.paused) {
+      const t = element.currentTime;
+      const next = nextSpan(spans, t);
+      if (next && next.start - t > SILENCE_GAP) element.currentTime = next.start - 0.25;
     }
     sync(element);
   };
@@ -156,18 +193,32 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   }, []);
 
   useEffect(() => {
+    // Space or K plays and pauses; Left and Right move 5 s, J and L 10 s (as in video players).
+    const moves: Record<string, number> = { ArrowLeft: -5, ArrowRight: 5, KeyJ: -10, KeyL: 10 };
     const onKey = (event: KeyboardEvent) => {
-      if (event.code !== "Space" || event.defaultPrevented || event.repeat) return;
+      if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+      const toggle = event.code === "Space" || event.code === "KeyK";
+      if (!toggle && !(event.code in moves)) return;
       const target = event.target as HTMLElement;
-      if (target.closest("input, textarea, select, [contenteditable], [role=menu], [role=menuitem], [role=dialog], [role=listbox]")) {
+      if (
+        target.closest(
+          "input, textarea, select, [contenteditable], [role=menu], [role=menuitem], [role=dialog], [role=listbox], [role=tab], [role=slider]",
+        )
+      ) {
         return;
       }
       // Also stops Space from clicking whichever button was clicked last.
       event.preventDefault();
       const element = audio.current;
       if (!element) return;
-      if (element.paused) void element.play();
-      else element.pause();
+      if (toggle) {
+        if (event.repeat) return;
+        if (element.paused) void element.play();
+        else element.pause();
+      } else {
+        const end = Number.isFinite(element.duration) ? element.duration : Infinity;
+        element.currentTime = Math.max(0, Math.min(end, element.currentTime + moves[event.code]));
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -585,7 +636,15 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
         }}
       />
       {!processing && data.segments.length > 0 && !meeting.audio_removed_at && (
-        <PlayerBar audio={audio} state={player} solo={solo} trackLabel={TRACK_LABEL[track]} onClearSolo={() => setSolo(null)} />
+        <PlayerBar
+          audio={audio}
+          state={player}
+          solo={solo}
+          trackLabel={TRACK_LABEL[track]}
+          skipSilences={skipSilences}
+          onSkipSilences={setSkipSilences}
+          onClearSolo={() => setSolo(null)}
+        />
       )}
 
       <NamePrompt
