@@ -130,13 +130,24 @@ def transcript_text(store: Store, meeting_id: int) -> str:
     )
 
 
+SNAPSHOT_IN_PROMPT = 1500  # characters of a snapshot's text that go into a prompt
+
+
+def _note_line(note) -> str:
+    if note["kind"] == "snapshot":
+        text = " / ".join(line.strip() for line in note["text"].splitlines() if line.strip())
+        if not text:
+            return "took a snapshot of the screen (no text on it)"
+        if len(text) > SNAPSHOT_IN_PROMPT:
+            text = text[:SNAPSHOT_IN_PROMPT] + "..."
+        return f"took a snapshot of the screen, which read: {text}"
+    return note["text"] or "marked this moment as important"
+
+
 def notes_text(store: Store, meeting_id: int) -> str:
     """The user's own notes and bookmarks, for prompts: they show what mattered to them."""
     me = store.me()["name"]
-    lines = [
-        f"[{_clock(n['at'])}] {n['text'] or 'marked this moment as important'}"
-        for n in store.notes(meeting_id)
-    ]
+    lines = [f"[{_clock(n['at'])}] {_note_line(n)}" for n in store.notes(meeting_id)]
     if not lines:
         return ""
     return privacy.outgoing(

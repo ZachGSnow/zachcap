@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Bookmark, Circle, Megaphone, Mic, Pause, Play, Square, Timer, TriangleAlert } from "lucide-react";
+import { Bookmark, Camera, Circle, Megaphone, Mic, Pause, Play, Square, Timer, TriangleAlert } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -41,6 +41,8 @@ type RecordingContext = {
   /** A note, or with no text a bookmark, at this moment of the recording. */
   note: (text?: string) => Promise<boolean>;
   pause: (paused: boolean) => Promise<void>;
+  /** A picture of the call window and the text in it, as a note at this moment. */
+  snapshot: () => Promise<void>;
   /** The note being typed in the recording bar. Stopping saves it into this meeting. */
   draft: string;
   setDraft: (next: string | ((current: string) => string)) => void;
@@ -146,6 +148,18 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     [refresh],
   );
 
+  // A picture of the call window and the text in it, as a note at this moment.
+  const snapshot = useCallback(async () => {
+    try {
+      const shot = await api<{ at: number; lines: number; window: string }>("/api/record/snapshot", { method: "POST" });
+      const read = shot.lines ? `${shot.lines} line${shot.lines === 1 ? "" : "s"} of text` : "no text";
+      void announce("Snapshot saved", `${shot.window}, at ${clock(shot.at)}: ${read}.`, "success");
+      await refresh();
+    } catch (error) {
+      void announce("Couldn't take a snapshot", String(error), "error");
+    }
+  }, [refresh]);
+
   // The tray icon's tooltip says when a recording is running, even with the window closed.
   const recording = state?.recording ?? false;
   const recordingNow = useRef(recording);
@@ -235,15 +249,19 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
       if (recordingNow.current) void note();
       else void announce("Not recording", "Bookmarks mark a moment of a recording. Press Ctrl+Alt+R to start one.");
     });
+    on("snapshot", () => {
+      if (recordingNow.current) void snapshot();
+      else void announce("Not recording", "Snapshots go with a recording. Press Ctrl+Alt+R to start one.");
+    });
     return () => {
       cancelled = true;
       stops.forEach((stop) => stop());
     };
     // Read from a ref, so starting or stopping doesn't re-subscribe (and drop a key press).
-  }, [toggle, note]);
+  }, [toggle, note, snapshot]);
 
   return (
-    <Context.Provider value={{ state, start, stop, toggle, note, pause, draft, setDraft, autoStop, keepRecording }}>
+    <Context.Provider value={{ state, start, stop, toggle, note, pause, snapshot, draft, setDraft, autoStop, keepRecording }}>
       {children}
     </Context.Provider>
   );
@@ -370,7 +388,7 @@ function Meter({ label, dbfs }: { label: string; dbfs: number }) {
 /** One row when there's room. In a narrower window the note field gets a row of its own and
  * the level meters go, so Pause and Stop always stay on screen. */
 export function RecordingBar() {
-  const { state, stop, note, pause, draft, setDraft, autoStop, keepRecording } = useRecording();
+  const { state, stop, note, pause, snapshot, draft, setDraft, autoStop, keepRecording } = useRecording();
   const [stopping, setStopping] = useState(false);
   const saving = useRef(false);
   if (!state?.recording) return null;
@@ -439,6 +457,17 @@ export function RecordingBar() {
             onClick={() => void note()}
           >
             <Bookmark className="size-4" />
+          </Button>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="size-8 shrink-0"
+            title="Snapshot the call: a picture and the text in it (Ctrl+Alt+S)"
+            aria-label="Snapshot the call"
+            onClick={() => void snapshot()}
+          >
+            <Camera className="size-4" />
           </Button>
           {(state.notes ?? 0) > 0 && (
             <span className="shrink-0 text-xs tabular-nums text-muted-foreground" title="Notes and bookmarks so far">

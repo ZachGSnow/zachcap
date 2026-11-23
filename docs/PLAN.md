@@ -304,10 +304,11 @@ Each change went through its own pull request with green CI, after two rounds of
 | Every speaker and headset | The computer's audio from every active output at once, through Core Audio (live device list), mixed on one timeline by packet times; outputs plugged in mid-call join, unplugged ones drop out; 24-bit; playback evens out a quiet call against the mic | A 6.3 s recording on the test laptop: the track kept real time, a sound played at 2.3 s landed at 2.3 s, both tracks loaded at the same length; joining, unplugging, retries, pause and resampling are unit-tested with a fake Core Audio |
 | Capture health and smart stop | A watch on each recording: no signal at all from the mic for a minute (muted), no call audio two minutes into a call, under 500 MB free; Windows kept awake while recording; when the call app lets go of the mic and it goes quiet for 10 s, a 15 s countdown to stop (60 s after ten quiet minutes in a room), cancelled by Keep recording or by anyone speaking | Unit tests with a fake clock, calls and disk; in the browser with a stubbed engine: the warning toast, both countdowns, Keep recording, cancel by speech, and the stop when it runs out; on the test laptop the system's "system required" state was set only while recording |
 | Work log | A day's or a week's meetings with people, overview, decisions and action items, and a draft time entry per meeting rounded up to 15 minutes; built locally from the summaries; a Work log page, a daily and weekly file in the export folder (optional), and a read-only tool for Ask and MCP that cites [M12]; deleting a meeting now removes its export file too | Unit and API tests; the demo library's week in the browser (stats, time entries, both meetings, ticking an item off and back) |
+| Snapshots of the call | Ctrl+Alt+S, the tray or the recording bar's camera: the call window (or the window behind ZachCap) drawn by itself with PrintWindow, so a covered window or a dark screen still comes out; Windows' own text recognition (Windows.Media.Ocr) reads it; the picture stays in the meeting folder and the text becomes a note for summaries and Ask | A synthetic window read back word for word in 0.18 s with the display off (the screen capture was all black, which is why PrintWindow is used); the demo meeting showed the marker, the note with its picture and the full view; API tests with a stand-in capture |
 
 The cost shown next to each answer prices every attempt at the rates of the model that ran it (a fallback included), cache reads at that model's own rate.
 
-Tests: 32 at v0.1, 150 now. CI no longer installs the GPU stack and checks `uv.lock`.
+Tests: 32 at v0.1, 154 now. CI no longer installs the GPU stack and checks `uv.lock`.
 
 ## 13. Next, from competitor research (2026-11-23)
 
@@ -342,7 +343,6 @@ Build order (each its own pull request, then a review round):
 | 8 | **Where your name was said**: markers on the timeline | Jump to where you were asked something | Teams Premium | S |
 | 9 | **Watch-folder import**: recordings dropped in a folder (softphone or phone-system exports) import themselves | No manual import for recorded calls | MacWhisper | S |
 
-Later: push-to-talk dictation with a "ticket note" mode (Fireflies Talk, Superwhisper, Wispr), a
-snapshot of the shared screen with on-device text recognition, client tags, topic trackers, live
+Later: push-to-talk dictation with a "ticket note" mode (Fireflies Talk, Superwhisper, Wispr), client tags, topic trackers, live
 transcript and "catch me up", a Teams accessibility bridge for mute state and names (fragile),
 signed installer.

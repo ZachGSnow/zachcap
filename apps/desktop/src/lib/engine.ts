@@ -144,7 +144,8 @@ export type RecordState =
       quiet_for?: number;
     };
 
-export type Note = { id: number; meeting_id: number; at: number; kind: "note" | "bookmark"; text: string };
+/** A snapshot's text is what Windows read in the picture of the call. */
+export type Note = { id: number; meeting_id: number; at: number; kind: "note" | "bookmark" | "snapshot"; text: string };
 
 export type SpeakerInsight = {
   speaker: string;
