@@ -28,6 +28,8 @@ KNOWN = {
     "vivaldi.exe": "Vivaldi",
     "brave.exe": "Brave",
 }
+# Web browsers among them: a call in a tab, and the browser's other windows could show anything.
+BROWSERS = {"Chrome", "Edge", "Firefox", "Vivaldi", "Brave"}
 # Never report ourselves: recording opens the mic from Python.
 IGNORED = ("python", "zachcap")
 
@@ -57,8 +59,9 @@ def is_meeting_app(name: str) -> bool:
     return name in set(KNOWN.values())
 
 
-def apps_using_mic() -> list[str]:
-    """Friendly names of the apps using the microphone at this moment."""
+def _keys_in_use() -> list[str]:
+    """The registry key names of the apps using the microphone at this moment: a packaged
+    app's package family name (MSTeams_8wekyb3d8bbwe), or a program's path with # for \\."""
     found: list[str] = []
     for path in (ROOT, ROOT + r"\NonPackaged"):
         try:
@@ -77,10 +80,44 @@ def apps_using_mic() -> list[str]:
                     continue
                 with winreg.OpenKey(parent, name) as key:
                     if _in_use(key):
-                        label = _friendly(name)
-                        if label not in found:
-                            found.append(label)
+                        found.append(name)
     return found
+
+
+def apps_using_mic() -> list[str]:
+    """Friendly names of the apps using the microphone at this moment."""
+    found: list[str] = []
+    for name in _keys_in_use():
+        label = _friendly(name)
+        if label not in found:
+            found.append(label)
+    return found
+
+
+def meeting_app_keys() -> list[str]:
+    """The registry keys of the meeting apps using the microphone now (see key_matches)."""
+    return [name for name in _keys_in_use() if is_meeting_app(_friendly(name))]
+
+
+def is_browser(key: str) -> bool:
+    """Whether a registry key (see meeting_app_keys) is a web browser's."""
+    return _friendly(key) in BROWSERS
+
+
+def key_matches(key: str, exe_path: str) -> bool:
+    """Whether a running program (its full path) is the app a registry key names: the same
+    path for a program, or a file inside that package's folder for a packaged app
+    (C:\\Program Files\\WindowsApps\\MSTeams_25306.804.4102.7193_x64__8wekyb3d8bbwe\\...)."""
+    exe = exe_path.lower()
+    if "#" in key:
+        return exe == key.replace("#", "\\").lower()
+    family, _, publisher = key.lower().rpartition("_")
+    if not family or not publisher:
+        return False
+    folders = exe.split("\\")
+    return any(
+        part.startswith(family + "_") and part.endswith("__" + publisher) for part in folders
+    )
 
 
 def is_supported() -> bool:

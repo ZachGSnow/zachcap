@@ -87,8 +87,16 @@ export type ActionItem = {
 
 export type TalkTime = { speaker: string; person_id: number | null; seconds: number; turns: number };
 
-/** A line by someone else that says your name (or a name you answer to). */
-export type Mention = { segment_id: number; at: number; speaker: string; snippet: string; names: string[] };
+/** A line by someone else that says your name (or a name you answer to). `spans` are where
+ * in the line's text the name was said, as [start, end) offsets (the engine's own rule). */
+export type Mention = {
+  segment_id: number;
+  at: number;
+  speaker: string;
+  snippet: string;
+  names: string[];
+  spans: [number, number][];
+};
 
 export type MeetingDetail = {
   meeting: Meeting;
@@ -151,7 +159,14 @@ export type RecordState =
     };
 
 /** A snapshot's text is what Windows read in the picture of the call. */
-export type Note = { id: number; meeting_id: number; at: number; kind: "note" | "bookmark" | "snapshot"; text: string };
+export type Note = {
+  id: number;
+  meeting_id: number;
+  at: number;
+  kind: "note" | "bookmark" | "snapshot";
+  text: string;
+  created_at: string;
+};
 
 export type SpeakerInsight = {
   speaker: string;
@@ -184,8 +199,9 @@ export type Settings = {
   export_folder: string;
   /** Recordings saved here import themselves; "" when off. */
   watch_folder: string;
-  /** Files there that couldn't be imported, newest first. */
-  watch_folder_failed: { name: string; error: string }[];
+  /** Files there that couldn't be imported, newest first. `retrying`: it couldn't be read
+   * (in use, or the network share was away), and is tried again on its own. */
+  watch_folder_failed: { name: string; error: string; retrying: boolean }[];
   /** Other names you answer to, comma-separated (for "said your name"). */
   also_answer_to: string;
   keep_audio_days: number;

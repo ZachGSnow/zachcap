@@ -161,7 +161,7 @@ def redact(
     removed, replaced = store.redact_lines(meeting_id, start, end)
     derived = store.forget_derived(meeting_id, start, end)
     for note_id in derived["snapshots"]:
-        snapshot.image_path(folder, note_id).unlink(missing_ok=True)
+        snapshot.remove_pictures(folder, note_id)
     moved = _move_samples(store, meeting_id, start, end)
     scrubbed = store.scrub_deleted_text()
     return {

@@ -17,9 +17,17 @@ import { api, mediaUrl, type Note } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
 import { clock } from "@/lib/format";
 
+/** A snapshot's picture: the small one for the list, or the full one. The note's time is in
+ * the address, so a picture is never mistaken for another one's. */
+function pictureUrl(note: Note, size: "thumb" | "full") {
+  return mediaUrl(`/api/notes/${note.id}/image?size=${size}&v=${encodeURIComponent(note.created_at)}`);
+}
+
 /** A snapshot of the call: its picture, and the text Windows read in it. */
 function SnapshotNote({ note, onOpen }: { note: Note; onOpen: (from: HTMLElement) => void }) {
   const lines = note.text.split("\n").filter((line) => line.trim());
+  // Pictures go with the recording ("Keep recordings"); the text stays.
+  const [missing, setMissing] = useState(false);
   return (
     <div className="flex min-w-0 flex-1 gap-3">
       <button
@@ -27,7 +35,18 @@ function SnapshotNote({ note, onOpen }: { note: Note; onOpen: (from: HTMLElement
         className="shrink-0 overflow-hidden rounded-md border"
         title="Show the snapshot"
       >
-        <img src={mediaUrl(`/api/notes/${note.id}/image`)} alt="Snapshot of the call" className="h-16 w-28 object-cover object-top" />
+        {missing ? (
+          <span className="flex h-16 w-28 items-center justify-center bg-muted px-2 text-center text-[11px] text-muted-foreground">
+            No picture
+          </span>
+        ) : (
+          <img
+            src={pictureUrl(note, "thumb")}
+            alt="Snapshot of the call"
+            className="h-16 w-28 object-cover object-top"
+            onError={() => setMissing(true)}
+          />
+        )}
       </button>
       <div className="min-w-0 flex-1 text-sm">
         {lines.length ? (
@@ -45,6 +64,27 @@ function SnapshotNote({ note, onOpen }: { note: Note; onOpen: (from: HTMLElement
         )}
       </div>
     </div>
+  );
+}
+
+/** The full picture, for the snapshot's own view. */
+function SnapshotPicture({ note }: { note: Note }) {
+  const [missing, setMissing] = useState(false);
+  if (missing) {
+    return (
+      <p className="rounded-md border bg-muted px-3 py-6 text-center text-sm text-muted-foreground">
+        The picture is no longer kept: pictures are deleted with the recording's audio.
+        {note.text ? " What Windows read in it is below." : ""}
+      </p>
+    );
+  }
+  return (
+    <img
+      src={pictureUrl(note, "full")}
+      alt="Snapshot of the call"
+      className="w-full rounded-md border"
+      onError={() => setMissing(true)}
+    />
   );
 }
 
@@ -170,13 +210,13 @@ export function NotesPanel({
           <DialogHeader>
             <DialogTitle>Snapshot at {shown ? clock(shown.at) : ""}</DialogTitle>
             <DialogDescription>
-              The picture stays on this computer. The text below is what Windows read in it; summaries and Ask can use
-              it.
+              The picture never leaves this computer. The text below is what Windows read in it; summaries and Ask can
+              use it.
             </DialogDescription>
           </DialogHeader>
           {shown && (
             <div className="grid max-h-[65vh] gap-3 overflow-auto">
-              <img src={mediaUrl(`/api/notes/${shown.id}/image`)} alt="Snapshot of the call" className="w-full rounded-md border" />
+              <SnapshotPicture key={shown.id} note={shown} />
               {shown.text && <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 font-mono text-xs">{shown.text}</pre>}
             </div>
           )}

@@ -87,6 +87,8 @@ fn restart_engine(engine: tauri::State<Engine>) -> Result<(), String> {
 /// it's visible even with the window closed.
 #[tauri::command]
 fn set_recording_indicator(app: AppHandle, recording: bool) {
+    #[cfg(desktop)]
+    hold_recording_shortcuts(&app, recording);
     let Some(tray) = app.tray_by_id("main") else {
         return;
     };
@@ -101,6 +103,44 @@ fn set_recording_indicator(app: AppHandle, recording: bool) {
         } else {
             icon.clone().to_owned()
         }));
+    }
+}
+
+/// Ctrl+Alt+B (bookmark) and Ctrl+Alt+S (snapshot) only mean something during a
+/// recording, so they are held only then: the rest of the time Word, an IDE, or a keyboard
+/// whose AltGr+S types a letter keep them. Ctrl+Alt+R (start or stop) is always held.
+#[cfg(desktop)]
+fn recording_shortcuts() -> [(tauri_plugin_global_shortcut::Shortcut, &'static str); 2] {
+    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
+    [
+        (
+            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyB),
+            "Ctrl+Alt+B",
+        ),
+        (
+            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyS),
+            "Ctrl+Alt+S",
+        ),
+    ]
+}
+
+#[cfg(desktop)]
+fn hold_recording_shortcuts(app: &AppHandle, recording: bool) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let shortcuts = app.global_shortcut();
+    for (shortcut, keys) in recording_shortcuts() {
+        let held = shortcuts.is_registered(shortcut);
+        let result = if recording && !held {
+            shortcuts.register(shortcut)
+        } else if !recording && held {
+            shortcuts.unregister(shortcut)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            // Another app may own the combination; the tray menu still works.
+            eprintln!("{keys} is unavailable: {error}");
+        }
     }
 }
 
@@ -350,17 +390,17 @@ pub fn run() {
                 }
             });
 
-            // Ctrl+Alt+R starts or stops recording, Ctrl+Alt+B bookmarks the moment and
-            // Ctrl+Alt+S takes a snapshot of the call, from anywhere. Registered here, once, and
-            // handed to the page like the tray menu, so the window's state stays in sync.
+            // Ctrl+Alt+R starts or stops recording, from anywhere; while recording,
+            // Ctrl+Alt+B bookmarks the moment and Ctrl+Alt+S takes a snapshot of the call
+            // (held only then: see hold_recording_shortcuts). Handed to the page like the tray
+            // menu, so the window's state stays in sync.
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::{
                     Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
                 };
                 let toggle = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyR);
-                let bookmark = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyB);
-                let snapshot = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyS);
+                let [(bookmark, _), (snapshot, _)] = recording_shortcuts();
                 app.handle().plugin(
                     tauri_plugin_global_shortcut::Builder::new()
                         .with_handler(move |app, shortcut, event| {
@@ -377,15 +417,9 @@ pub fn run() {
                         })
                         .build(),
                 )?;
-                for (shortcut, keys) in [
-                    (toggle, "Ctrl+Alt+R"),
-                    (bookmark, "Ctrl+Alt+B"),
-                    (snapshot, "Ctrl+Alt+S"),
-                ] {
-                    if let Err(error) = app.global_shortcut().register(shortcut) {
-                        // Another app may own the combination; the tray menu still works.
-                        eprintln!("{keys} is unavailable: {error}");
-                    }
+                if let Err(error) = app.global_shortcut().register(toggle) {
+                    // Another app may own the combination; the tray menu still works.
+                    eprintln!("Ctrl+Alt+R is unavailable: {error}");
                 }
             }
 

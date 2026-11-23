@@ -4,6 +4,7 @@ and deleting old recordings while keeping their transcripts."""
 from __future__ import annotations
 
 import re
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -45,9 +46,10 @@ def outgoing(store: Store, text: str) -> str:
 
 
 def remove_old_audio(store: Store, now: datetime | None = None) -> list[int]:
-    """Delete the recordings of meetings older than the "keep audio" setting. The transcript,
-    summary, notes and voiceprints stay. Only folders ZachCap itself created are touched,
-    and never a meeting being recorded or processed. Returns the meetings cleaned."""
+    """Delete the recordings of meetings older than the "keep audio" setting, and their
+    snapshot pictures. The transcript, summary, notes (a snapshot's text included) and
+    voiceprints stay. Only folders ZachCap itself created are touched, and never a meeting
+    being recorded or processed. Returns the meetings cleaned."""
     days = int(store.setting("keep_audio_days", "0") or 0)
     if days <= 0:
         return []
@@ -66,6 +68,7 @@ def remove_old_audio(store: Store, now: datetime | None = None) -> list[int]:
         for file in folder.iterdir():
             if file.suffix.lower() in AUDIO_SUFFIXES and file.is_file():
                 file.unlink(missing_ok=True)
+        shutil.rmtree(folder / "snapshots", ignore_errors=True)  # pictures; the text stays
         store.update_meeting(
             meeting["id"],
             audio_removed_at=datetime.now().astimezone().isoformat(timespec="seconds"),

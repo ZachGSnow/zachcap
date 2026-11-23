@@ -158,11 +158,44 @@ CREATE TABLE IF NOT EXISTS watched_files (
     seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (path, size, mtime_ns)
 );
+
+-- A counter bumped by any change to who said what (lines, voices, people), so numbers
+-- worked out from them, like the meeting list's mention counts, are kept until it moves.
+CREATE TABLE IF NOT EXISTS changes (name TEXT PRIMARY KEY, version INTEGER NOT NULL);
+INSERT OR IGNORE INTO changes (name, version) VALUES ('lines', 0);
+CREATE TRIGGER IF NOT EXISTS lines_changed_ai AFTER INSERT ON segments BEGIN
+    UPDATE changes SET version = version + 1 WHERE name = 'lines';
+END;
+CREATE TRIGGER IF NOT EXISTS lines_changed_au AFTER UPDATE ON segments BEGIN
+    UPDATE changes SET version = version + 1 WHERE name = 'lines';
+END;
+CREATE TRIGGER IF NOT EXISTS lines_changed_ad AFTER DELETE ON segments BEGIN
+    UPDATE changes SET version = version + 1 WHERE name = 'lines';
+END;
+CREATE TRIGGER IF NOT EXISTS voices_changed_ai AFTER INSERT ON meeting_speakers BEGIN
+    UPDATE changes SET version = version + 1 WHERE name = 'lines';
+END;
+CREATE TRIGGER IF NOT EXISTS voices_changed_au AFTER UPDATE ON meeting_speakers BEGIN
+    UPDATE changes SET version = version + 1 WHERE name = 'lines';
+END;
+CREATE TRIGGER IF NOT EXISTS voices_changed_ad AFTER DELETE ON meeting_speakers BEGIN
+    UPDATE changes SET version = version + 1 WHERE name = 'lines';
+END;
+CREATE TRIGGER IF NOT EXISTS people_changed_ai AFTER INSERT ON people BEGIN
+    UPDATE changes SET version = version + 1 WHERE name = 'lines';
+END;
+CREATE TRIGGER IF NOT EXISTS people_changed_au AFTER UPDATE ON people BEGIN
+    UPDATE changes SET version = version + 1 WHERE name = 'lines';
+END;
+CREATE TRIGGER IF NOT EXISTS people_changed_ad AFTER DELETE ON people BEGIN
+    UPDATE changes SET version = version + 1 WHERE name = 'lines';
+END;
 """
 
 # What a redacted line says instead.
 REDACTED = "[redacted]"
 LAST_MEETING_ID = "last_meeting_id"  # the highest meeting id ever given out
+LAST_NOTE_ID = "last_note_id"  # the highest note id ever given out
 
 # Suggestions show as "Speaker 2 (Dana?)" until confirmed.
 SPEAKER_NAME = (
@@ -176,6 +209,7 @@ class Store:
         # FastAPI may open a request's connection on one worker thread and use it on another;
         # each connection still serves one request at a time, so that is safe.
         path = path or paths.database()
+        self.path = str(path)
         self._batch = 0
         if readonly:
             # For outside readers (the MCP server): SQLite itself refuses any write.
@@ -206,6 +240,11 @@ class Store:
         if "edited" not in columns:
             self.db.execute("ALTER TABLE segments ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
             self.db.commit()
+        # Notes from before their ids were counted: none of those ids is given out again,
+        # whichever way the note goes (deleted, redacted, or with its meeting).
+        if self.setting(LAST_NOTE_ID) is None:
+            highest = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM meeting_notes").fetchone()
+            self.set_setting(LAST_NOTE_ID, str(highest[0]))
 
     def close(self) -> None:
         self.db.close()
@@ -658,12 +697,19 @@ class Store:
     # notes and bookmarks ----------------------------------------------------
 
     def add_note(self, meeting_id: int, at: float, kind: str = "note", text: str = "") -> int:
-        cursor = self.db.execute(
-            "INSERT INTO meeting_notes (meeting_id, at, kind, text) VALUES (?, ?, ?, ?)",
-            (meeting_id, round(at, 2), kind, text),
+        """A note with an id never used before (as meetings): a snapshot's picture is found
+        by its note's id, so a reused id could show a deleted picture."""
+        if not self.db.in_transaction:
+            self.db.execute("BEGIN IMMEDIATE")  # the write lock first, so the id stays ours
+        highest = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM meeting_notes").fetchone()[0]
+        note_id = max(highest, int(self.setting(LAST_NOTE_ID, "0") or 0)) + 1
+        self.db.execute(
+            "INSERT INTO meeting_notes (id, meeting_id, at, kind, text) VALUES (?, ?, ?, ?, ?)",
+            (note_id, meeting_id, round(at, 2), kind, text),
         )
+        self.set_setting(LAST_NOTE_ID, str(note_id))
         self._commit()
-        return cursor.lastrowid
+        return note_id
 
     def notes(self, meeting_id: int) -> list[sqlite3.Row]:
         return self.db.execute(
@@ -678,8 +724,19 @@ class Store:
         self._commit()
 
     def delete_note(self, note_id: int) -> None:
+        if note_id > int(self.setting(LAST_NOTE_ID, "0") or 0):  # never given out again
+            self.set_setting(LAST_NOTE_ID, str(note_id))
         self.db.execute("DELETE FROM meeting_notes WHERE id = ?", (note_id,))
         self._commit()
+
+    def lines_version(self) -> int | None:
+        """Moves whenever a line, a voice or a person changes (see the changes table). None
+        when it can't be told (a library opened read-only from before the counter)."""
+        try:
+            row = self.db.execute("SELECT version FROM changes WHERE name = 'lines'").fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return row[0] if row else None
 
     # overviews and stats ----------------------------------------------------
 

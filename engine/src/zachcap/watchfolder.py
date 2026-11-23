@@ -7,13 +7,17 @@ that have stopped changing: the same size and modified time on two looks, and un
 and queued for processing.
 
 What was seen is remembered by path, size and modified time: a file exported again with new
-content imports again, and a meeting deleted in ZachCap doesn't come back. A file that can't
-be imported is noted with the reason (shown in Settings) and not tried again until it
-changes. The user's files are only ever read: never moved, renamed or deleted.
+content imports again, and a meeting deleted in ZachCap doesn't come back. A file that isn't
+a recording ZachCap can read is noted with the reason (shown in Settings, with a Retry) and
+not tried again until it changes. One that can't be opened right now (open in another
+program, a network share or cloud file offline) is simply tried again on the next look.
+Turning the folder off, or choosing another, stops a run between files. The user's files
+are only ever read: never moved, renamed or deleted.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import traceback
@@ -29,15 +33,18 @@ SETTLED_AFTER = 30.0  # seconds since the file last changed
 
 
 def media_files(folder: Path) -> dict[str, tuple[int, int]]:
-    """Audio and video files directly in the folder: path -> (size, modified time in ns)."""
+    """Audio and video files directly in the folder: path -> (size, modified time in ns).
+    One directory listing (os.scandir has each file's size and time from it on Windows), so
+    a big folder or a network share costs one round trip, not two per file."""
     found = {}
-    for path in folder.iterdir():
-        try:
-            if path.suffix.lower() in MEDIA and path.is_file():
-                stat = path.stat()
-                found[str(path)] = (stat.st_size, stat.st_mtime_ns)
-        except OSError:  # removed while looking, or no access
-            continue
+    with os.scandir(folder) as entries:
+        for entry in entries:
+            try:
+                if os.path.splitext(entry.name)[1].lower() in MEDIA and entry.is_file():
+                    stat = entry.stat()
+                    found[entry.path] = (stat.st_size, stat.st_mtime_ns)
+            except OSError:  # removed while looking, or no access
+                continue
     return found
 
 
@@ -50,24 +57,15 @@ def reason(error: Exception, path: str) -> str:
     return text.strip() or type(error).__name__
 
 
-def failures(store: Store, folder: Path) -> list[dict]:
-    """Files in the folder that couldn't be imported, as they are now: a file fixed, replaced
-    or removed since drops off the list. Newest first."""
-    present = media_files(folder) if folder.is_dir() else {}
-    return [
-        {"name": Path(row["path"]).name, "error": row["error"]}
-        for row in store.watched_failures(str(folder))
-        if present.get(row["path"]) == (row["size"], row["mtime_ns"])
-    ]
-
-
 def skip_existing(store: Store, folder: Path) -> int:
-    """Turned on with "only new recordings": the files there now are never imported."""
+    """Turned on with "only new recordings": the files there now are never imported (noted
+    in one transaction, so an archive of thousands takes a moment, not seconds)."""
     skipped = 0
-    for path, (size, mtime_ns) in media_files(folder).items():
-        if store.watched_file(path, size, mtime_ns) is None:
-            store.record_watched_file(path, size, mtime_ns, "skipped")
-            skipped += 1
+    with store.transaction():
+        for path, (size, mtime_ns) in media_files(folder).items():
+            if store.watched_file(path, size, mtime_ns) is None:
+                store.record_watched_file(path, size, mtime_ns, "skipped")
+                skipped += 1
     return skipped
 
 
@@ -77,7 +75,11 @@ def retry_existing(store: Store, folder: Path) -> None:
 
 
 class FolderWatch:
-    """Looks at the watch folder; ``check`` imports what has settled since the last look."""
+    """Looks at the watch folder; ``check`` imports what has settled since the last look.
+    ``failures`` is what Settings shows, worked out on each look (Settings never reads the
+    folder itself, which on an unreachable share could take most of a minute)."""
+
+    TROUBLE_SHOWN_AFTER = 3  # looks in a row a file couldn't be opened before it's shown
 
     def __init__(
         self,
@@ -87,32 +89,79 @@ class FolderWatch:
         self._submit = submit
         self._clock = clock
         self._last: dict[str, tuple[int, int]] = {}
+        # Files that couldn't be opened, by version: how many looks in a row, and why.
+        self._troubled: dict[tuple[str, int, int], tuple[int, str]] = {}
+        self.failures: list[dict] = []
+
+    def reset(self) -> None:
+        """The folder changed or was turned off: start over."""
+        self._last, self._troubled, self.failures = {}, {}, []
 
     def check(self, store: Store) -> list[int]:
         """Imports the files that have stopped changing; returns the new meetings' ids."""
         folder = store.setting(SETTING)
         if not folder or not Path(folder).is_dir():  # off, or a drive that isn't there now
-            self._last = {}
+            self.reset()
             return []
         now = self._clock()
         current = media_files(Path(folder))
         imported = []
         for path, (size, mtime_ns) in sorted(current.items()):
+            if store.setting(SETTING) != folder:
+                break  # turned off, or another folder chosen: stop between files
             if store.watched_file(path, size, mtime_ns) is not None:
                 continue  # imported, skipped or failed already: this version is done
             settled = self._last.get(path) == (size, mtime_ns)
             if not settled or now - mtime_ns / 1e9 < SETTLED_AFTER:
                 continue  # still being written or copied (or seen for the first time)
+            version = (path, size, mtime_ns)
             try:
                 meeting_id, _ = import_recording(store, Path(path))
-            except Exception as exc:
+            except OSError as exc:  # open elsewhere, offline: just try again next look
+                looks, _ = self._troubled.get(version, (0, ""))
+                self._troubled[version] = (looks + 1, reason(exc, path))
+                continue
+            except Exception as exc:  # not a recording this can read: noted, not retried
+                self._troubled.pop(version, None)
                 store.record_watched_file(path, size, mtime_ns, "failed", error=reason(exc, path))
                 continue
+            self._troubled.pop(version, None)
             store.record_watched_file(path, size, mtime_ns, "imported", meeting_id=meeting_id)
             self._submit(meeting_id)
             imported.append(meeting_id)
+        if store.setting(SETTING) != folder:  # what this look saw is of the old folder
+            self.reset()
+            return imported
         self._last = current
+        self.failures = self._failures(store, Path(folder), current)
         return imported
+
+    def _failures(self, store: Store, folder: Path, current: dict) -> list[dict]:
+        """Files that couldn't be imported, as they are now (a file fixed, replaced or
+        removed drops off; newest first), then ones that keep failing to open (still being
+        tried on every look)."""
+        failed = [
+            {"name": Path(row["path"]).name, "error": row["error"], "retrying": False}
+            for row in store.watched_failures(str(folder))
+            if current.get(row["path"]) == (row["size"], row["mtime_ns"])
+        ]
+        stuck = [
+            {"name": Path(path).name, "error": why, "retrying": True}
+            for (path, size, mtime_ns), (looks, why) in self._troubled.items()
+            if looks >= self.TROUBLE_SHOWN_AFTER and current.get(path) == (size, mtime_ns)
+        ]
+        return failed + stuck
+
+    def retry_failed(self, store: Store) -> int:
+        """Settings' Retry: the files that failed get another go on the next look."""
+        folder = store.setting(SETTING)
+        if not folder:
+            return 0
+        rows = store.watched_failures(str(Path(folder)))
+        store.forget_watched_files([row["path"] for row in rows], ("failed",))
+        self._troubled = {}
+        self.failures = []
+        return len(rows)
 
     def run_forever(self, interval: float = CHECK_EVERY) -> None:
         """The engine's watch-folder thread."""

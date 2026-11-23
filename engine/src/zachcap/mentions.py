@@ -1,16 +1,22 @@
 """Where your name was said: other people's lines that mention you.
 
 Your name, its first word, and any other names you answer to (Settings, "Also answer to")
-are matched as whole words, ignoring case. A name that is also an everyday word (Will,
-Mark, May...) only counts when capitalized, so "I will mark it" doesn't count as a mention.
-Lines you said yourself are left out. One compiled pattern per call, so hour-long
-meetings stay cheap; the meeting list counts with the full-text index first.
+are matched as whole words, ignoring case, but never inside a contraction ("Don" isn't in
+"don't"; "Dana's" still counts). A name that is also an everyday word (Will, Mark, May...)
+only counts when capitalized, and at the start of a sentence only when a comma follows,
+as when someone is addressed: "Will, can you check?" counts, "Will that work?" doesn't. A
+full name made only of such words counts only capitalized ("Will Grant", not "will grant
+access"). An alias in capitals (initials such as "AR") matches only in capitals. Lines you said
+yourself are left out. One compiled pattern per call, so hour-long meetings stay cheap;
+the meeting list counts with the full-text index first, and remembers its counts until a
+line, a voice or a name changes.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 
 from .store import SPEAKER_NAME, Store
 
@@ -22,15 +28,22 @@ SNIPPET = 160
 # Never names: the default "You", and words a meeting is full of.
 NOT_NAMES = {"you", "me", "i", "we", "us", "he", "she", "him", "her", "they", "them", "it"}
 
-# First names that are also everyday words: these must be capitalized to count.
+# First names that are also everyday words: these must be capitalized to count, and at
+# the start of a sentence need a comma after them.
 EVERYDAY = {
-    "ace", "amber", "angel", "april", "art", "autumn", "bill", "bob", "buck", "bud", "cash",
-    "chase", "cliff", "crystal", "daisy", "dale", "dawn", "drew", "duke", "earl", "faith",
-    "frank", "gene", "glen", "grace", "harmony", "holly", "honor", "hope", "hunter", "iris",
-    "ivy", "jack", "jay", "joy", "june", "king", "lane", "lily", "major", "mark", "may",
-    "melody", "page", "pat", "pearl", "penny", "ray", "reed", "rich", "rob", "robin", "rod",
-    "rose", "ruby", "sandy", "sky", "sue", "summer", "wade", "will",
+    "ace", "amber", "angel", "april", "art", "august", "autumn", "bill", "bob", "brook",
+    "buck", "bud", "cash", "chase", "chuck", "cliff", "crystal", "daisy", "dale", "dawn",
+    "dean", "don", "dot", "drew", "duke", "earl", "ernest", "faith", "frank", "gale", "gene",
+    "glen", "grace", "grant", "gray", "grey", "guy", "harmony", "heather", "holly", "honor",
+    "hope", "hunter", "iris", "ivy", "jack", "jade", "jay", "joy", "june", "king", "kit",
+    "lance", "lane", "lily", "major", "mark", "max", "may", "melody", "mike", "miles",
+    "nick", "olive", "page", "pat", "pearl", "penny", "ray", "reed", "rex", "rich", "rob",
+    "robin", "rod", "rose", "ruby", "rusty", "sandy", "sky", "sonny", "storm", "sue",
+    "summer", "sunny", "wade", "will", "win", "winter",
 }  # fmt: skip
+# After a name: not a contraction ("don't", "Will'll"); a possessive "'s" is fine.
+NOT_CONTRACTION = r"(?!['\u2019](?:t|ll|re|ve|d|m)\b)"
+SENTENCE_END = re.compile(r"[.!?][\"'\u201d)\]]*\s*$")
 
 
 def aliases(text: str | None) -> list[str]:
@@ -64,18 +77,47 @@ def _usable(name: str) -> bool:
     return len(name) >= 2 and re.search(r"\w", name) is not None and name.lower() not in NOT_NAMES
 
 
+def _capitalized(escaped: str) -> str:
+    return escaped[0].upper() + escaped[1:] if escaped[:1].isalpha() else escaped
+
+
+def _initials(name: str) -> bool:
+    """An alias in capitals ("AR", "ZS"): matched only in capitals, so "am" isn't "AM"."""
+    return name.isupper() and " " not in name
+
+
 def pattern(names: list[str]) -> re.Pattern | None:
     """One pattern for all the names, longest first (a full name wins over its first word)."""
     if not names:
         return None
     parts = []
     for name in sorted(names, key=len, reverse=True):
-        escaped = re.escape(name).replace(r"\ ", r"\s+")
-        if name.lower() in EVERYDAY:
-            parts.append(escaped[0].upper() + escaped[1:] if escaped[0].isalpha() else escaped)
+        words = name.split(" ")
+        if all(word.lower() in EVERYDAY for word in words):
+            # Only capitalized, word by word: "Will Grant", never "will grant access".
+            parts.append(r"\s+".join(_capitalized(re.escape(word)) for word in words))
+        elif _initials(name):
+            parts.append(re.escape(name))
         else:
+            escaped = r"\s+".join(re.escape(word) for word in words)
             parts.append(f"(?i:{escaped})")
-    return re.compile(rf"(?<!\w)(?:{'|'.join(parts)})(?!\w)")
+    return re.compile(rf"(?<!\w)(?:{'|'.join(parts)})(?!\w){NOT_CONTRACTION}")
+
+
+def _counts(match: re.Match, text: str) -> bool:
+    """An everyday-word name starting a sentence counts only when someone is addressed:
+    "Will, are you there?", not "Will that work?" or "May I share?"."""
+    if match.group().lower() not in EVERYDAY:
+        return True
+    before = text[: match.start()]
+    if before.strip() and not SENTENCE_END.search(before):
+        return True  # capitalized mid-sentence: a name
+    return text[match.end() :].lstrip().startswith(",")
+
+
+def matches(compiled: re.Pattern, text: str) -> list[re.Match]:
+    """Where a line says one of your names, by the rules above."""
+    return [match for match in compiled.finditer(text) if _counts(match, text)]
 
 
 def snippet(text: str, match: re.Match) -> str:
@@ -98,21 +140,23 @@ def _lines_by_others(store: Store, meeting_id: int) -> list[sqlite3.Row]:
 
 
 def find(store: Store, meeting_id: int) -> list[dict]:
-    """Lines by other people in this meeting that say one of your names."""
+    """Lines by other people in this meeting that say one of your names, with where in the
+    line (``spans``, character offsets) so the app marks exactly what was counted."""
     compiled = pattern(your_names(store))
     if compiled is None:
         return []
     found = []
     for line in _lines_by_others(store, meeting_id):
-        matches = list(compiled.finditer(line["text"]))
-        if matches:
+        said = matches(compiled, line["text"])
+        if said:
             found.append(
                 {
                     "segment_id": line["id"],
                     "at": line["start"],
                     "speaker": line["speaker"],
-                    "snippet": snippet(line["text"], matches[0]),
-                    "names": sorted({m.group() for m in matches}),
+                    "snippet": snippet(line["text"], said[0]),
+                    "names": sorted({m.group() for m in said}),
+                    "spans": [[m.start(), m.end()] for m in said],
                 }
             )
     return found
@@ -123,6 +167,12 @@ def _fts_query(names: list[str]) -> str:
     return " OR ".join('"' + name.replace('"', '""') + '"' for name in names)
 
 
+# The meeting list asks every few seconds: its counts are kept until a line, a voice or a
+# name changes (the store's lines version), or the names you answer to do.
+_counted: dict[tuple, dict[int, int]] = {}
+_counted_lock = threading.Lock()
+
+
 def counts(store: Store) -> dict[int, int]:
     """How many lines in each meeting mention you (for the meeting list). The full-text
     index finds the few candidate lines; the pattern then decides, as in ``find``."""
@@ -130,6 +180,11 @@ def counts(store: Store) -> dict[int, int]:
     compiled = pattern(names)
     if compiled is None:
         return {}
+    version = store.lines_version()
+    key = (store.path, version, tuple(names))
+    with _counted_lock:
+        if version is not None and key in _counted:
+            return dict(_counted[key])
     try:
         rows = store.db.execute(
             "SELECT s.meeting_id, s.text FROM segments_fts f JOIN segments s ON s.id = f.rowid "
@@ -142,6 +197,10 @@ def counts(store: Store) -> dict[int, int]:
         return {}
     found: dict[int, int] = {}
     for row in rows:
-        if compiled.search(row["text"]):
+        if matches(compiled, row["text"]):
             found[row["meeting_id"]] = found.get(row["meeting_id"], 0) + 1
+    if version is not None:
+        with _counted_lock:
+            _counted.clear()  # only the latest is ever asked for again
+            _counted[key] = dict(found)
     return found

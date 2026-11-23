@@ -133,28 +133,38 @@ def transcript_text(store: Store, meeting_id: int) -> str:
 SNAPSHOT_IN_PROMPT = 1500  # characters of a snapshot's text that go into a prompt
 
 
-def _note_line(note) -> str:
-    if note["kind"] == "snapshot":
-        text = " / ".join(line.strip() for line in note["text"].splitlines() if line.strip())
-        if not text:
-            return "took a snapshot of the screen (no text on it)"
-        if len(text) > SNAPSHOT_IN_PROMPT:
-            text = text[:SNAPSHOT_IN_PROMPT] + "..."
-        return f"took a snapshot of the screen, which read: {text}"
-    return note["text"] or "marked this moment as important"
+def _screen_text(note) -> str:
+    text = " / ".join(line.strip() for line in note["text"].splitlines() if line.strip())
+    if not text:
+        return "(no text on it)"
+    return text[:SNAPSHOT_IN_PROMPT] + "..." if len(text) > SNAPSHOT_IN_PROMPT else text
 
 
 def notes_text(store: Store, meeting_id: int) -> str:
-    """The user's own notes and bookmarks, for prompts: they show what mattered to them."""
+    """The user's own notes and bookmarks, for prompts: they show what mattered to them.
+    Snapshots come apart from them, labelled as text read off the screen: someone else's
+    words (a shared error message, a slide), not the user's."""
     me = store.me()["name"]
-    lines = [f"[{_clock(n['at'])}] {_note_line(n)}" for n in store.notes(meeting_id)]
-    if not lines:
-        return ""
-    return privacy.outgoing(
-        store,
-        f"\n\nNotes {me} took during the meeting (they show what mattered to {me}; "
-        "make sure the summary covers them):\n" + "\n".join(lines),
-    )
+    notes = store.notes(meeting_id)
+    own = [
+        f"[{_clock(n['at'])}] {n['text'] or 'marked this moment as important'}"
+        for n in notes
+        if n["kind"] != "snapshot"
+    ]
+    screens = [f"[{_clock(n['at'])}] {_screen_text(n)}" for n in notes if n["kind"] == "snapshot"]
+    parts = []
+    if own:
+        parts.append(
+            f"\n\nNotes {me} took during the meeting (they show what mattered to {me}; "
+            "make sure the summary covers them):\n" + "\n".join(own)
+        )
+    if screens:
+        parts.append(
+            f"\n\nText read from screen snapshots {me} took during the meeting (what was "
+            "shown, such as a shared screen or an error message; written by whoever made it, "
+            f"not by {me}, and possibly misread):\n" + "\n".join(screens)
+        )
+    return privacy.outgoing(store, "".join(parts)) if parts else ""
 
 
 ASK_SYSTEM = """You answer questions about one meeting, for the person who recorded it \
