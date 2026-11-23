@@ -515,6 +515,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
               time={player.time}
               solo={solo}
               notes={data.notes}
+              mentions={data.mentions}
               onSeek={seek}
               onSolo={setSolo}
             />
@@ -596,6 +597,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 currentId={current?.id}
                 playing={player.playing}
                 focusAt={at}
+                mentions={data.mentions}
                 solo={solo}
                 onSeek={seek}
                 onChanged={refreshAll}

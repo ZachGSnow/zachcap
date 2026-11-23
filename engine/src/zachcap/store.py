@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from collections.abc import Iterator
@@ -143,6 +144,19 @@ CREATE TABLE IF NOT EXISTS prompts (
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT
 );
+
+-- Files seen in the watch folder (see watchfolder.py), by path, size and modified time, so
+-- each version of a file is handled once and a meeting deleted here doesn't come back.
+CREATE TABLE IF NOT EXISTS watched_files (
+    path        TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    mtime_ns    INTEGER NOT NULL,
+    status      TEXT NOT NULL,                   -- imported|skipped|failed
+    meeting_id  INTEGER,                         -- what it became (kept after a delete)
+    error       TEXT,
+    seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (path, size, mtime_ns)
+);
 """
 
 # What a redacted line says instead.
@@ -227,6 +241,51 @@ class Store:
     def delete_setting(self, key: str) -> None:
         self.db.execute("DELETE FROM settings WHERE key = ?", (key,))
         self._commit()
+
+    # watch folder ---------------------------------------------------------------
+
+    def watched_file(self, path: str, size: int, mtime_ns: int) -> sqlite3.Row | None:
+        return self.db.execute(
+            "SELECT * FROM watched_files WHERE path = ? AND size = ? AND mtime_ns = ?",
+            (path, size, mtime_ns),
+        ).fetchone()
+
+    def record_watched_file(
+        self,
+        path: str,
+        size: int,
+        mtime_ns: int,
+        status: str,
+        meeting_id: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        self.db.execute(
+            "INSERT INTO watched_files (path, size, mtime_ns, status, meeting_id, error) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(path, size, mtime_ns) DO UPDATE SET "
+            "status = excluded.status, meeting_id = excluded.meeting_id, "
+            "error = excluded.error, seen_at = datetime('now')",
+            (path, size, mtime_ns, status, meeting_id, error),
+        )
+        self._commit()
+
+    def forget_watched_files(self, paths: list[str], statuses: tuple[str, ...]) -> None:
+        """Lets these files be looked at again, if they were in one of ``statuses``."""
+        marks = ", ".join("?" * len(statuses))
+        self.db.executemany(
+            f"DELETE FROM watched_files WHERE path = ? AND status IN ({marks})",
+            [(path, *statuses) for path in paths],
+        )
+        self._commit()
+
+    def watched_failures(self, folder: str) -> list[sqlite3.Row]:
+        """Files in this folder that couldn't be imported, newest first."""
+        prefix = os.path.join(str(Path(folder)), "")  # with the trailing separator
+        return self.db.execute(
+            "SELECT path, size, mtime_ns, error, seen_at FROM watched_files "
+            "WHERE status = 'failed' "
+            "AND substr(path, 1, length(?)) = ? ORDER BY seen_at DESC, rowid DESC",
+            (prefix, prefix),
+        ).fetchall()
 
     # prompts (kinds of meeting, one-click documents) --------------------------
 

@@ -18,10 +18,10 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 - **Record any call** with one button or **Ctrl+Alt+R** from anywhere; the app lives in the tray and can start with Windows. It notices when Teams or another app starts using your microphone and offers to record. The other side is recorded from **every speaker and headset at once**, so a call on a headset that isn't the Windows default, or a headset plugged in mid-call, isn't lost. While it records it warns about a muted mic, a call with no call audio and a nearly full disk, keeps the PC from going to sleep, and when the call ends it **counts down and stops** (Keep recording cancels).
 - **Notes and bookmarks while you record**: type a note in the recording bar, or press **Ctrl+Alt+B** to bookmark the moment. **Ctrl+Alt+S snapshots the call**: a picture of the call window and the text Windows reads in it (an error message, a hostname, a slide), read on this computer and kept with the meeting's notes. They appear on the meeting's timeline, and summaries make sure to cover them. **Pause** privately: nothing is recorded until you resume, and the tracks stay in sync.
 - **Nothing lost to a crash**: the meeting is saved from its first second. If ZachCap is quit mid-call, crashes, or Windows restarts, the audio recorded so far is recovered and processed at the next start.
-- **Import recordings** you already have (a Teams .mp4, .m4a, .mp3, .wav...), with an optional time range.
+- **Import recordings** you already have (a Teams .mp4, .m4a, .mp3, .wav...), with an optional time range, or pick a **watch folder** and recordings saved there (a softphone's or phone system's exports) import themselves: each version of a file once, and ZachCap only ever reads them.
 - **Transcription on your GPU** with Whisper (`large-v3-turbo`): about 2-3 minutes per hour of audio on a 4 GB laptop GPU. **Words to know** (names, products, jargon, and what Whisper mishears them as) are spelled your way, and so are the names of people you've identified.
 - **Speaker separation and voice recognition**: a "Who's this?" card plays a short sample of each unknown voice; name them once and ZachCap recognizes them next time, including you on your own mic and people in the room with you.
-- **Speaker lanes**: a timeline of who talked when, with talk-time stats, and **solo playback** that plays one person only, from their own side of the call. Listening back can **skip silences**, with video-player keys (Space or K, J and L, arrows). **Conversation stats** show each person's pace, longest stretch, questions asked, and how often they talked over the other side.
+- **Speaker lanes**: a timeline of who talked when, with talk-time stats, and **solo playback** that plays one person only, from their own side of the call. Listening back can **skip silences**, with video-player keys (Space or K, J and L, arrows). **Where your name was said** is marked on the timeline and the meeting list, and the transcript can show just those lines. **Conversation stats** show each person's pace, longest stretch, questions asked, and how often they talked over the other side.
 - **Summaries with names** from Claude (Opus 5.5 by default): overview, decisions, action items marked as commitments or assignments with due dates, who said what, open questions and topics. Every item links to the moment it was said. Pick the **kind of meeting** (1:1, standup, customer call, project status, incident or troubleshooting, interview) to set what the summary focuses on; **edit them or add your own** in Settings (a vendor call, a client's quarterly review).
 - **Write from a meeting** in one click: a follow-up email, a status update, or notes for a service ticket, ready to copy. Edit these or add your own documents (a client's ticket format, a time entry).
 - **Action item tracker** across all meetings, with Open/Done, "Mine", and commitments vs assigned tasks.
@@ -75,6 +75,7 @@ Everything is set in the app under **Settings**:
 | Setting | What it does | Default |
 |---|---|---|
 | Your name | How your own lines appear in transcripts and summaries | You |
+| Also answer to | Other names people call you (a nickname, initials), for marking where your name was said | empty |
 | Microphone | Your voice; pick the one your meeting app uses | Windows default |
 | Computer audio from | Every speaker and headset at once, the Windows default only, or one device (or a virtual cable) | Every speaker and headset |
 | Language | Whisper's language, or automatic detection | English |
@@ -88,6 +89,7 @@ Everything is set in the app under **Settings**:
 | Theme | Light, dark, or the same as Windows | Same as Windows |
 | Export folder | Keeps a Markdown copy of every meeting in a folder you choose, one file per meeting, named with its id (M12) | off |
 | Work logs there too | Also keeps a daily and a weekly work log in the export folder | off |
+| Watch folder | Recordings saved in this folder import themselves within a minute; turning it on asks about the ones already there | off |
 
 Environment variables for development: `ZACHCAP_HOME` (data folder, default `%LOCALAPPDATA%\ZachCap`), `ZACHCAP_ENGINE_DIR` (engine location for the desktop app).
 
@@ -118,7 +120,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 154 tests: storage, matching, audio, capture and mixing, the recording watch, crash recovery, API, summaries and templates, Ask, redaction, work logs, snapshots
+uv run pytest -q             # 169 tests: storage, matching, audio, capture and mixing, the recording watch, crash recovery, API, summaries and templates, Ask, redaction, work logs, snapshots, mentions, the watch folder
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```

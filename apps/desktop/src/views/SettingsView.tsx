@@ -13,6 +13,7 @@ import {
   ShieldCheck,
   Sparkles,
   Speaker,
+  TriangleAlert,
   UserRound,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -21,6 +22,14 @@ import { toast } from "sonner";
 import { PromptList } from "@/components/PromptLibrary";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
@@ -55,7 +64,98 @@ type SettingsChange = Partial<{
   mask_before_claude: boolean;
   stop_when_call_ends: boolean;
   export_work_log: boolean;
+  also_answer_to: string;
+  watch_folder: string;
+  /** With watch_folder: import the recordings already there too. */
+  watch_existing: boolean;
 }>;
+
+/** A folder whose recordings import themselves. Choosing one asks once about the
+ * recordings already there (only new ones, unless you say so). */
+function WatchFolderRow({
+  folder,
+  failed,
+  onSave,
+}: {
+  folder: string;
+  failed: { name: string; error: string }[];
+  onSave: (change: SettingsChange) => Promise<void>;
+}) {
+  const [asking, setAsking] = useState<{ path: string; count: number } | null>(null);
+
+  const choose = () =>
+    attempt("Couldn't choose the folder", async () => {
+      let path: string | null = null;
+      if (isTauri()) {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const picked = await open({ directory: true, title: "Watch this folder for recordings" });
+        path = typeof picked === "string" ? picked : null;
+      } else {
+        path = window.prompt("Full path of the folder to watch");
+      }
+      if (!path) return;
+      const { count } = await api<{ count: number }>(`/api/watch-folder/files?path=${encodeURIComponent(path)}`);
+      if (count > 0) setAsking({ path, count });
+      else await onSave({ watch_folder: path, watch_existing: false });
+    });
+
+  const answer = async (existing: boolean) => {
+    if (!asking) return;
+    setAsking(null);
+    await onSave({ watch_folder: asking.path, watch_existing: existing });
+  };
+
+  return (
+    <>
+      <Row
+        label="Watch folder"
+        help="Recordings saved here (a softphone's or phone system's exports, Teams recordings you download) import themselves within a minute. ZachCap only reads them."
+      >
+        <code className="min-w-0 flex-1 truncate font-mono text-xs" title={folder || undefined}>
+          {folder || "Off"}
+        </code>
+        <Button size="sm" variant="outline" onClick={() => void choose()}>
+          <FolderOpen className="size-3.5" />
+          Choose
+        </Button>
+        {folder && (
+          <Button size="sm" variant="ghost" onClick={() => void onSave({ watch_folder: "" })}>
+            Turn off
+          </Button>
+        )}
+      </Row>
+      {failed.length > 0 && (
+        <p className="flex items-start gap-2 px-4 py-2.5 text-xs text-amber-700 dark:text-amber-300">
+          <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+          <span className="min-w-0">
+            {failed.length === 1 ? "1 file" : `${failed.length} files`} couldn't be imported: {failed[0].name}
+            {failed[0].error ? ` (${failed[0].error})` : ""}
+            {failed.length > 1 ? " and others" : ""}. They're tried again if they change.
+          </span>
+        </p>
+      )}
+      <Dialog open={asking !== null} onOpenChange={(open) => !open && setAsking(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Import the recordings already there?</DialogTitle>
+            <DialogDescription>
+              {asking?.count === 1 ? "There is 1 recording" : `There are ${asking?.count} recordings`} in{" "}
+              {asking?.path}. ZachCap can import them now, or only the ones saved from now on.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => void answer(true)}>
+              Import them too
+            </Button>
+            <Button autoFocus onClick={() => void answer(false)}>
+              Only new recordings
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
 
 const THEMES: { value: Theme; label: string }[] = [
   { value: "system", label: "Same as Windows" },
@@ -259,6 +359,8 @@ export function SettingsView() {
   const libraryChanged = () => void Promise.all([refreshLibrary(), refresh()]);
   const [name, setName] = useState("");
   useEffect(() => setName(settings?.me.name ?? ""), [settings?.me.name]);
+  const [aliases, setAliases] = useState("");
+  useEffect(() => setAliases(settings?.also_answer_to ?? ""), [settings?.also_answer_to]);
 
   const save = async (change: SettingsChange) => {
     try {
@@ -315,6 +417,27 @@ export function SettingsView() {
               className="h-8"
             />
             <Button size="sm" variant="outline" onClick={() => void saveName()} disabled={!name.trim() || name === settings?.me.name}>
+              Save
+            </Button>
+          </Row>
+          <Row
+            label="Also answer to"
+            help="Other names people call you, separated by commas: a nickname, initials. Meetings mark where someone said your name."
+          >
+            <Input
+              aria-label="Also answer to"
+              placeholder="Nickname, initials"
+              value={aliases}
+              onChange={(event) => setAliases(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && void save({ also_answer_to: aliases })}
+              className="h-8"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void save({ also_answer_to: aliases })}
+              disabled={aliases === (settings?.also_answer_to ?? "")}
+            >
               Save
             </Button>
           </Row>
@@ -526,6 +649,11 @@ export function SettingsView() {
               />
             </Row>
           )}
+          <WatchFolderRow
+            folder={settings?.watch_folder ?? ""}
+            failed={settings?.watch_folder_failed ?? []}
+            onSave={save}
+          />
           <Row
             label="Keep recordings"
             help="After this, a meeting's audio is deleted; its transcript, summary, notes and the voices it taught stay. It can't be played or reprocessed after."

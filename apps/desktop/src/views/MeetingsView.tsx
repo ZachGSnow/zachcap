@@ -1,4 +1,15 @@
-import { AudioLines, CalendarDays, ChevronRight, Circle, CircleCheck, Clock3, ListChecks, Loader2, Users } from "lucide-react";
+import {
+  AtSign,
+  AudioLines,
+  CalendarDays,
+  ChevronRight,
+  Circle,
+  CircleCheck,
+  Clock3,
+  ListChecks,
+  Loader2,
+  Users,
+} from "lucide-react";
 
 import { toggleAction } from "@/components/SummaryPanel";
 import { AvatarStack, StatCard } from "@/components/Visuals";
@@ -241,6 +252,15 @@ export function MeetingsView({
                         {meeting.status === "processing" && meeting.progress ? ` \u00b7 ${meeting.progress}` : ""}
                       </div>
                     </div>
+                    {(meeting.mentions ?? 0) > 0 && (
+                      <span
+                        className="flex items-center gap-0.5 text-xs tabular-nums text-sky-600 dark:text-sky-400"
+                        title={`Someone said your name ${meeting.mentions === 1 ? "once" : `${meeting.mentions} times`}`}
+                      >
+                        <AtSign className="size-3.5" />
+                        {meeting.mentions}
+                      </span>
+                    )}
                     {meeting.participants.length > 0 && (
                       <AvatarStack names={meeting.participants} colorOf={(name) => personColor(name, name === me)} />
                     )}
