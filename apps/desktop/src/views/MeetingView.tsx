@@ -490,10 +490,13 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
               value={meeting.client ?? null}
               inferred={meeting.client_inferred}
               known={data.clients_known ?? []}
+              empty={meeting.client_set ? "No client" : "Add a client"}
               hint={
                 meeting.client_inferred
                   ? "The client the people in this meeting work for: click to set another"
-                  : "The client this meeting was for: click to change it (empty goes back to its people's)"
+                  : meeting.client_set && !meeting.client
+                    ? "Set as not for a client: click to set one"
+                    : "The client this meeting was for: click to change it (empty: no client)"
               }
               onSave={(client) =>
                 void attempt("Couldn't save the client", () =>
@@ -501,6 +504,23 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 ).then((saved) => saved && void refresh())
               }
             />
+            {!meeting.client &&
+              !meeting.client_set &&
+              (data.clients_heard ?? []).length > 1 &&
+              data.clients_heard.map((name) => (
+                <button
+                  key={name}
+                  title={`Its people work for more than one client: is it ${name}'s?`}
+                  onClick={() =>
+                    void attempt("Couldn't save the client", () =>
+                      api(`/api/meetings/${meeting.id}`, { method: "PATCH", json: { client: name } }),
+                    ).then((saved) => saved && void refresh())
+                  }
+                  className="rounded-md border border-dashed px-1.5 py-0.5 text-xs transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  {name}?
+                </button>
+              ))}
             <TicketControl
               meetingId={meeting.id}
               ticket={meeting.ticket ?? null}

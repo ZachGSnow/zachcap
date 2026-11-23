@@ -46,7 +46,7 @@ def _note_text(note) -> str:
 def markdown(store: Store, meeting_id: int) -> str:
     meeting = store.meeting(meeting_id)
     started = datetime.fromisoformat(meeting["started_at"])
-    people = store.participants().get(meeting_id, [])
+    people = store.participants([meeting_id]).get(meeting_id, [])
     client = clients.of_meeting(store, meeting)["client"]
     lines = [f"# {meeting['title']}", ""]
     lines.append(
@@ -184,16 +184,17 @@ def forget(store: Store, meeting_id: int, day: date) -> None:
     refresh_work_logs(store, day)
 
 
-def save_work_log(store: Store, period: str, day: date) -> Path | None:
-    """The day's or week's work log, written into the export folder (None if there's none)."""
+def save_work_log(store: Store, period: str, day: date, client: str | None = None) -> Path | None:
+    """The day's or week's work log (only ``client``'s meetings, if given), written into the
+    export folder (None if there's none)."""
     from . import digest
 
     folder = _export_folder(store)
     if folder is None:
         return None
-    target = folder / digest.file_name(period, day)
+    target = folder / digest.file_name(period, day, client)
     with _writing:
-        written = _write_whole(target, digest.build(store, period, day)["markdown"])
+        written = _write_whole(target, digest.build(store, period, day, client)["markdown"])
     return target if written else None
 
 

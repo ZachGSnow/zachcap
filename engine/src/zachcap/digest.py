@@ -223,9 +223,14 @@ def markdown(log: dict, cite: bool = False) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def file_name(period: str, day: date) -> str:
-    """ "Work log 2026-11-23.md" for a day, "Work log 2026-W48.md" for a week (ISO weeks)."""
+def file_name(period: str, day: date, client: str | None = None) -> str:
+    """ "Work log 2026-11-23.md" for a day, "Work log 2026-W48.md" for a week (ISO weeks);
+    one client's is "Work log 2026-11-23 Contoso.md"."""
     if period == "week":
         year, week, _ = day.isocalendar()
-        return f"Work log {year}-W{week:02d}.md"
-    return f"Work log {day.isoformat()}.md"
+        when = f"{year}-W{week:02d}"
+    else:
+        when = day.isoformat()
+    # Characters Windows won't have in a file name are left out of the client's.
+    for_client = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", client or "").strip(" .")
+    return f"Work log {when}{' ' + for_client if for_client else ''}.md"

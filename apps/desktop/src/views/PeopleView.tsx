@@ -38,7 +38,7 @@ export function PeopleView({ onBrief }: { onBrief: (name: string) => void }) {
     try {
       await action();
       toast.success(label);
-      await refresh();
+      await Promise.all([refresh(), refreshKnown()]); // a rename or removal can change the clients
     } catch (error) {
       toast.error("That didn't work", { description: String(error) });
     }
