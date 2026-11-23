@@ -280,6 +280,16 @@ export function SettingsView() {
       if (typeof folder === "string") await save({ export_folder: folder });
     });
 
+  // Empty records every output (the engine's default); "default" is the Windows default only.
+  const outputOptions = (list: { name: string; default: boolean }[] | undefined) => {
+    const windowsDefault = list?.find((d) => d.default)?.name;
+    return [
+      { value: "", label: "Every speaker and headset (follows the call)" },
+      { value: "default", label: `Windows default only${windowsDefault ? ` (${windowsDefault})` : ""}` },
+      ...(list ?? []).map((d) => ({ value: d.name, label: `${d.name} only` })),
+    ];
+  };
+
   const deviceOptions = (list: { name: string; default: boolean }[] | undefined) => [
     { value: "", label: `Windows default${list?.find((d) => d.default) ? ` (${list.find((d) => d.default)!.name})` : ""}` },
     ...(list ?? []).map((d) => ({ value: d.name, label: d.name })),
@@ -315,13 +325,13 @@ export function SettingsView() {
           </Row>
           <Row
             label="Computer audio from"
-            help="Everyone else: ZachCap records what plays on this device. No virtual microphone needed; a virtual cable works too if you use one."
+            help="Everyone else on the call. By default ZachCap records every speaker and headset at once, so a call on a headset, or a headset plugged in mid-call, isn't missed. Pick one device (or a virtual cable) to record only that."
           >
             <Select
               label="Computer audio from"
               value={settings?.output_device ?? ""}
               onChange={(value) => void save({ output_device: value })}
-              options={deviceOptions(devices?.outputs)}
+              options={outputOptions(devices?.outputs)}
             />
           </Row>
           <Row label="Devices" help="Plugged in a headset? Refresh the lists.">

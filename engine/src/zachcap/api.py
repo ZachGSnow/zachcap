@@ -859,7 +859,7 @@ def _playback_file(folder: Path, track: str = "mix") -> Path:
                 raise HTTPException(status_code=404, detail="Audio missing")
             mix = np.zeros(max(len(t) for t in tracks), np.float32)
             for t in tracks:
-                mix[: len(t)] += t
+                mix[: len(t)] += audio.even_out(t)  # a quiet call as loud as your mic
             peak = float(np.abs(mix).max()) or 1.0
             partial = target.with_name(f"{target.stem}.partial.flac")
             sf.write(partial, mix / max(peak, 1.0), audio.RATE, subtype="PCM_16")

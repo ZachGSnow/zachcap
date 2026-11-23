@@ -124,6 +124,19 @@ def recorded_at(source: Path) -> datetime:
     return datetime.fromtimestamp(source.stat().st_mtime).astimezone()
 
 
+def even_out(track: np.ndarray, target: float = 0.5, max_gain: float = 50.0) -> np.ndarray:
+    """A track scaled so its loud moments sit at ``target``, for listening back. Loopback is
+    recorded after the Windows volume, so a call at low volume comes up to the level of the
+    mic. At most ``max_gain`` (34 dB), so a track with nothing on it stays quiet."""
+    if track.size == 0:
+        return track
+    sample = np.abs(track[:: max(1, track.size // 1_000_000)])  # fast on hour-long tracks
+    loud = float(np.percentile(sample, 99.9))
+    if loud <= 0:
+        return track
+    return (track * min(max_gain, target / loud)).astype(np.float32)
+
+
 def dbfs(audio: np.ndarray) -> float:
     if audio.size == 0:
         return -180.0

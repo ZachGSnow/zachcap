@@ -15,7 +15,7 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 
 ## Features
 
-- **Record any call** with one button or **Ctrl+Alt+R** from anywhere; the app lives in the tray and can start with Windows. It notices when Teams or another app starts using your microphone and offers to record.
+- **Record any call** with one button or **Ctrl+Alt+R** from anywhere; the app lives in the tray and can start with Windows. It notices when Teams or another app starts using your microphone and offers to record. The other side is recorded from **every speaker and headset at once**, so a call on a headset that isn't the Windows default, or a headset plugged in mid-call, isn't lost.
 - **Notes and bookmarks while you record**: type a note in the recording bar, or press **Ctrl+Alt+B** to bookmark the moment. They appear on the meeting's timeline, and summaries make sure to cover them. **Pause** privately: nothing is recorded until you resume, and the tracks stay in sync.
 - **Nothing lost to a crash**: the meeting is saved from its first second. If ZachCap is quit mid-call, crashes, or Windows restarts, the audio recorded so far is recovered and processed at the next start.
 - **Import recordings** you already have (a Teams .mp4, .m4a, .mp3, .wav...), with an optional time range.
@@ -74,7 +74,7 @@ Everything is set in the app under **Settings**:
 |---|---|---|
 | Your name | How your own lines appear in transcripts and summaries | You |
 | Microphone | Your voice; pick the one your meeting app uses | Windows default |
-| Computer audio from | The output device to record (speakers, headset, or a virtual cable) | Windows default |
+| Computer audio from | Every speaker and headset at once, the Windows default only, or one device (or a virtual cable) | Every speaker and headset |
 | Language | Whisper's language, or automatic detection | English |
 | Words to know | Terms to spell right, one per line; `Term: misheard, misheard` adds corrections | empty |
 | Claude model | Opus 5.5, Sonnet 5.5 or Fable 5.1 | Opus 5.5 |
@@ -89,7 +89,7 @@ Environment variables for development: `ZACHCAP_HOME` (data folder, default `%LO
 ## How it works
 
 ```
-mic + speaker loopback (WASAPI)
+mic + loopback of every output device (WASAPI, mixed by packet time)
   -> two tracks, written as crash-safe FLAC chunks
   -> Whisper large-v3-turbo on the GPU: timed words per track
   -> pyannote community-1: who spoke when, one voice embedding per speaker
@@ -113,7 +113,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 95 tests: storage, matching, audio, capture, crash recovery, API, summaries, Ask
+uv run pytest -q             # 110 tests: storage, matching, audio, capture and mixing, crash recovery, API, summaries, Ask
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```
@@ -128,7 +128,7 @@ Verified on a Windows 11 laptop with an RTX A500 (4 GB), November 2026:
 | Voice recognition across meetings | On that recording split into halves: the returning speaker was recognized automatically (0.96); same person scored 0.88-0.96, different people 0.07-0.52 |
 | Claude summaries, Ask | Opus 5.5, Sonnet 5.5 and Fable 5.1 against a synthetic meeting |
 
-Not verified yet: a live two-track recording of a real Teams call (capture was tested with played audio), call detection with a real call (tested against a simulated registry), and echo handling on hardware without built-in echo cancellation. Test audio in the repo is synthetic (Windows text-to-speech, see `engine/scripts/make_meeting.py`); no real recordings are committed.
+Not verified yet: a live two-track recording of a real Teams call (capture was tested with played audio), a second output device (a headset plugged in mid-call; the mixing is unit-tested), call detection with a real call (tested against a simulated registry), and echo handling on hardware without built-in echo cancellation. Test audio in the repo is synthetic (Windows text-to-speech, see `engine/scripts/make_meeting.py`); no real recordings are committed.
 
 ## Roadmap
 
