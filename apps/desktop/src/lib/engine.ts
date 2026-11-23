@@ -134,6 +134,12 @@ export type RecordState =
       errors?: string[];
       paused?: boolean;
       notes?: number;
+      /** Things to check while it runs: a muted mic, no call audio, a nearly full disk. */
+      warnings?: { key: string; text: string }[];
+      /** Apps using the mic now, and how long ago the call app let go of it (the call ended). */
+      call?: { apps: string[]; ended_for: number | null };
+      /** Seconds since anyone was heard on either track. */
+      quiet_for?: number;
     };
 
 export type Note = { id: number; meeting_id: number; at: number; kind: "note" | "bookmark"; text: string };
@@ -169,6 +175,8 @@ export type Settings = {
   export_folder: string;
   keep_audio_days: number;
   mask_before_claude: boolean;
+  /** Count down and stop when the call ends, or after ten quiet minutes. */
+  stop_when_call_ends: boolean;
   templates: { id: string; label: string }[];
   recipes: { id: string; label: string }[];
   me: { id: number; name: string };

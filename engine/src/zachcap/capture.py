@@ -34,9 +34,24 @@ FRAMES_PER_BUFFER = 1024
 # means every speaker and headset, any other value is one device's name.
 WINDOWS_DEFAULT_OUTPUT = "default"
 EVERY_OUTPUT_RATE = 48_000
+# Levels the watchdog reads: any signal at all (a muted or broken device delivers exact
+# zeros), and speech-level sound on the mic and on the computer's audio (loopback is
+# digital, so silence there is far below any voice).
+SIGNAL_DBFS = -100.0
+MIC_SPEECH_DBFS = -45.0
+CALL_SPEECH_DBFS = -60.0
 LOOK_FOR_DEVICES = 2.0  # seconds between looks for outputs plugged in or unplugged
 RETRY_FAILED_DEVICE = 30.0
 WRITE_EVERY = 0.1
+
+
+def _note_level(track, level_dbfs: float) -> None:
+    """Remembers when a track last had any signal, and last had speech-level sound."""
+    now = time.perf_counter()
+    if level_dbfs > SIGNAL_DBFS:
+        track.signal_at = now
+    if level_dbfs > track.speech_dbfs:
+        track.heard_at = now
 
 
 class ChunkWriter:
@@ -105,10 +120,14 @@ class TrackRecorder:
         folder: Path,
         chunk_seconds: int,
         on_first_buffer: Callable[[], object] | None = None,
+        speech_dbfs: float = MIC_SPEECH_DBFS,
     ) -> None:
         self.name = name
         self.device = device
         self.folder = folder
+        self.speech_dbfs = speech_dbfs
+        self.signal_at: float | None = None  # when it last delivered anything but zeros
+        self.heard_at: float | None = None  # when it last had speech-level sound
         self.channels = int(device["maxInputChannels"])
         self.rate = int(device["defaultSampleRate"])
         self.first_buffer_at: float | None = None
@@ -148,6 +167,7 @@ class TrackRecorder:
             samples = np.frombuffer(data, dtype=np.int16).reshape(-1, self.channels)
             mono = samples.mean(axis=1).astype(np.int16)
             self.level_dbfs = float(20 * np.log10(np.sqrt(np.mean((mono / 32768.0) ** 2)) + 1e-9))
+            _note_level(self, self.level_dbfs)
             if first:
                 first = False
                 if self._on_first_buffer is not None:
@@ -206,6 +226,7 @@ class AllOutputsTrack:
 
     name = "system"
     channels = 1
+    speech_dbfs = CALL_SPEECH_DBFS
 
     def __init__(
         self,
@@ -221,6 +242,8 @@ class AllOutputsTrack:
         self.errors: list[str] = []
         self.paused = False
         self.level_dbfs = -120.0
+        self.signal_at: float | None = None
+        self.heard_at: float | None = None
         self.first_buffer_at: float | None = None
         self._t0 = t0
         self._clock = clock
@@ -317,6 +340,8 @@ class AllOutputsTrack:
             return
         power = float(np.mean(block.astype(np.float64) ** 2))
         self.level_dbfs = float(20 * np.log10(np.sqrt(power) + 1e-9))
+        if until is None:  # the final flush says nothing about now
+            _note_level(self, self.level_dbfs)
         if self.first_buffer_at is None:
             self.first_buffer_at = self._t0  # frame 0 is the start of the recording
             if self._on_first_buffer is not None:
@@ -424,7 +449,12 @@ class Recorder:
             system = AllOutputsTrack(self.folder, self.chunk_seconds, self._t0, self._save_info)
         else:
             system = TrackRecorder(
-                "system", loopback, self.folder, self.chunk_seconds, self._save_info
+                "system",
+                loopback,
+                self.folder,
+                self.chunk_seconds,
+                self._save_info,
+                speech_dbfs=CALL_SPEECH_DBFS,
             )
         self.tracks = {
             "mic": TrackRecorder("mic", mic, self.folder, self.chunk_seconds, self._save_info),

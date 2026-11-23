@@ -229,6 +229,9 @@ def test_notes_bookmarks_and_a_private_pause_while_recording(client: TestClient,
     }
     status = client.get("/api/record", headers=AUTH).json()
     assert status["paused"] and status["notes"] == 2
+    # What the app needs to warn, and to offer to stop when the call ends.
+    assert status["warnings"] == [] and set(status["call"]) == {"apps", "ended_for"}
+    assert status["quiet_for"] >= 0
     client.post("/api/record/stop", headers=AUTH)
 
     notes = client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()["notes"]
@@ -416,3 +419,9 @@ def test_your_own_kinds_and_documents_through_the_api(client: TestClient):
     after = client.get("/api/settings", headers=AUTH).json()
     assert after["summary_template"] == "general"
     assert mine not in [t["id"] for t in after["templates"]]
+
+
+def test_stopping_when_the_call_ends_is_on_unless_turned_off(client: TestClient):
+    assert client.get("/api/settings", headers=AUTH).json()["stop_when_call_ends"] is True
+    off = client.put("/api/settings", headers=AUTH, json={"stop_when_call_ends": False}).json()
+    assert off["stop_when_call_ends"] is False
