@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, timedelta
@@ -185,6 +186,9 @@ class Store:
             return
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        # Deleted rows are overwritten with zeros, not left readable in the file: deleting a
+        # meeting, redacting a moment or replacing a summary leaves nothing behind.
+        self.db.execute("PRAGMA secure_delete = ON")
         self.db.executescript(SCHEMA)
         self._migrate()
         if not self.db.execute("SELECT 1 FROM people WHERE is_me = 1").fetchone():
@@ -679,15 +683,30 @@ class Store:
 
     # overviews and stats ----------------------------------------------------
 
-    def participants(self) -> dict[int, list[str]]:
-        """Named people per meeting, most talkative first."""
+    def meetings_between(self, first: str, last: str) -> list[sqlite3.Row]:
+        """Meetings recorded from day ``first`` to day ``last`` (YYYY-MM-DD, the local date
+        they started on), oldest first; not the one being recorded."""
+        return self.db.execute(
+            "SELECT * FROM meetings WHERE status != 'recording' "
+            "AND substr(started_at, 1, 10) BETWEEN ? AND ? ORDER BY started_at",
+            (first, last),
+        ).fetchall()
+
+    def participants(self, meeting_ids: list[int] | None = None) -> dict[int, list[str]]:
+        """Named people per meeting, most talkative first (for some meetings, or all)."""
+        only = ""
+        if meeting_ids is not None:
+            if not meeting_ids:
+                return {}
+            only = f"AND s.meeting_id IN ({', '.join('?' * len(meeting_ids))}) "
         result: dict[int, list[str]] = {}
         for row in self.db.execute(
             "SELECT s.meeting_id, p.name, SUM(s.end - s.start) AS seconds FROM segments s "
             "JOIN meeting_speakers ms ON ms.id = s.meeting_speaker_id "
             "JOIN people p ON p.id = ms.person_id "
-            "WHERE ms.status IN ('auto', 'confirmed') "
-            "GROUP BY s.meeting_id, p.id ORDER BY s.meeting_id, seconds DESC"
+            f"WHERE ms.status IN ('auto', 'confirmed') {only}"
+            "GROUP BY s.meeting_id, p.id ORDER BY s.meeting_id, seconds DESC",
+            meeting_ids or (),
         ):
             result.setdefault(row["meeting_id"], []).append(row["name"])
         return result
@@ -839,8 +858,6 @@ class Store:
     def redact_lines(self, meeting_id: int, start: float, end: float) -> tuple[int, int]:
         """Remove what was said between start and end (seconds): lines entirely inside are
         deleted, lines reaching into it become "[redacted]". Returns (deleted, replaced)."""
-        # Freed space is overwritten with zeros from here on, instead of keeping the old text.
-        self.db.execute("PRAGMA secure_delete = ON")
         deleted = self.db.execute(
             "DELETE FROM segments WHERE meeting_id = ? AND start >= ? AND end <= ?",
             (meeting_id, start, end),
@@ -860,15 +877,49 @@ class Store:
         )
         self._commit()
 
-    def scrub_deleted_text(self) -> None:
-        """After a redaction: make the removed text unrecoverable from the database files as
-        far as SQLite can. The search index keeps deleted words until its pieces are merged,
-        so merge them (with freed space overwritten), then empty the write-ahead log. The disk
-        itself may still hold old copies: this is not a secure erase."""
-        self.db.execute("PRAGMA secure_delete = ON")
+    def forget_derived(self, meeting_id: int, start: float, end: float) -> dict:
+        """After a redaction: what was made from the words now gone. The summary and the
+        action items (any part may repeat a password said in the stretch) are removed, to be
+        summarized again, and so are notes and snapshots taken during the stretch. Returns
+        what went: {"summary": bool, "items": n, "notes": [ids], "snapshots": [ids]}."""
+        summary = self.db.execute(
+            "DELETE FROM summaries WHERE meeting_id = ?", (meeting_id,)
+        ).rowcount
+        items = self.db.execute(
+            "DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,)
+        ).rowcount
+        notes = self.db.execute(
+            "SELECT id, kind FROM meeting_notes WHERE meeting_id = ? AND at >= ? AND at <= ?",
+            (meeting_id, start, end),
+        ).fetchall()
+        self.db.execute(
+            "DELETE FROM meeting_notes WHERE meeting_id = ? AND at >= ? AND at <= ?",
+            (meeting_id, start, end),
+        )
+        self._commit()
+        return {
+            "summary": bool(summary),
+            "items": items,
+            "notes": [n["id"] for n in notes],
+            "snapshots": [n["id"] for n in notes if n["kind"] == "snapshot"],
+        }
+
+    def scrub_deleted_text(self, tries: int = 25, wait: float = 0.2) -> bool:
+        """After a redaction or a delete: make removed text unrecoverable from the database
+        files as far as SQLite can. The search index keeps deleted words until its pieces are
+        merged, so merge them (freed space is overwritten), then empty the write-ahead log.
+        A reader still in the log keeps it from emptying, so that is retried for a few
+        seconds. Returns whether the log was emptied. The disk itself may still hold old
+        copies: this is not a secure erase."""
         self.db.execute("INSERT INTO segments_fts(segments_fts) VALUES ('optimize')")
         self.db.commit()
-        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        for attempt in range(tries):
+            busy, _, _ = self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if not busy:
+                return True
+            if attempt < tries - 1:
+                time.sleep(wait)
+        return False
 
     def _speaker_for_person(self, segment: sqlite3.Row, name: str) -> int:
         me = self.me()

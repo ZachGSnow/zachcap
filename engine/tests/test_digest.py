@@ -133,3 +133,28 @@ def test_the_export_folder_keeps_work_logs_and_forgets_deleted_meetings(
     export.forget(store, store.ids["standup"], date.fromisoformat(meeting["started_at"][:10]))
     assert not list(folder.glob(f"* (M{store.ids['standup']}).md"))
     assert "Standup" not in (folder / "Work log 2026-11-23.md").read_text(encoding="utf-8")
+
+
+def test_a_time_entry_note_isnt_cut_at_an_abbreviation():
+    assert digest.first_sentence("Met Dr. Lee about the rollout. Then lunch.") == (
+        "Met Dr. Lee about the rollout."
+    )
+    assert digest.first_sentence("Call with J. Smith went well! Next steps follow.") == (
+        "Call with J. Smith went well!"
+    )
+
+
+def test_the_export_folder_never_touches_the_users_own_files(store: Store, tmp_path: Path):
+    folder = tmp_path / "vault"
+    folder.mkdir()
+    mine = [folder / "Sprint plan (M1).md", folder / "Roadmap (m2).MD"]
+    for path in mine:
+        path.write_text("my own notes", encoding="utf-8")
+    store.set_setting("export_folder", str(folder))
+    meeting = store.ids["cutover"]
+
+    export.auto_export(store, meeting)
+    export.forget(store, meeting, date(2026, 11, 23))
+    export.forget(store, store.ids["standup"], date(2026, 11, 23))  # (M2), in other capitals
+
+    assert all(path.read_text(encoding="utf-8") == "my own notes" for path in mine)

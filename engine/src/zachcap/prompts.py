@@ -159,7 +159,7 @@ def find(store: Store, prompt_id: str) -> dict:
 
 
 def _clean(
-    kind: Kind, label: str, instructions: str, others: list[dict], builtin: bool
+    kind: Kind, label: str, instructions: str, others: list[dict], may_be_empty: bool
 ) -> tuple[str, str]:
     label = " ".join(label.split())
     instructions = instructions.strip()
@@ -169,9 +169,9 @@ def _clean(
         raise ValueError(f"Keep the name to {LABEL_MAX} characters or fewer")
     if len(instructions) > INSTRUCTIONS_MAX:
         raise ValueError(f"Keep the instructions to {INSTRUCTIONS_MAX:,} characters or fewer")
-    # The general kind of meeting is the one built-in with no instructions; every other
-    # kind or document needs some, or it would do nothing different.
-    if not instructions and not (builtin and kind == "template"):
+    # The general kind of meeting is the one with no instructions; every other kind or
+    # document needs some, or it would do nothing different.
+    if not instructions and not may_be_empty:
         raise ValueError("Say what it should do")
     same = next((o for o in others if o["label"].casefold() == label.casefold()), None)
     if same is not None:
@@ -184,7 +184,7 @@ def add(store: Store, kind: str, label: str, instructions: str) -> dict:
     existing = library(store, kind)
     if sum(not entry["builtin"] for entry in existing) >= CUSTOM_MAX:
         raise ValueError(f"That's the most you can add ({CUSTOM_MAX})")
-    label, instructions = _clean(kind, label, instructions, existing, builtin=False)
+    label, instructions = _clean(kind, label, instructions, existing, may_be_empty=False)
     prompt_id = f"custom-{secrets.token_hex(4)}"
     while store.prompt_row(prompt_id) is not None:  # never reuse an id meetings may point to
         prompt_id = f"custom-{secrets.token_hex(4)}"
@@ -203,7 +203,7 @@ def update(
         entry["label"] if label is None else label,
         entry["instructions"] if instructions is None else instructions,
         others,
-        builtin=entry["builtin"],
+        may_be_empty=entry["builtin"] and kind == "template" and prompt_id == DEFAULT_TEMPLATE,
     )
     builtin = BUILT_IN[kind].get(prompt_id)
     if builtin is not None:

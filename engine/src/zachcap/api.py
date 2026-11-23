@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
@@ -170,6 +171,7 @@ class SettingsBody(BaseModel):
 
 
 KEEP_AUDIO_CHOICES = (0, 7, 30, 90, 365)
+NO_STORE = {"Cache-Control": "no-store"}
 
 
 class WorkLogBody(BaseModel):
@@ -352,6 +354,27 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=404, detail="No such meeting")
         return meeting
 
+    # One change at a time per meeting: a summary written from the transcript while a
+    # redaction removes words from it would bring them back, and so would reprocessing.
+    jobs: dict[int, str] = {}
+    jobs_lock = threading.Lock()
+
+    @contextmanager
+    def only_job(meeting_id: int, what: str):
+        with jobs_lock:
+            running = jobs.get(meeting_id)
+            if running is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"This meeting is busy ({running}). Try again when that's done.",
+                )
+            jobs[meeting_id] = what
+        try:
+            yield
+        finally:
+            with jobs_lock:
+                jobs.pop(meeting_id, None)
+
     def refuse_if_busy(meeting) -> None:
         """Changing a transcript while it is being recorded or (re)processed would be lost
         or would mix with the new results."""
@@ -425,6 +448,7 @@ def create_app(token: str) -> FastAPI:
         meeting = meeting_or_404(store, meeting_id)
         folder = Path(meeting["folder"]).resolve()
         store.delete_meeting(meeting_id)
+        store.scrub_deleted_text()  # its words leave the search index and the log as well
         # Its copy leaves the export folder too, and it leaves that day's work log.
         export.forget(store, meeting_id, date.fromisoformat(meeting["started_at"][:10]))
         # Only remove audio ZachCap recorded or imported itself, never a folder elsewhere.
@@ -454,9 +478,12 @@ def create_app(token: str) -> FastAPI:
 
         meeting_or_404(store, meeting_id)
         try:
-            summarize(store, meeting_id, body.template if body else None)
+            with only_job(meeting_id, "writing its summary"):
+                summarize(store, meeting_id, body.template if body else None)
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
         except Exception as exc:  # network, auth, rate limits: show the reason in the app
             raise HTTPException(status_code=502, detail=f"Claude request failed: {exc}") from exc
         export.auto_export(store, meeting_id)
@@ -507,6 +534,13 @@ def create_app(token: str) -> FastAPI:
 
     @app.post("/api/meetings/{meeting_id}/process", dependencies=auth)
     def process(meeting_id: int, store: Store = Depends(db)):
+        with jobs_lock:
+            running = jobs.get(meeting_id)
+        if running is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"This meeting is busy ({running}). Try again when that's done.",
+            )
         if meeting_or_404(store, meeting_id)["audio_removed_at"]:
             raise HTTPException(
                 status_code=400,
@@ -537,7 +571,10 @@ def create_app(token: str) -> FastAPI:
         if track not in ("mix", "mic", "system"):
             raise HTTPException(status_code=400, detail="track is mix, mic or system")
         folder = Path(meeting_or_404(store, meeting_id)["folder"])
-        return FileResponse(_playback_file(folder, track), media_type="audio/flac")
+        # Not kept in the app's cache: after a redaction an old copy would still play.
+        return FileResponse(
+            _playback_file(folder, track), media_type="audio/flac", headers=NO_STORE
+        )
 
     @app.get("/api/meetings/{meeting_id}/speakers/{speaker_id}/sample", dependencies=auth)
     def speaker_sample(meeting_id: int, speaker_id: int, store: Store = Depends(db)):
@@ -555,7 +592,7 @@ def create_app(token: str) -> FastAPI:
         clip = audio.clip(track, speaker["sample_start"], speaker["sample_end"])
         buffer = io.BytesIO()
         sf.write(buffer, clip, audio.RATE, format="WAV", subtype="PCM_16")
-        return Response(buffer.getvalue(), media_type="audio/wav")
+        return Response(buffer.getvalue(), media_type="audio/wav", headers=NO_STORE)
 
     # exports ------------------------------------------------------------------------
 
@@ -653,7 +690,7 @@ def create_app(token: str) -> FastAPI:
         path = snapshot.image_path(Path(meeting["folder"]), note_id) if meeting else None
         if path is None or not path.exists():
             raise HTTPException(status_code=404, detail="No picture for that note")
-        return FileResponse(path, media_type="image/png")
+        return FileResponse(path, media_type="image/png", headers=NO_STORE)
 
     @app.post("/api/record/snapshot", dependencies=auth)
     def record_snapshot(store: Store = Depends(db)):
@@ -743,9 +780,10 @@ def create_app(token: str) -> FastAPI:
         for lock in locks:
             lock.acquire()
         try:
-            result = redact.redact(
-                store, meeting_id, start, end, with_audio=not meeting["audio_removed_at"]
-            )
+            with only_job(meeting_id, "redacting"):
+                result = redact.redact(
+                    store, meeting_id, start, end, with_audio=not meeting["audio_removed_at"]
+                )
         except PermissionError as exc:
             raise HTTPException(
                 status_code=409,

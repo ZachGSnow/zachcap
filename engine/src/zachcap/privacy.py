@@ -18,7 +18,8 @@ PHONE = re.compile(
     r"(?<![\w-])(?:\+?1[ .-]?)?(?:\(\d{3}\)\s?|\d{3}[ .-])\d{3}[ .-]\d{4}(?![\w-])"
     r"|(?<![\w-])\d{3}-\d{4}(?![\w-])"
 )
-AUDIO_SUFFIXES = {".flac", ".wav", ".mp3", ".m4a", ".ogg"}
+# ".redacting": a rewrite a crash interrupted, holding audio like the file it replaces.
+AUDIO_SUFFIXES = {".flac", ".wav", ".mp3", ".m4a", ".ogg", ".redacting"}
 
 
 def _luhn(digits: str) -> bool:
