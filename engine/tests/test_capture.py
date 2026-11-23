@@ -13,6 +13,9 @@ MIC = {"index": 0, "name": "Mic", "hostApi": 0, "maxInputChannels": 1, "maxOutpu
        "defaultSampleRate": 16000}  # fmt: skip
 SPEAKERS = {"index": 1, "name": "Speakers", "hostApi": 0, "maxInputChannels": 0,
             "maxOutputChannels": 2, "defaultSampleRate": 48000}  # fmt: skip
+# The tests of PortAudio loopback pick the Windows default output, the old behavior; the
+# default records every output (tested below with a fake Core Audio).
+ONE_OUTPUT = capture.WINDOWS_DEFAULT_OUTPUT
 LOOPBACK = {"index": 2, "name": "Speakers [Loopback]", "hostApi": 0, "maxInputChannels": 2,
             "maxOutputChannels": 0, "defaultSampleRate": 48000,
             "isLoopbackDevice": True}  # fmt: skip
@@ -80,7 +83,7 @@ def drained(track: capture.TrackRecorder) -> None:
 def test_a_failed_start_closes_everything_it_opened(tmp_path: Path, monkeypatch):
     fake = fake_pyaudio(fail_loopback=True)
     monkeypatch.setattr(capture, "pyaudio", fake)
-    recorder = capture.Recorder(tmp_path / "meeting")
+    recorder = capture.Recorder(tmp_path / "meeting", output_name=ONE_OUTPUT)
 
     with pytest.raises(OSError, match="Device unavailable"):
         recorder.start()
@@ -93,7 +96,7 @@ def test_a_failed_start_closes_everything_it_opened(tmp_path: Path, monkeypatch)
 def test_recording_details_are_saved_from_the_start(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(capture, "pyaudio", fake_pyaudio())
     folder = tmp_path / "meeting"
-    recorder = capture.Recorder(folder)
+    recorder = capture.Recorder(folder, output_name=ONE_OUTPUT)
     recorder.start()
     saved = json.loads((folder / "recording.json").read_text(encoding="utf-8"))
     assert saved["complete"] is False and set(saved["tracks"]) == {"mic", "system"}
@@ -113,7 +116,7 @@ def test_a_private_pause_records_silence_and_keeps_time(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(capture, "pyaudio", fake_pyaudio())
     folder = tmp_path / "meeting"
-    recorder = capture.Recorder(folder)
+    recorder = capture.Recorder(folder, output_name=ONE_OUTPUT)
     recorder.start()
     mic = recorder.tracks["mic"]
     loud = (np.full(1024, 8000, np.int16)).tobytes()
@@ -135,7 +138,7 @@ def test_a_private_pause_records_silence_and_keeps_time(tmp_path: Path, monkeypa
 
 def test_a_disk_error_is_reported_and_the_queue_keeps_draining(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(capture, "pyaudio", fake_pyaudio())
-    recorder = capture.Recorder(tmp_path / "meeting")
+    recorder = capture.Recorder(tmp_path / "meeting", output_name=ONE_OUTPUT)
     recorder.start()
 
     def disk_full(*args, **kwargs):
@@ -170,3 +173,186 @@ def test_audio_captured_during_a_pause_stays_silent_after_resume(tmp_path: Path,
 
     audio, _ = sf.read(tmp_path / "mic-000.flac", dtype="int16")
     assert len(audio) == 2 * 1024 and not audio.any()
+
+
+# ---- every speaker and headset (the default), against a fake Core Audio ----
+
+
+class FakeClock:
+    def __init__(self, now: float = 100.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class FakeOutputs:
+    """Stands in for zachcap.loopback: a device list the test changes, and captures the
+    test plays audio through."""
+
+    def __init__(self, *names: str) -> None:
+        self.devices = [{"id": name.lower(), "name": name, "default": False} for name in names]
+        self.captures: dict[str, object] = {}
+        self.refuse: set[str] = set()
+        self.listing_error: str | None = None
+        outputs = self
+
+        class Capture:
+            def __init__(self, device_id, name, on_packet) -> None:
+                self.device_id, self.name, self.on_packet = device_id, name, on_packet
+                self.alive = False
+                self.error = None
+
+            def start(self) -> None:
+                if self.device_id in outputs.refuse:
+                    raise RuntimeError("Device in use")
+                self.alive = True
+                outputs.captures[self.device_id] = self
+
+            def stop(self) -> None:
+                self.alive = False
+
+        self.LoopbackCapture = Capture
+
+    def output_devices(self) -> list[dict]:
+        if self.listing_error:
+            raise OSError(self.listing_error)
+        return [dict(device) for device in self.devices]
+
+    def play(self, device_id, audio, rate, start, clock) -> None:
+        """10 ms packets of ``audio`` from ``start``, with the clock moving along."""
+        capture = self.captures[device_id]
+        step = rate // 100
+        for index in range(0, audio.size, step):
+            stamp = start + index / rate
+            clock.now = stamp + 0.01
+            capture.on_packet(device_id, audio[index : index + step], rate, stamp, False)
+
+
+def tone(seconds: float, rate: int = 48000, freq: float = 440.0):
+    import numpy as np
+
+    t = np.arange(int(seconds * rate)) / rate
+    return (0.5 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+
+
+def test_every_output_is_recorded_and_a_headset_joins_mid_call(tmp_path: Path):
+    import numpy as np
+    import soundfile as sf
+
+    clock, outputs = FakeClock(100.0), FakeOutputs("Speakers")
+    track = capture.AllOutputsTrack(tmp_path, 300, t0=100.0, clock=clock, api=outputs)
+    track.start()
+    outputs.play("speakers", tone(1.0), 48000, 100.0, clock)
+    outputs.devices.append({"id": "headset", "name": "Headset", "default": False})
+    track.poll_devices()  # plugged in at 1 s
+    assert track.device["name"] == "Speakers, Headset"
+    outputs.play("headset", tone(1.0, 44100, 300), 44100, 101.5, clock)
+    clock.now = 103.0
+    track.stop()
+
+    audio, rate = sf.read(tmp_path / "system-000.flac", dtype="float32")
+    assert rate == 48000 and len(audio) == 3 * 48000  # real time, start to stop
+    assert sf.info(tmp_path / "system-000.flac").subtype == "PCM_24"
+    loud = np.abs(audio) > 0.01
+    assert loud[:47000].mean() > 0.9  # the speakers, 0-1 s
+    assert not loud[48500:71500].any()  # nothing between
+    assert loud[72500:119500].mean() > 0.9  # the headset, 1.5-2.5 s
+    assert not loud[121000:].any() and not track.errors
+
+
+def test_an_output_that_cant_be_recorded_is_reported_once_and_retried(tmp_path: Path):
+    clock, outputs = FakeClock(100.0), FakeOutputs("Speakers", "Dock")
+    outputs.refuse.add("dock")
+    track = capture.AllOutputsTrack(tmp_path, 300, t0=100.0, clock=clock, api=outputs)
+    track.start()
+    clock.now = 110.0
+    track.poll_devices()  # too soon to retry
+    assert track.errors == ["Couldn't record Dock: Device in use"]
+    assert "dock" not in outputs.captures
+
+    outputs.refuse.clear()
+    clock.now = 131.0
+    track.poll_devices()  # retried after 30 s, and now it works
+    assert "dock" in outputs.captures and track.device["name"] == "Speakers, Dock"
+    track.stop()
+    assert track.errors == ["Couldn't record Dock: Device in use"]
+
+
+def test_an_unplugged_output_is_dropped_and_the_track_keeps_time(tmp_path: Path):
+    import soundfile as sf
+
+    clock, outputs = FakeClock(100.0), FakeOutputs("Speakers", "Headset")
+    track = capture.AllOutputsTrack(tmp_path, 300, t0=100.0, clock=clock, api=outputs)
+    track.start()
+    outputs.play("headset", tone(0.5), 48000, 100.0, clock)
+    outputs.captures["headset"].alive = False  # unplugged
+    outputs.devices = [d for d in outputs.devices if d["id"] != "headset"]
+    clock.now = 102.0
+    track.poll_devices()
+    assert track.device["name"] == "Speakers"
+    clock.now = 104.0
+    track.stop()
+
+    assert sf.info(tmp_path / "system-000.flac").frames == 4 * 48000
+
+
+def test_no_device_list_still_records_silence_in_time(tmp_path: Path):
+    import soundfile as sf
+
+    clock, outputs = FakeClock(100.0), FakeOutputs()
+    outputs.listing_error = "Audio service not running"
+    track = capture.AllOutputsTrack(tmp_path, 300, t0=100.0, clock=clock, api=outputs)
+    track.start()
+    track.poll_devices()
+    clock.now = 101.5
+    track.stop()
+
+    assert track.errors == ["Couldn't list the output devices: Audio service not running"]
+    assert sf.info(tmp_path / "system-000.flac").frames == round(1.5 * 48000)
+    assert track.device["name"] == "Every speaker and headset"  # unknown, not "none"
+
+
+def test_a_private_pause_silences_every_output(tmp_path: Path):
+    import numpy as np
+    import soundfile as sf
+
+    clock, outputs = FakeClock(100.0), FakeOutputs("Speakers")
+    track = capture.AllOutputsTrack(tmp_path, 300, t0=100.0, clock=clock, api=outputs)
+    track.start()
+    outputs.play("speakers", tone(1.0), 48000, 100.0, clock)
+    track.paused = True
+    outputs.play("speakers", tone(1.0), 48000, 101.0, clock)
+    track.paused = False
+    clock.now = 102.0
+    track.stop()
+
+    audio, _ = sf.read(tmp_path / "system-000.flac", dtype="float32")
+    assert (np.abs(audio[:47000]) > 0.01).mean() > 0.9
+    assert np.abs(audio[48500:]).max() < 1e-4  # the paused second is silent
+
+
+def test_the_default_records_every_output_with_the_mic(tmp_path: Path, monkeypatch):
+    import soundfile as sf
+
+    monkeypatch.setattr(capture, "pyaudio", fake_pyaudio())
+    outputs = FakeOutputs("Speakers", "Headset")
+    monkeypatch.setattr(capture, "_loopback_api", lambda: outputs)
+    folder = tmp_path / "meeting"
+    recorder = capture.Recorder(folder)
+    recorder.start()
+    assert recorder.every_output and set(outputs.captures) == {"speakers", "headset"}
+    started = time.perf_counter()
+    outputs.captures["headset"].on_packet("headset", tone(0.2), 48000, started, False)
+    feed(recorder.tracks["mic"], 3)
+    time.sleep(0.4)
+    info = recorder.stop()
+
+    system = info["tracks"]["system"]
+    assert system["offset"] == 0.0 and system["rate"] == 48000
+    assert system["chunks"] == ["system-000.flac"]
+    assert system["device"] == "Speakers, Headset"
+    assert sf.info(folder / "system-000.flac").duration >= 0.4
+    # PortAudio only opened the mic: no loopback stream and no silent keep-alive stream.
+    streams = capture.pyaudio.instances[-1].streams
+    assert len(streams) == 1 and streams[0].closed

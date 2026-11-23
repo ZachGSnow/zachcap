@@ -357,3 +357,22 @@ def test_privacy_settings_and_a_meeting_without_its_recording(client: TestClient
     store.close()
     refused = client.post(f"/api/meetings/{meeting_id}/process", headers=AUTH)
     assert refused.status_code == 400 and "recording was deleted" in refused.json()["detail"]
+
+
+def test_a_quiet_call_plays_back_as_loud_as_the_mic(tmp_path: Path):
+    import numpy as np
+    import soundfile as sf
+
+    from zachcap.api import _playback_file
+
+    t = np.arange(16000 * 4) / 16000
+    voice = np.sin(2 * np.pi * 220 * t).astype(np.float32)
+    mic, call = voice.copy(), voice.copy()
+    mic[16000 * 2 :] = 0  # you talk for 2 s, then the call does, at low Windows volume
+    call[: 16000 * 2] = 0
+    sf.write(tmp_path / "mic.flac", 0.4 * mic, 16000)
+    sf.write(tmp_path / "system.flac", 0.02 * call, 16000)
+
+    played, _ = sf.read(_playback_file(tmp_path), dtype="float32")
+    you, them = np.abs(played[: 16000 * 2]).max(), np.abs(played[16000 * 2 :]).max()
+    assert them > 0.25 and 0.5 < them / you < 2  # it was 20 times quieter

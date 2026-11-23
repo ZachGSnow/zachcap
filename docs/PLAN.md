@@ -301,10 +301,11 @@ Each change went through its own pull request with green CI, after two rounds of
 | Conversation stats | Pace, longest stretch, questions, talked over | Unit tests; demo meeting |
 | Privacy | Keep recordings for N days; mask contact details for Claude; heads-up text | Unit tests (retention touches only finished meetings in ZachCap's folder) |
 | Home page | Two weeks of meeting time; your open items | Browser check |
+| Every speaker and headset | The computer's audio from every active output at once, through Core Audio (live device list), mixed on one timeline by packet times; outputs plugged in mid-call join, unplugged ones drop out; 24-bit; playback evens out a quiet call against the mic | A 6.3 s recording on the test laptop: the track kept real time, a sound played at 2.3 s landed at 2.3 s, both tracks loaded at the same length; joining, unplugging, retries, pause and resampling are unit-tested with a fake Core Audio |
 
 The cost shown next to each answer prices every attempt at the rates of the model that ran it (a fallback included), cache reads at that model's own rate.
 
-Tests: 32 at v0.1, 95 now. CI no longer installs the GPU stack and checks `uv.lock`.
+Tests: 32 at v0.1, 110 now. CI no longer installs the GPU stack and checks `uv.lock`.
 
 ## 13. Next, from competitor research (2026-11-23)
 

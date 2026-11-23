@@ -1,12 +1,16 @@
-"""Record the mic and the speakers (loopback) into a meeting folder.
+"""Record the mic and the computer's audio into a meeting folder.
 
 Each track is written as mono FLAC chunks (5 minutes by default), so a crash or a
 forced reboot loses at most the chunk in progress (the engine reads even that one
-back after a crash). A silent output stream keeps the Windows audio engine
-rendering, so loopback keeps delivering audio through silences on machines where it
-otherwise wouldn't. The time each track's first buffer arrived is saved to
+back after a crash). The time each track's first buffer arrived is saved to
 recording.json as soon as it is known, so the pipeline can line the two tracks up
 even if the recording never stopped cleanly.
+
+The computer's audio comes from every speaker and headset by default (AllOutputsTrack),
+so a call playing on a headset that isn't the Windows default, or a headset plugged in
+mid-call, is still recorded. Picking one output device records only that one (loopback
+through PortAudio, with a silent output stream that keeps the Windows audio engine
+rendering, so loopback keeps delivering audio through silences).
 """
 
 from __future__ import annotations
@@ -23,7 +27,72 @@ import numpy as np
 import pyaudiowpatch as pyaudio
 import soundfile as sf
 
+from .mixer import Mixer
+
 FRAMES_PER_BUFFER = 1024
+# The output setting's value for the Windows default output only (the old behavior); empty
+# means every speaker and headset, any other value is one device's name.
+WINDOWS_DEFAULT_OUTPUT = "default"
+EVERY_OUTPUT_RATE = 48_000
+LOOK_FOR_DEVICES = 2.0  # seconds between looks for outputs plugged in or unplugged
+RETRY_FAILED_DEVICE = 30.0
+WRITE_EVERY = 0.1
+
+
+class ChunkWriter:
+    """Writes one mono track as numbered FLAC chunks (name-000.flac, ...), starting a new
+    one every ``chunk_seconds``. After a disk error it reports once and stops writing, so
+    callers can keep draining their buffers."""
+
+    def __init__(
+        self,
+        folder: Path,
+        name: str,
+        rate: int,
+        chunk_seconds: int,
+        errors: list[str],
+        subtype: str = "PCM_16",
+    ) -> None:
+        self.folder = folder
+        self.name = name
+        self.rate = rate
+        self.subtype = subtype
+        self.chunk_frames = chunk_seconds * rate
+        self.errors = errors
+        self.frames = 0
+        self.failed = False
+        self.chunks: list[str] = []
+        self._current: sf.SoundFile | None = None
+        self._written = 0
+
+    def write(self, mono: np.ndarray) -> None:
+        if self.failed:
+            return
+        try:
+            if self._current is None or self._written >= self.chunk_frames:
+                if self._current is not None:
+                    self._current.close()
+                    self._current = None
+                path = self.folder / f"{self.name}-{len(self.chunks):03d}.flac"
+                self._current = sf.SoundFile(
+                    path, mode="w", samplerate=self.rate, channels=1, subtype=self.subtype
+                )
+                self.chunks.append(path.name)
+                self._written = 0
+            self._current.write(mono)
+            self._written += len(mono)
+            self.frames += len(mono)
+        except Exception as exc:  # disk full, file locked: report it, stop writing
+            self.errors.append(f"Couldn't save the {self.name} audio: {exc}")
+            self.failed = True
+
+    def close(self) -> None:
+        if self._current is not None:
+            try:
+                self._current.close()
+            except Exception as exc:
+                self.errors.append(f"Couldn't finish the {self.name} audio: {exc}")
+            self._current = None
 
 
 class TrackRecorder:
@@ -42,14 +111,11 @@ class TrackRecorder:
         self.folder = folder
         self.channels = int(device["maxInputChannels"])
         self.rate = int(device["defaultSampleRate"])
-        self.chunk_frames = chunk_seconds * self.rate
         self.first_buffer_at: float | None = None
-        self.frames = 0
         self.level_dbfs = -120.0
         self.errors: list[str] = []
-        self.failed = False
         self.paused = False
-        self.chunks: list[str] = []
+        self._chunks = ChunkWriter(folder, name, self.rate, chunk_seconds, self.errors)
         self._on_first_buffer = on_first_buffer
         self._queue: queue.Queue[bytes | None] = queue.Queue()
         self._writer = threading.Thread(target=self._write, name=f"{name}-writer", daemon=True)
@@ -64,9 +130,19 @@ class TrackRecorder:
         self._queue.put(bytes(len(in_data)) if self.paused else in_data)
         return (None, pyaudio.paContinue)
 
+    @property
+    def frames(self) -> int:
+        return self._chunks.frames
+
+    @property
+    def chunks(self) -> list[str]:
+        return self._chunks.chunks
+
+    @property
+    def failed(self) -> bool:
+        return self._chunks.failed
+
     def _write(self) -> None:
-        current: sf.SoundFile | None = None
-        written = 0
         first = True
         while (data := self._queue.get()) is not None:
             samples = np.frombuffer(data, dtype=np.int16).reshape(-1, self.channels)
@@ -79,30 +155,10 @@ class TrackRecorder:
                         self._on_first_buffer()
                     except Exception as exc:
                         self.errors.append(f"Couldn't save the recording details: {exc}")
-            if self.failed:
-                continue  # keep draining, so a dead disk doesn't also fill memory
-            try:
-                if current is None or written >= self.chunk_frames:
-                    if current is not None:
-                        current.close()
-                        current = None
-                    path = self.folder / f"{self.name}-{len(self.chunks):03d}.flac"
-                    current = sf.SoundFile(
-                        path, mode="w", samplerate=self.rate, channels=1, subtype="PCM_16"
-                    )
-                    self.chunks.append(path.name)
-                    written = 0
-                current.write(mono)
-                written += len(mono)
-                self.frames += len(mono)
-            except Exception as exc:  # disk full, file locked: report it, stop writing
-                self.errors.append(f"Couldn't save the {self.name} audio: {exc}")
-                self.failed = True
-        if current is not None:
-            try:
-                current.close()
-            except Exception as exc:
-                self.errors.append(f"Couldn't finish the {self.name} audio: {exc}")
+            # After a disk error this writes nothing, and the queue keeps draining, so a
+            # dead disk doesn't also fill memory.
+            self._chunks.write(mono)
+        self._chunks.close()
 
     def start(self, pa: pyaudio.PyAudio) -> None:
         # The stream starts delivering buffers as soon as it opens; they wait in the
@@ -129,6 +185,159 @@ class TrackRecorder:
         if self._writer.is_alive():
             self._queue.put(None)
             self._writer.join()
+
+
+def _loopback_api():
+    """The Core Audio loopback module, imported when first needed (Windows only)."""
+    from . import loopback
+
+    return loopback
+
+
+class AllOutputsTrack:
+    """The computer-audio track from every speaker and headset at once.
+
+    Teams can play a call on a headset that isn't the Windows default, and people plug in or
+    switch headsets mid-call; recording one device loses the far side then. So every active
+    output is captured, outputs that appear later join, unplugged ones drop out, and the
+    mixer keeps the track at real-time length, in sync with the mic. Written as 24-bit FLAC:
+    loopback comes after the Windows volume, so a call at low volume keeps its detail.
+    """
+
+    name = "system"
+    channels = 1
+
+    def __init__(
+        self,
+        folder: Path,
+        chunk_seconds: int,
+        t0: float,
+        on_first_buffer: Callable[[], object] | None = None,
+        clock: Callable[[], float] = time.perf_counter,
+        api=None,
+    ) -> None:
+        self.rate = EVERY_OUTPUT_RATE
+        self.device = {"name": "Every speaker and headset"}
+        self.errors: list[str] = []
+        self.paused = False
+        self.level_dbfs = -120.0
+        self.first_buffer_at: float | None = None
+        self._t0 = t0
+        self._clock = clock
+        self._api = api if api is not None else _loopback_api()
+        self._on_first_buffer = on_first_buffer
+        self._chunks = ChunkWriter(
+            folder, self.name, self.rate, chunk_seconds, self.errors, subtype="PCM_24"
+        )
+        self._mixer = Mixer(self.rate, t0)
+        self._lock = threading.Lock()
+        self._captures: dict[str, object] = {}
+        self._failed: dict[str, float] = {}  # device id -> when it last failed to open
+        self._listing_failed = False
+        self._started = False
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+
+    @property
+    def frames(self) -> int:
+        return self._chunks.frames
+
+    @property
+    def chunks(self) -> list[str]:
+        return self._chunks.chunks
+
+    @property
+    def failed(self) -> bool:
+        return self._chunks.failed
+
+    def start(self, pa=None) -> None:
+        """Starts capturing the outputs there are now, then keeps looking for new ones."""
+        self._started = True
+        self.poll_devices()
+        for target, name in ((self._watch, "outputs-watch"), (self._write, "system-writer")):
+            thread = threading.Thread(target=target, name=name, daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+    def _on_packet(self, device_id, mono, rate, stamp, discontinuity) -> None:
+        if self.paused:  # a private pause, decided as the audio arrives (as on the mic)
+            mono = np.zeros_like(mono)
+        with self._lock:
+            self._mixer.add(device_id, mono, rate, stamp, self._clock(), discontinuity)
+
+    def poll_devices(self) -> None:
+        """Captures outputs that appeared and forgets ones that went away."""
+        try:
+            devices = self._api.output_devices()
+        except Exception as exc:
+            if not self._listing_failed:
+                self._listing_failed = True
+                self.errors.append(f"Couldn't list the output devices: {exc}")
+            return
+        now = self._clock()
+        present = {device["id"]: device["name"] for device in devices}
+        for device_id, capture in list(self._captures.items()):
+            if not capture.alive:  # unplugged, or it stopped on an error
+                del self._captures[device_id]
+                if device_id in present:  # still there but broken: try again later
+                    self._failed[device_id] = now
+        for device_id, name in present.items():
+            if device_id in self._captures:
+                continue
+            if now - self._failed.get(device_id, float("-inf")) < RETRY_FAILED_DEVICE:
+                continue
+            capture = self._api.LoopbackCapture(device_id, name, self._on_packet)
+            try:
+                capture.start()
+            except Exception as exc:
+                if device_id not in self._failed:  # said once, not on every retry
+                    self.errors.append(f"Couldn't record {name}: {exc}")
+                self._failed[device_id] = now
+                continue
+            self._captures[device_id] = capture
+        names = [capture.name for capture in self._captures.values()]
+        self.device = {"name": ", ".join(names) if names else "No output device"}
+
+    def _watch(self) -> None:
+        while not self._stop.wait(LOOK_FOR_DEVICES):
+            self.poll_devices()
+
+    def _write(self) -> None:
+        while not self._stop.wait(WRITE_EVERY):
+            self.pump()
+
+    def pump(self, until: int | None = None) -> None:
+        """Writes the mixed audio that is ready (at the end: everything up to ``until``)."""
+        with self._lock:
+            if until is None:
+                block = self._mixer.drain(self._clock())
+            else:
+                block = self._mixer.flush(until)
+        if block.size == 0:
+            return
+        power = float(np.mean(block.astype(np.float64) ** 2))
+        self.level_dbfs = float(20 * np.log10(np.sqrt(power) + 1e-9))
+        if self.first_buffer_at is None:
+            self.first_buffer_at = self._t0  # frame 0 is the start of the recording
+            if self._on_first_buffer is not None:
+                try:
+                    self._on_first_buffer()
+                except Exception as exc:
+                    self.errors.append(f"Couldn't save the recording details: {exc}")
+        self._chunks.write(block)
+
+    def stop(self) -> None:
+        if not self._started:
+            return
+        end = round((self._clock() - self._t0) * self.rate)
+        self._stop.set()
+        for thread in self._threads:
+            thread.join(timeout=5)
+        for capture in list(self._captures.values()):
+            capture.stop()
+        self._captures.clear()
+        self.pump(until=end)
+        self._chunks.close()
 
 
 def _wasapi_devices(pa: pyaudio.PyAudio, wasapi: dict, kind: str) -> list[dict]:
@@ -208,7 +417,33 @@ class Recorder:
         mic = _find_device(self._pa, wasapi, self.mic_name, "input") or (
             self._pa.get_device_info_by_index(wasapi["defaultInputDevice"])
         )
-        speakers = _find_device(self._pa, wasapi, self.output_name, "output") or (
+        loopback = None if self.every_output else self._open_one_output(wasapi)
+        self.started_at = datetime.now().astimezone()
+        self._t0 = time.perf_counter()
+        if loopback is None:
+            system = AllOutputsTrack(self.folder, self.chunk_seconds, self._t0, self._save_info)
+        else:
+            system = TrackRecorder(
+                "system", loopback, self.folder, self.chunk_seconds, self._save_info
+            )
+        self.tracks = {
+            "mic": TrackRecorder("mic", mic, self.folder, self.chunk_seconds, self._save_info),
+            "system": system,
+        }
+        for track in self.tracks.values():
+            track.start(self._pa)
+
+    @property
+    def every_output(self) -> bool:
+        """The default: the computer's audio from every speaker and headset."""
+        return not self.output_name
+
+    def _open_one_output(self, wasapi: dict) -> dict:
+        """The loopback device for the chosen output (or the Windows default), with a silent
+        stream on that output, so loopback keeps delivering through silences."""
+        assert self._pa is not None
+        name = None if self.output_name == WINDOWS_DEFAULT_OUTPUT else self.output_name
+        speakers = _find_device(self._pa, wasapi, name, "output") or (
             self._pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
         )
         loopback = next(
@@ -232,16 +467,7 @@ class Recorder:
             frames_per_buffer=FRAMES_PER_BUFFER,
             stream_callback=lambda *_: (silence, pyaudio.paContinue),
         )
-        self.tracks = {
-            "mic": TrackRecorder("mic", mic, self.folder, self.chunk_seconds, self._save_info),
-            "system": TrackRecorder(
-                "system", loopback, self.folder, self.chunk_seconds, self._save_info
-            ),
-        }
-        self.started_at = datetime.now().astimezone()
-        self._t0 = time.perf_counter()
-        for track in self.tracks.values():
-            track.start(self._pa)
+        return loopback
 
     @property
     def elapsed(self) -> float:
