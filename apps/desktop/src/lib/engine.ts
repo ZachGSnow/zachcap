@@ -87,6 +87,7 @@ export type MeetingDetail = {
   segments: Segment[];
   summary: Summary | null;
   notes: Note[];
+  insights: Insights;
   talk_time: TalkTime[];
   action_items: ActionItem[];
   me: string;
@@ -133,6 +134,23 @@ export type RecordState =
     };
 
 export type Note = { id: number; meeting_id: number; at: number; kind: "note" | "bookmark"; text: string };
+
+export type SpeakerInsight = {
+  speaker: string;
+  words: number;
+  seconds: number;
+  questions: number;
+  interruptions: number;
+  longest: number;
+  longest_at: number | null;
+  words_per_minute: number | null;
+};
+
+export type Insights = {
+  speakers: SpeakerInsight[];
+  longest: { speaker: string; seconds: number; at: number } | null;
+  questions: number;
+};
 
 export type KeyStatus = Record<"anthropic" | "huggingface", string>;
 

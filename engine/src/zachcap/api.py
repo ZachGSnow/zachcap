@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from . import __version__, apikeys, audio, export, paths, pipeline
+from . import __version__, apikeys, audio, export, insights, paths, pipeline
 from .store import Store
 
 ALLOWED_ORIGINS = ["http://tauri.localhost", "tauri://localhost", "http://localhost:1420"]
@@ -287,6 +287,7 @@ def create_app(token: str) -> FastAPI:
             "segments": [dict(row) for row in store.transcript(meeting_id)],
             "summary": store.summary(meeting_id),
             "notes": [dict(row) for row in store.notes(meeting_id)],
+            "insights": insights.meeting_insights(store, meeting_id),
             "talk_time": [dict(row) for row in store.talk_time(meeting_id)],
             "action_items": [dict(row) for row in store.action_items(meeting_id=meeting_id)],
             "me": store.me()["name"],
