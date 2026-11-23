@@ -27,6 +27,7 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 - **Action item tracker** across all meetings, with Open/Done, "Mine", and commitments vs assigned tasks.
 - **Ask across all your meetings**: "What did I commit to this week?", "What's still open with Dana?". Claude searches your transcripts, summaries and action items with read-only tools and links every fact to the moment it was said. **Brief me** on a person prepares you for your next meeting with them. Each meeting also has its own Ask tab.
 - **History and search**: every meeting, searchable by anything anyone said.
+- **Your meetings in Claude Code or the Claude app**: a read-only MCP server (`zachcap mcp`) lets Claude search your transcripts and read summaries, action items and notes. Settings has the command and config to copy.
 - **Export** a meeting as Markdown (summary, action items, your notes, transcript), plain text or subtitles (.srt). An optional **export folder** keeps a Markdown copy of every meeting up to date, for Obsidian or any notes folder.
 - **Fix anything**: rename people (renaming to an existing name merges them), move one line to another speaker, forget a voice, rename or delete a meeting.
 
@@ -54,7 +55,7 @@ Then open **Settings** and add:
 1. A free [Hugging Face](https://huggingface.co) token, after accepting the terms of [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1). Without it ZachCap still transcribes, labeling the two sides "You" and "Call audio".
 2. An [Anthropic API key](https://platform.claude.com) for summaries and questions (optional; about $0.09 per hour-long meeting with Opus 5.5).
 
-Keys are stored in Windows Credential Manager. The engine also has a command line (`uv run zachcap --help`): `record`, `import`, `show`, `name`, `confirm`, `search`, `keys`.
+Keys are stored in Windows Credential Manager. The engine also has a command line (`uv run zachcap --help`): `record`, `import`, `show`, `name`, `confirm`, `search`, `keys`, `mcp`.
 
 For everyday use, build the app once and start it from a shortcut:
 
@@ -102,7 +103,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 ## Your data and privacy
 
 - **What is stored:** recordings (FLAC), transcripts, summaries, action items, people and voiceprints (voice embeddings plus the speaker's sample times), in `%LOCALAPPDATA%\ZachCap`. Files and the SQLite database are not encrypted beyond what Windows provides (use BitLocker).
-- **What leaves the machine:** only when you ask for a summary or ask a question, the transcript text it needs goes to Anthropic's API with your key (for a question across meetings, the lines, summaries and action items Claude looks up). Audio and voiceprints never leave. Model files are downloaded once from Hugging Face. pyannote's usage telemetry is switched off.
+- **What leaves the machine:** only when you ask for a summary or ask a question, the transcript text it needs goes to Anthropic's API with your key (for a question across meetings, the lines, summaries and action items Claude looks up). If you add the MCP server to a Claude app, what it looks up goes to that app. Audio and voiceprints never leave. Model files are downloaded once from Hugging Face. pyannote's usage telemetry is switched off.
 - **Deleting:** deleting a meeting removes its audio, transcript, summary, action items and the voice samples learned from it. "Forget voice" removes a person's voiceprint. Deleting is a normal file delete, not a secure erase.
 - **Consent:** voiceprints count as biometric data in some places (for example Illinois), and recording laws differ; some require everyone's consent. Tell people you are recording and follow your organization's policy.
 
@@ -110,7 +111,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 68 tests: storage, matching, audio, capture, crash recovery, API, summaries, Ask
+uv run pytest -q             # 72 tests: storage, matching, audio, capture, crash recovery, API, summaries, Ask
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```

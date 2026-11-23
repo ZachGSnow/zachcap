@@ -47,6 +47,95 @@ def _day(stamp: str) -> str:
     return stamp[:10]
 
 
+# The library, read-only, as plain functions. Claude's tools here and the MCP server in
+# mcp_server.py both answer through these, so the two always agree.
+
+
+def search(store: Store, query: str, limit: int = 25) -> str:
+    """Transcript lines across meetings, best matches first; any word if all find too few."""
+    limit = max(1, min(limit, 60))
+    found: dict[tuple, object] = {}
+    for any_word in (False, True):
+        match = fts_query(query, any_word)
+        if match is None:
+            return "Give some words to search for."
+        for row in store.search_lines(match, limit):
+            found.setdefault((row["meeting_id"], row["start"]), row)
+        if len(found) >= 5:
+            break
+    if not found:
+        return "No transcript line matches that."
+    return "\n".join(
+        f"[M{r['meeting_id']} {_clock(r['start'])}] {_day(r['started_at'])} "
+        f'"{r["title"]}" {r["speaker"]}: {r["text"]}'
+        for r in list(found.values())[:limit]
+    )
+
+
+def meetings_list(
+    store: Store, since: str | None = None, until: str | None = None, person: str | None = None
+) -> str:
+    participants = store.participants()
+    lines = []
+    for m in store.meetings():
+        day = _day(m["started_at"])
+        names = participants.get(m["id"], [])
+        if (since and day < since) or (until and day > until):
+            continue
+        if person and not any(person.lower() in n.lower() for n in names):
+            continue
+        summary = store.summary(m["id"])
+        overview = summary["content"]["overview"] if summary else "(not summarized)"
+        minutes = round((m["duration"] or 0) / 60)
+        lines.append(
+            f'M{m["id"]} {day} "{m["title"]}" {minutes} min; '
+            f"{', '.join(names) or 'speakers not named'}. {overview}"
+        )
+        if len(lines) >= 40:
+            break
+    return "\n".join(lines) or "No meetings match."
+
+
+def meeting_detail(store: Store, meeting_id: int) -> str:
+    meeting = store.meeting(meeting_id)
+    if meeting is None or meeting["status"] == "recording":
+        return f"There is no meeting M{meeting_id}."
+    parts = [f'M{meeting_id} "{meeting["title"]}" on {_day(meeting["started_at"])}']
+    summary = store.summary(meeting_id)
+    if summary:
+        parts.append("Summary: " + json.dumps(summary["content"], ensure_ascii=False))
+    lines = [
+        f"[{_clock(r['start'])}] {r['speaker']}: {r['text']}" for r in store.transcript(meeting_id)
+    ]
+    transcript = "\n".join(lines)
+    if len(transcript) > TRANSCRIPT_LIMIT:
+        transcript = transcript[:TRANSCRIPT_LIMIT] + "\n[... transcript trimmed; search for more]"
+    parts.append("Transcript:\n" + (transcript or "(no transcript)"))
+    return "\n\n".join(parts) + notes_text(store, meeting_id)
+
+
+def action_items_list(store: Store, status: str = "open", owner: str | None = None) -> str:
+    rows = store.action_items(status if status in ("open", "done") else None)
+    lines = [
+        f"[M{r['meeting_id']} {_clock(r['said_at'] or 0)}] {r['status']}: {r['owner']}, "
+        f"{r['kind']}: {r['task']}{f' (due {r["due"]})' if r['due'] else ''} "
+        f'from "{r["meeting_title"]}" {_day(r["meeting_started_at"])}'
+        for r in rows
+        if not owner or owner.lower() in r["owner"].lower()
+    ]
+    return "\n".join(lines[:80]) or "No action items match."
+
+
+def people_list(store: Store) -> str:
+    lines = [
+        f"{p['name']}{' (the user)' if p['is_me'] else ''}: {p['meetings']} meetings, "
+        f"{round((p['talk_seconds'] or 0) / 60)} min talking"
+        + (f", last seen {_day(p['last_seen'])}" if p["last_seen"] else "")
+        for p in store.people_stats()
+    ]
+    return "\n".join(lines) or "Nobody named yet."
+
+
 def make_tools(store: Store) -> list:
     """The library, read-only, as tools for Claude."""
 
@@ -58,23 +147,7 @@ def make_tools(store: Store) -> list:
             query: Words to look for, like "firewall cutover" or a name.
             limit: How many lines to return, at most 60.
         """
-        limit = max(1, min(limit, 60))
-        found: dict[tuple, object] = {}
-        for any_word in (False, True):
-            match = fts_query(query, any_word)
-            if match is None:
-                return "Give some words to search for."
-            for row in store.search_lines(match, limit):
-                found.setdefault((row["meeting_id"], row["start"]), row)
-            if len(found) >= 5:
-                break
-        if not found:
-            return "No transcript line matches that."
-        return "\n".join(
-            f"[M{r['meeting_id']} {_clock(r['start'])}] {_day(r['started_at'])} "
-            f'"{r["title"]}" {r["speaker"]}: {r["text"]}'
-            for r in list(found.values())[:limit]
-        )
+        return search(store, query, limit)
 
     @beta_tool
     def list_meetings(
@@ -87,25 +160,7 @@ def make_tools(store: Store) -> list:
             until: Only meetings on or before this date, YYYY-MM-DD.
             person: Only meetings this person spoke in.
         """
-        participants = store.participants()
-        lines = []
-        for m in store.meetings():
-            day = _day(m["started_at"])
-            names = participants.get(m["id"], [])
-            if (since and day < since) or (until and day > until):
-                continue
-            if person and not any(person.lower() in n.lower() for n in names):
-                continue
-            summary = store.summary(m["id"])
-            overview = summary["content"]["overview"] if summary else "(not summarized)"
-            minutes = round((m["duration"] or 0) / 60)
-            lines.append(
-                f'M{m["id"]} {day} "{m["title"]}" {minutes} min; '
-                f"{', '.join(names) or 'speakers not named'}. {overview}"
-            )
-            if len(lines) >= 40:
-                break
-        return "\n".join(lines) or "No meetings match."
+        return meetings_list(store, since, until, person)
 
     @beta_tool
     def get_meeting(meeting_id: int) -> str:
@@ -114,24 +169,7 @@ def make_tools(store: Store) -> list:
         Args:
             meeting_id: The meeting's id, the number after M.
         """
-        meeting = store.meeting(meeting_id)
-        if meeting is None or meeting["status"] == "recording":
-            return f"There is no meeting M{meeting_id}."
-        parts = [f'M{meeting_id} "{meeting["title"]}" on {_day(meeting["started_at"])}']
-        summary = store.summary(meeting_id)
-        if summary:
-            parts.append("Summary: " + json.dumps(summary["content"], ensure_ascii=False))
-        lines = [
-            f"[{_clock(r['start'])}] {r['speaker']}: {r['text']}"
-            for r in store.transcript(meeting_id)
-        ]
-        transcript = "\n".join(lines)
-        if len(transcript) > TRANSCRIPT_LIMIT:
-            transcript = (
-                transcript[:TRANSCRIPT_LIMIT] + "\n[... transcript trimmed; search for more]"
-            )
-        parts.append("Transcript:\n" + (transcript or "(no transcript)"))
-        return "\n\n".join(parts) + notes_text(store, meeting_id)
+        return meeting_detail(store, meeting_id)
 
     @beta_tool
     def list_action_items(status: str = "open", owner: str | None = None) -> str:
@@ -141,15 +179,7 @@ def make_tools(store: Store) -> list:
             status: "open", "done" or "all".
             owner: Only items owned by this person.
         """
-        rows = store.action_items(status if status in ("open", "done") else None)
-        lines = [
-            f"[M{r['meeting_id']} {_clock(r['said_at'] or 0)}] {r['status']}: {r['owner']}, "
-            f"{r['kind']}: {r['task']}{f' (due {r["due"]})' if r['due'] else ''} "
-            f'from "{r["meeting_title"]}" {_day(r["meeting_started_at"])}'
-            for r in rows
-            if not owner or owner.lower() in r["owner"].lower()
-        ]
-        return "\n".join(lines[:80]) or "No action items match."
+        return action_items_list(store, status, owner)
 
     return [search_transcripts, list_meetings, get_meeting, list_action_items]
 

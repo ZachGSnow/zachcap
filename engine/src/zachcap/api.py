@@ -650,6 +650,22 @@ def create_app(token: str) -> FastAPI:
         except OSError:
             return {"apps": []}
 
+    @app.get("/api/mcp", dependencies=auth)
+    def mcp_config():
+        """How to add ZachCap to Claude Desktop or Claude Code: this engine's own Python
+        runs `zachcap mcp`, with the same data folder."""
+        import os
+        import sys
+
+        args = ["-m", "zachcap.cli", "mcp"]
+        env = {"ZACHCAP_HOME": os.environ["ZACHCAP_HOME"]} if os.environ.get("ZACHCAP_HOME") else {}
+        server = {"command": sys.executable, "args": args, **({"env": env} if env else {})}
+        flags = "".join(f' -e {key}="{value}"' for key, value in env.items())
+        return {
+            "claude_desktop": json.dumps({"mcpServers": {"zachcap": server}}, indent=2),
+            "claude_code": f'claude mcp add zachcap{flags} -- "{sys.executable}" {" ".join(args)}',
+        }
+
     @app.get("/api/devices", dependencies=auth)
     def devices():
         from .capture import list_devices

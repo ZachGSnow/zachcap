@@ -254,3 +254,13 @@ def test_exports_to_a_download_a_chosen_file_and_a_folder(client: TestClient, tm
     settings = client.put("/api/settings", headers=AUTH, json={"export_folder": str(vault)}).json()
     assert settings["export_folder"] == str(vault)
     assert [p.name for p in vault.iterdir()] == ["2026-11-20 0900 Weekly sync.md"]  # backfilled
+
+
+def test_settings_show_how_to_add_zachcap_to_claude(client: TestClient, tmp_path: Path):
+    config = client.get("/api/mcp", headers=AUTH).json()
+    assert config["claude_code"].startswith('claude mcp add zachcap -e ZACHCAP_HOME="')
+    assert config["claude_code"].endswith("-m zachcap.cli mcp")
+    assert (
+        '"zachcap"' in config["claude_desktop"]
+        and str(tmp_path).replace("\\", "\\\\") in config["claude_desktop"]
+    )
