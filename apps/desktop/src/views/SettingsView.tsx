@@ -197,7 +197,10 @@ export function SettingsView() {
 
   const save = async (
     change: Partial<
-      Record<"summary_model" | "language" | "mic_device" | "output_device" | "vocabulary" | "summary_template", string>
+      Record<
+        "summary_model" | "language" | "mic_device" | "output_device" | "vocabulary" | "summary_template" | "export_folder",
+        string
+      >
     >,
   ) => {
     try {
@@ -216,6 +219,12 @@ export function SettingsView() {
     );
     if (saved) toast.success(`Your lines now show as ${name.trim()}`);
     await refresh();
+  };
+
+  const chooseExportFolder = async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const folder = await open({ directory: true, title: "Export meetings to" });
+    if (typeof folder === "string") await save({ export_folder: folder });
   };
 
   const deviceOptions = (list: { name: string; default: boolean }[] | undefined) => [
@@ -345,6 +354,25 @@ export function SettingsView() {
               >
                 <FolderOpen className="size-3.5" />
                 Open
+              </Button>
+            )}
+          </Row>
+          <Row
+            label="Export folder"
+            help="Also keep every meeting there as a Markdown file, updated as it changes: for Obsidian or a notes folder. Pick a folder that isn't synced to a work cloud if meetings are confidential."
+          >
+            <code className="min-w-0 flex-1 truncate font-mono text-xs" title={settings?.export_folder || undefined}>
+              {settings?.export_folder || "Off"}
+            </code>
+            {isTauri() && (
+              <Button size="sm" variant="outline" onClick={() => void chooseExportFolder()}>
+                <FolderOpen className="size-3.5" />
+                Choose
+              </Button>
+            )}
+            {settings?.export_folder && (
+              <Button size="sm" variant="ghost" onClick={() => void save({ export_folder: "" })}>
+                Turn off
               </Button>
             )}
           </Row>

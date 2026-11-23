@@ -27,6 +27,7 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 - **Action item tracker** across all meetings, with Open/Done, "Mine", and commitments vs assigned tasks.
 - **Ask across all your meetings**: "What did I commit to this week?", "What's still open with Dana?". Claude searches your transcripts, summaries and action items with read-only tools and links every fact to the moment it was said. **Brief me** on a person prepares you for your next meeting with them. Each meeting also has its own Ask tab.
 - **History and search**: every meeting, searchable by anything anyone said.
+- **Export** a meeting as Markdown (summary, action items, your notes, transcript), plain text or subtitles (.srt). An optional **export folder** keeps a Markdown copy of every meeting up to date, for Obsidian or any notes folder.
 - **Fix anything**: rename people (renaming to an existing name merges them), move one line to another speaker, forget a voice, rename or delete a meeting.
 
 | | |
@@ -79,6 +80,7 @@ Everything is set in the app under **Settings**:
 | Usual kind of meeting | What summaries focus on unless a meeting says otherwise | General |
 | API keys | Hugging Face token and Anthropic key | not set |
 | Start with Windows | Opens ZachCap in the tray when you sign in (release builds) | off |
+| Export folder | Keeps a Markdown copy of every meeting in a folder you choose | off |
 
 Environment variables for development: `ZACHCAP_HOME` (data folder, default `%LOCALAPPDATA%\ZachCap`), `ZACHCAP_ENGINE_DIR` (engine location for the desktop app).
 
@@ -108,7 +110,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 64 tests: storage, matching, audio, capture, crash recovery, API, summaries, Ask
+uv run pytest -q             # 68 tests: storage, matching, audio, capture, crash recovery, API, summaries, Ask
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```

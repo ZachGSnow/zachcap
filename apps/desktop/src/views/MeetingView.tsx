@@ -1,7 +1,10 @@
 import {
   ArrowLeft,
+  Captions,
   Check,
   ClipboardCopy,
+  FileDown,
+  FileText,
   Loader2,
   MoreHorizontal,
   Pencil,
@@ -41,7 +44,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { usePoll } from "@/hooks/usePoll";
-import { api, mediaUrl, type MeetingDetail, type Person, type Settings, type Speaker } from "@/lib/engine";
+import { api, isTauri, mediaUrl, type MeetingDetail, type Person, type Settings, type Speaker } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
 import { clock, colorMap, minutes, when } from "@/lib/format";
 import { StatusBadge } from "@/views/MeetingsView";
@@ -195,6 +198,24 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
     await refresh();
   };
 
+  // A file the user picks in the save dialog (or a download, outside the desktop app).
+  const exportAs = (format: "md" | "txt" | "srt") =>
+    attempt("Couldn't export the meeting", async () => {
+      const { name } = await api<{ name: string }>(`/api/meetings/${id}/export-name?format=${format}`);
+      if (!isTauri()) {
+        const blob = await (await fetch(mediaUrl(`/api/meetings/${id}/export?format=${format}`))).blob();
+        const link = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: name });
+        link.click();
+        URL.revokeObjectURL(link.href);
+        return;
+      }
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const path = await save({ defaultPath: name, filters: [{ name: format.toUpperCase(), extensions: [format] }] });
+      if (!path) return;
+      const saved = await api<{ path: string }>(`/api/meetings/${id}/export`, { method: "POST", json: { format, path } });
+      toast.success("Exported", { description: saved.path });
+    });
+
   const copyTranscript = () => {
     const text = (data?.segments ?? []).map((s) => `[${clock(s.start)}] ${s.speaker}: ${s.text}`).join("\n");
     void copyText(`${meeting?.title}\n\n${text}`, "Transcript copied");
@@ -319,6 +340,19 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
             <DropdownMenuItem onSelect={copyTranscript}>
               <ClipboardCopy className="size-4" />
               Copy transcript
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void exportAs("md")}>
+              <FileDown className="size-4" />
+              Export as Markdown
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void exportAs("txt")}>
+              <FileText className="size-4" />
+              Export transcript (.txt)
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void exportAs("srt")}>
+              <Captions className="size-4" />
+              Export subtitles (.srt)
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onSelect={() => setConfirmDelete(true)}>
