@@ -28,9 +28,10 @@ def of_meetings(store, meetings: list) -> dict[int, dict]:
     found = {}
     for meeting in meetings:
         named = heard.get(meeting["id"], [])
-        if meeting["client"]:
+        own = store.column(meeting, "client")  # absent in a library not yet opened to write
+        if own:
             found[meeting["id"]] = {
-                "client": meeting["client"],
+                "client": own,
                 "inferred": False,
                 "clients": named,
             }

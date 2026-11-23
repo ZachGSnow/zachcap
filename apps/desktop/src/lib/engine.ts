@@ -248,6 +248,7 @@ export type Settings = {
 
 /** A recent dictation, kept in memory by the engine (never on disk). */
 export type RecentDictation = {
+  id: number;
   text: string;
   at: string;
   /** "typed" where the cursor was, "copied" to the clipboard instead, or "kept" (neither). */

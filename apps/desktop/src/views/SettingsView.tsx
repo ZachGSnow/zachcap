@@ -18,7 +18,7 @@ import {
   TriangleAlert,
   UserRound,
 } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { PromptList } from "@/components/PromptLibrary";
@@ -320,7 +320,13 @@ function RecentDictations() {
               className="size-7 shrink-0"
               aria-label="Copy this dictation"
               title="Copy"
-              onClick={() => void copyText(entry.text, "Copied")}
+              onClick={() =>
+                void attempt("Couldn't copy it", async () => {
+                  // Copied by the engine, kept out of clipboard history like dictation's own.
+                  await api(`/api/dictate/recent/${entry.id}/copy`, { method: "POST" });
+                  toast.success("Copied");
+                })
+              }
             >
               <Copy className="size-3.5" />
             </Button>
@@ -586,8 +592,13 @@ export function SettingsView() {
   useEffect(() => setAliases(settings?.also_answer_to ?? ""), [settings?.also_answer_to]);
   const [ticketPatterns, setTicketPatterns] = useState("");
   useEffect(() => setTicketPatterns(settings?.ticket_patterns ?? ""), [settings?.ticket_patterns]);
+  // Enter and then leaving the box would save twice: the second sees the first's value.
+  const savedPatterns = useRef<string | null>(null);
   const saveTicketPatterns = () => {
-    if (settings && ticketPatterns.trim() !== settings.ticket_patterns) void save({ ticket_patterns: ticketPatterns });
+    const wanted = ticketPatterns.trim();
+    if (!settings || wanted === (savedPatterns.current ?? settings.ticket_patterns)) return;
+    savedPatterns.current = wanted;
+    void save({ ticket_patterns: ticketPatterns });
   };
 
   const keysNow = useKeys();

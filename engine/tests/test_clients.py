@@ -77,6 +77,23 @@ def test_the_client_goes_with_the_meeting(store: Store):
     assert "New prospect" in listed and "client Northwind;" in listed and "Cutover" not in listed
 
 
+def test_a_library_not_yet_opened_to_write_still_lists(store: Store, tmp_path: Path):
+    """The MCP server reads without adding columns: a library from before tickets and
+    clients still lists and shows its meetings."""
+    for column in ("ticket", "client", "ticket_source"):
+        store.db.execute(f"ALTER TABLE meetings DROP COLUMN {column}")
+    store.db.commit()
+    old = Store(tmp_path / "test.db", readonly=True)
+    try:
+        assert "Cutover" in assistant.meetings_list(old)
+        assert assistant.meeting_detail(old, store.ids["cutover"]).startswith(
+            f"M{store.ids['cutover']}"
+        )
+        assert digest.build(old, "day", date(2026, 11, 23))["totals"]["meetings"] == 3
+    finally:
+        old.close()
+
+
 def test_clients_through_the_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
     client = TestClient(create_app("test-token"))

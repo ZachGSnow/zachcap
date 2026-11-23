@@ -522,10 +522,17 @@ class Dictation:
         # The last few dictations, newest first, for Settings: in memory only, so they're
         # gone when ZachCap quits (or dictation is turned off).
         self.recent: deque[dict] = deque(maxlen=RECENT)
+        self._entries = itertools.count(1)
+        self._forgotten = 0  # bumped by forget_recent: one being transcribed then isn't kept
 
     @property
     def listening(self) -> bool:
         return bool(self._open)
+
+    def forget_recent(self) -> None:
+        """Forgets the recent dictations, and any still being transcribed."""
+        self._forgotten += 1
+        self.recent.clear()
 
     @property
     def holding(self) -> bool:
@@ -606,11 +613,21 @@ class Dictation:
         audio = self._close(mic, expire)
         _sound("Speech Off.wav")
         job = self._in_order.submit(
-            self._deliver, audio, window, language, hotwords, fix, type_it, snippets or {}
+            self._deliver,
+            audio,
+            window,
+            language,
+            hotwords,
+            fix,
+            type_it,
+            snippets or {},
+            self._forgotten,
         )
         return job.result()
 
-    def _deliver(self, audio, window, language, hotwords, fix, type_it: bool, snippets) -> dict:
+    def _deliver(
+        self, audio, window, language, hotwords, fix, type_it: bool, snippets, forgotten: int
+    ) -> dict:
         began = time.perf_counter()
         text = self.transcriber.text(audio, language, hotwords)
         if fix is not None and text:
@@ -632,10 +649,11 @@ class Dictation:
             "copied": bool(why) and copy_to_clipboard(text),
             "why": why,
         }
-        if text:
+        if text and forgotten == self._forgotten:  # not forgotten while it was transcribed
             delivered = "typed" if typed and not why else "copied" if result["copied"] else "kept"
             self.recent.appendleft(
                 {
+                    "id": next(self._entries),
                     "text": text,
                     "at": datetime.now().astimezone().isoformat(timespec="seconds"),
                     "delivered": delivered,

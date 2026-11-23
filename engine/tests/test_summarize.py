@@ -189,6 +189,14 @@ def test_a_document_is_rewritten_the_way_you_ask(meeting, monkeypatch):
     assert first["content"][0]["cache_control"] == {"type": "ephemeral"}  # the meeting, cached
     assert mine == {"role": "assistant", "content": "Subject: Cutover (edited)"}
     assert ask["role"] == "user" and ask["content"].startswith("Rewrite it: shorter")
+    assert "edits made by hand: keep what they added" in ask["content"]
+
+    store.set_setting("mask_before_claude", "1")  # an edit that added contact details
+    summarize.recipe(
+        store, meeting_id, "email", previous="Call dana@example.com", change="add 555-123-4567"
+    )
+    first, mine, ask = calls["messages"]
+    assert "dana@example.com" not in mine["content"] and "555-123-4567" not in ask["content"]
     for previous, change, reason in [
         ("Text", None, "together"),
         ("Text", " ", "Say what to change"),

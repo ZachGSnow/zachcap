@@ -98,7 +98,7 @@ def build(store: Store, period: str, day: date, client: str | None = None) -> di
                 "decisions": list(content.get("decisions") or []),
                 "items": items,
                 "status": meeting["status"],
-                "ticket": meeting["ticket"],
+                "ticket": store.column(meeting, "ticket"),
                 "client": client_of[meeting["id"]]["client"],
             }
         )

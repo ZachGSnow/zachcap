@@ -521,6 +521,7 @@ def create_app(token: str) -> FastAPI:
         if body.ticket is not None:
             try:
                 changes["ticket"] = tickets.checked(body.ticket) or None
+                changes["ticket_source"] = tickets.YOURS  # set or taken off: yours to keep
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         if body.client is not None:
@@ -784,6 +785,7 @@ def create_app(token: str) -> FastAPI:
                 meeting = store.meeting(note["meeting_id"])
                 if meeting is not None:
                     snapshot.remove_pictures(Path(meeting["folder"]), note_id)
+            tickets.fill(store, note["meeting_id"])  # a ticket that came from it goes too
             export.auto_export(store, note["meeting_id"])
         return {"deleted": note_id}
 
@@ -922,6 +924,7 @@ def create_app(token: str) -> FastAPI:
         finally:
             for lock in locks:
                 lock.release()
+        tickets.fill(store, meeting_id)  # a ticket found in what was redacted goes too
         export.auto_export(store, meeting_id)
         return {
             **result,
@@ -1028,7 +1031,7 @@ def create_app(token: str) -> FastAPI:
                 "snippet": f"[{m['ticket']}]",
             }
             for m in store.meetings()
-            if m["ticket"] and m["ticket"] == tickets.normalized(q)
+            if m["ticket"] and m["ticket"] in tickets.words_of(q)
         ]
         try:
             return about + [dict(hit) for hit in store.search(q)]
@@ -1216,9 +1219,20 @@ def create_app(token: str) -> FastAPI:
         only, never on disk."""
         return JSONResponse(list(dictator.recent), headers=NO_STORE)
 
+    @app.post("/api/dictate/recent/{entry_id}/copy", dependencies=auth)
+    def copy_dictation(entry_id: int):
+        """Copies a recent dictation the way dictation itself does: kept out of clipboard
+        history and the cloud clipboard."""
+        entry = next((e for e in dictator.recent if e["id"] == entry_id), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="That dictation is gone")
+        if not dictation.copy_to_clipboard(entry["text"]):
+            raise HTTPException(status_code=409, detail="Another app has the clipboard open")
+        return {"copied": True}
+
     @app.delete("/api/dictate/recent", dependencies=auth)
     def forget_dictations():
-        dictator.recent.clear()
+        dictator.forget_recent()
         return {"forgotten": True}
 
     @app.get("/api/call", dependencies=auth)
@@ -1316,43 +1330,47 @@ def create_app(token: str) -> FastAPI:
     def get_settings(store: Store = Depends(db)):
         from .summarize import MODELS, PRICES, meeting_template, summary_model
 
-        return {
-            "summary_model": summary_model(store),
-            "summary_models": [
-                {
-                    "id": model,
-                    "label": label,
-                    "input_usd": PRICES[model][0],
-                    "output_usd": PRICES[model][1],
-                }
-                for model, label in MODELS.items()
-            ],
-            # The usual kind, as a summary would use it (a deleted one reads as general).
-            "summary_template": meeting_template(store, {"template": None}),
-            "export_folder": store.setting("export_folder", ""),
-            "watch_folder": store.setting(watchfolder.SETTING, ""),
-            # Files there that couldn't be imported, newest first, with the reason.
-            "watch_folder_failed": watch_failures(store),
-            "also_answer_to": store.setting(mentions.ALSO_ANSWER_TO, ""),
-            "keep_audio_days": int(store.setting("keep_audio_days", "0") or 0),
-            "mask_before_claude": store.setting("mask_before_claude") == "1",
-            # Offer to stop (with a countdown) when the call ends or after a long silence.
-            "stop_when_call_ends": store.setting("stop_when_call_ends", "1") == "1",
-            "export_work_log": store.setting("export_work_log") == "1",
-            "dictation": store.setting(dictation.SETTING) == "1",
-            "dictation_snippets": store.setting(dictation.SNIPPETS, ""),
-            "shortcuts": shortcuts.current(store),
-            "ticket_patterns": store.setting(tickets.SETTING, ""),
-            "soundcheck_passed": store.setting("soundcheck_passed"),
-            "templates": prompts.choices(store, "template"),
-            "recipes": prompts.choices(store, "recipe"),
-            "language": store.setting("language", "en"),
-            "languages": [{"id": k, "label": v} for k, v in LANGUAGES.items()],
-            "mic_device": store.setting("mic_device", ""),
-            "output_device": store.setting("output_device", ""),
-            "vocabulary": store.setting("vocabulary", ""),
-            "me": dict(store.me()),
-        }
+        # Not cached by the page: it holds your snippets and words.
+        return JSONResponse(
+            headers=NO_STORE,
+            content={
+                "summary_model": summary_model(store),
+                "summary_models": [
+                    {
+                        "id": model,
+                        "label": label,
+                        "input_usd": PRICES[model][0],
+                        "output_usd": PRICES[model][1],
+                    }
+                    for model, label in MODELS.items()
+                ],
+                # The usual kind, as a summary would use it (a deleted one reads as general).
+                "summary_template": meeting_template(store, {"template": None}),
+                "export_folder": store.setting("export_folder", ""),
+                "watch_folder": store.setting(watchfolder.SETTING, ""),
+                # Files there that couldn't be imported, newest first, with the reason.
+                "watch_folder_failed": watch_failures(store),
+                "also_answer_to": store.setting(mentions.ALSO_ANSWER_TO, ""),
+                "keep_audio_days": int(store.setting("keep_audio_days", "0") or 0),
+                "mask_before_claude": store.setting("mask_before_claude") == "1",
+                # Offer to stop (with a countdown) when the call ends or after a long silence.
+                "stop_when_call_ends": store.setting("stop_when_call_ends", "1") == "1",
+                "export_work_log": store.setting("export_work_log") == "1",
+                "dictation": store.setting(dictation.SETTING) == "1",
+                "dictation_snippets": store.setting(dictation.SNIPPETS, ""),
+                "shortcuts": shortcuts.current(store),
+                "ticket_patterns": store.setting(tickets.SETTING, ""),
+                "soundcheck_passed": store.setting("soundcheck_passed"),
+                "templates": prompts.choices(store, "template"),
+                "recipes": prompts.choices(store, "recipe"),
+                "language": store.setting("language", "en"),
+                "languages": [{"id": k, "label": v} for k, v in LANGUAGES.items()],
+                "mic_device": store.setting("mic_device", ""),
+                "output_device": store.setting("output_device", ""),
+                "vocabulary": store.setting("vocabulary", ""),
+                "me": dict(store.me()),
+            },
+        )
 
     @app.put("/api/settings", dependencies=auth)
     def put_settings(body: SettingsBody, store: Store = Depends(db)):
@@ -1370,8 +1388,12 @@ def create_app(token: str) -> FastAPI:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             store.set_setting(tickets.SETTING, written)
-            for meeting in store.meetings():  # tickets in titles and notes fill in now
+            changed = []
+            for meeting in store.meetings():  # tickets in titles and notes follow the patterns
                 tickets.fill(store, meeting["id"])
+                if store.meeting(meeting["id"])["ticket"] != meeting["ticket"]:
+                    changed.append(meeting["id"])
+            export_soon(store, changed)
         if body.summary_template is not None:
             if prompts.get(store, "template", body.summary_template) is None:
                 raise HTTPException(status_code=400, detail="Unknown kind of meeting")
@@ -1399,7 +1421,7 @@ def create_app(token: str) -> FastAPI:
                 dictator.transcriber.warm_up(language_of(store))
             else:  # turned off mid-dictation: the keys' release won't come
                 dictator.cancel()
-                dictator.recent.clear()
+                dictator.forget_recent()
         if body.export_work_log is not None:
             store.set_setting("export_work_log", "1" if body.export_work_log else "0")
             if body.export_work_log:  # today's and this week's, right away
