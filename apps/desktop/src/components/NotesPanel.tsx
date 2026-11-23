@@ -16,6 +16,7 @@ import { useReturnFocus } from "@/hooks/useReturnFocus";
 import { api, mediaUrl, type Note } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
 import { clock } from "@/lib/format";
+import { useKeys } from "@/lib/shortcuts";
 
 /** A snapshot's picture: the small one for the list, or the full one. The note's time is in
  * the address, so a picture is never mistaken for another one's. */
@@ -104,6 +105,7 @@ export function NotesPanel({
   onSeek: (seconds: number) => void;
   onChanged: () => void;
 }) {
+  const shortcutKeys = useKeys();
   const [text, setText] = useState("");
   const saving = useRef(false);
   const [shown, setShown] = useState<Note | null>(null);
@@ -156,7 +158,7 @@ export function NotesPanel({
           </div>
           <p className="mt-4 font-medium">No notes yet</p>
           <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-            While recording, type a note in the recording bar or press Ctrl+Alt+B to bookmark a moment. Summaries make
+            While recording, type a note in the recording bar or press {shortcutKeys.bookmark} to bookmark a moment. Summaries make
             sure to cover what you noted.
           </p>
         </div>

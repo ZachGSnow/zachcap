@@ -19,6 +19,7 @@ import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type RecordState, type Settings } from "@/lib/engine";
 import { announce, copyText, notify, windowInFront } from "@/lib/feedback";
 import { clock, levelPercent } from "@/lib/format";
+import { keysFor, useKeys } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
 
 /** Quiet this long after the call app lets go of the mic: the call ended. */
@@ -144,7 +145,7 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
       if (current.recording) await stop();
       else {
         await start("");
-        void announce("Recording started", "Press Ctrl+Alt+R again to stop.");
+        void announce("Recording started", `Press ${keysFor("record")} again to stop.`);
       }
     } catch (error) {
       // From the tray or the hotkey the window may be hidden: say it where it will be seen.
@@ -295,7 +296,7 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     setAutoStop(null);
   }, [autoStop]);
 
-  // The tray menu, Ctrl+Alt+R and Ctrl+Alt+B (registered by the Rust shell) work even when
+  // The tray menu and the global shortcuts (registered by the Rust shell) work even when
   // the window is hidden in the tray.
   useEffect(() => {
     if (!isTauri()) return;
@@ -309,11 +310,11 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     on("toggle-recording", () => void toggle());
     on("bookmark", () => {
       if (recordingNow.current) void note();
-      else void announce("Not recording", "Bookmarks mark a moment of a recording. Press Ctrl+Alt+R to start one.");
+      else void announce("Not recording", `Bookmarks mark a moment of a recording. Press ${keysFor("record")} to start one.`);
     });
     on("snapshot", () => {
       if (recordingNow.current) void snapshot();
-      else void announce("Not recording", "Snapshots go with a recording. Press Ctrl+Alt+R to start one.");
+      else void announce("Not recording", `Snapshots go with a recording. Press ${keysFor("record")} to start one.`);
     });
     return () => {
       cancelled = true;
@@ -347,7 +348,7 @@ export function CallWatcher() {
     if (recording) return;
     if (!(await windowInFront())) {
       // On a call the window is usually hidden or behind it; a notification is seen there.
-      await notify(`${apps[0]} is using your microphone`, "Press Ctrl+Alt+R to record this call.");
+      await notify(`${apps[0]} is using your microphone`, `Press ${keysFor("record")} to record this call.`);
       return;
     }
     toast(`${apps[0]} is using your microphone`, {
@@ -372,6 +373,7 @@ export function RecordButton() {
   const { state, start } = useRecording();
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
+  const shortcutKeys = useKeys();
   const recording = state?.recording ?? false;
 
   const begin = async () => {
@@ -389,7 +391,7 @@ export function RecordButton() {
       <Button className="w-full justify-start gap-2" disabled={recording} onClick={() => setOpen(true)}>
         {recording ? <Circle className="size-3 animate-pulse fill-red-500 text-red-500" /> : <Mic className="size-4" />}
         {recording ? "Recording..." : "Record"}
-        {!recording && <span className="ml-auto text-[10px] opacity-60">Ctrl+Alt+R</span>}
+        {!recording && <span className="ml-auto text-[10px] opacity-60">{shortcutKeys.record}</span>}
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="sm:max-w-md">
@@ -453,6 +455,7 @@ export function RecordingBar() {
   const { state, stop, note, pause, snapshot, draft, setDraft, autoStop, keepRecording } = useRecording();
   const [stopping, setStopping] = useState(false);
   const saving = useRef(false);
+  const shortcutKeys = useKeys();
   if (!state?.recording) return null;
   const paused = state.paused ?? false;
 
@@ -514,7 +517,7 @@ export function RecordingBar() {
             size="icon"
             variant="ghost"
             className="size-8 shrink-0"
-            title="Bookmark this moment (Ctrl+Alt+B)"
+            title={`Bookmark this moment (${shortcutKeys.bookmark})`}
             aria-label="Bookmark this moment"
             onClick={() => void note()}
           >
@@ -525,7 +528,7 @@ export function RecordingBar() {
             size="icon"
             variant="ghost"
             className="size-8 shrink-0"
-            title="Snapshot the call: a picture and the text in it (Ctrl+Alt+S)"
+            title={`Snapshot the call: a picture and the text in it (${shortcutKeys.snapshot})`}
             aria-label="Snapshot the call"
             onClick={() => void snapshot()}
           >

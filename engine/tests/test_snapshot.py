@@ -44,7 +44,8 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def fake_take(text: str):
-    def take(folder: Path, note_id: int) -> dict:
+    def take(folder: Path, note_id: int, keys: str = "Ctrl+Alt+S") -> dict:
+        take.keys = keys  # the snapshot keys, for its messages
         path = snapshot.image_path(folder, note_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (40, 20), "white").save(path)
@@ -76,10 +77,20 @@ def test_a_snapshot_is_a_note_with_its_picture_and_text(client: TestClient, monk
     assert client.get(f"/api/notes/{shot['id']}/image", headers=AUTH).status_code == 404
 
 
+def test_a_snapshot_says_your_keys(client: TestClient, monkeypatch):
+    take = fake_take("")
+    monkeypatch.setattr(snapshot, "take", take)
+    client.put("/api/settings", headers=AUTH, json={"shortcuts": {"snapshot": "Ctrl+Shift+F9"}})
+    client.post("/api/record/start", headers=AUTH, json={})
+
+    assert client.post("/api/record/snapshot", headers=AUTH).status_code == 200
+    assert take.keys == "Ctrl+Shift+F9"  # what it says to press when there's no right window
+
+
 def test_a_failed_snapshot_leaves_no_note(client: TestClient, monkeypatch):
     meeting_id = client.post("/api/record/start", headers=AUTH, json={}).json()["meeting_id"]
 
-    def broken(folder, note_id):
+    def broken(folder, note_id, keys):
         raise RuntimeError("There's no window to capture")
 
     monkeypatch.setattr(snapshot, "take", broken)
@@ -197,8 +208,8 @@ def test_a_call_in_a_browser_is_taken_only_when_its_window_is_certain(monkeypatc
 def test_no_call_app_and_zachcap_in_front_captures_nothing(monkeypatch):
     windows = [(20, 1, "ZachCap", True, False, False), (21, 7, "Inbox - Mail", True, False, False)]
     Windows(windows, front=20).install(monkeypatch)
-    with pytest.raises(snapshot.SnapshotError, match="front"):
-        snapshot.call_window()
+    with pytest.raises(snapshot.SnapshotError, match=r"front, then press Ctrl\+Alt\+P"):
+        snapshot.call_window("Ctrl+Alt+P")  # the keys picked in Settings
 
 
 def test_hidden_and_protected_windows_are_refused(monkeypatch):
@@ -240,7 +251,7 @@ def test_a_window_that_wont_draw_is_only_read_off_the_screen_when_in_front(monke
 def test_a_snapshot_keeps_a_small_picture_for_the_notes_list(tmp_path: Path, monkeypatch):
     from PIL import Image
 
-    monkeypatch.setattr(snapshot, "call_window", lambda: (5, "Shared screen"))
+    monkeypatch.setattr(snapshot, "call_window", lambda keys: (5, "Shared screen"))
     monkeypatch.setattr(snapshot, "grab", lambda hwnd: Image.new("RGB", (3840, 2160), "white"))
     monkeypatch.setattr(snapshot, "read_text", lambda image: "")
     snapshot.take(tmp_path, 3)
@@ -278,7 +289,7 @@ def test_note_ids_from_before_the_counter_are_never_given_out_again(tmp_path: Pa
 def test_the_small_picture_is_served_for_the_list(client: TestClient, monkeypatch):
     client.post("/api/record/start", headers=AUTH, json={})
 
-    def take(folder: Path, note_id: int) -> dict:
+    def take(folder: Path, note_id: int, keys: str) -> dict:
         from PIL import Image
 
         path = snapshot.image_path(folder, note_id)

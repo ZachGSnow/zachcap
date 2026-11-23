@@ -19,6 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { usePoll } from "@/hooks/usePoll";
 import { api, type ActionItem, type KeyStatus, type Meeting, type Settings, type Stats } from "@/lib/engine";
 import { STATUS_LABEL, day, dayGroup, hours, minutes, personColor, when } from "@/lib/format";
+import { useKeys } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
 
 const GROUPS = ["Today", "Yesterday", "This week", "This month", "Earlier"];
@@ -52,11 +53,12 @@ function SetupChecklist({
   onSettings: () => void;
   onImport: () => void;
 }) {
+  const record = useKeys().record;
   const steps = [
     { done: keys.huggingface !== "not set", label: "Add a Hugging Face token", hint: "Tells speakers apart. Free; accept the model's terms first.", action: onSettings },
     { done: keys.anthropic !== "not set", label: "Add your Anthropic API key", hint: "Summaries, action items and Ask. A few cents per meeting.", action: onSettings },
     { done: soundChecked, label: "Check your sound", hint: "Four seconds in Settings: your mic and the computer's audio, heard before a call depends on it.", action: onSettings },
-    { done: hasMeetings, label: "Record or import your first meeting", hint: "Press Record (Ctrl+Alt+R) on a call, or import a Teams recording.", action: onImport },
+    { done: hasMeetings, label: "Record or import your first meeting", hint: `Press Record (${record}) on a call, or import a Teams recording.`, action: onImport },
   ];
   if (steps.every((s) => s.done)) return null;
   return (
@@ -169,6 +171,7 @@ export function MeetingsView({
   const { data: keys } = usePoll(() => api<KeyStatus>("/api/keys"), 10_000);
   const { data: settings } = usePoll(() => api<Settings>("/api/settings"), 0);
   const me = settings?.me.name ?? "You";
+  const shortcutKeys = useKeys();
 
   return (
     <ScrollArea className="min-h-0 flex-1">
@@ -241,7 +244,7 @@ export function MeetingsView({
             </div>
             <p className="mt-5 font-medium">No meetings yet</p>
             <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-              Press Record when your call starts (or Ctrl+Alt+R from anywhere), or import a recording you already
+              Press Record when your call starts (or {shortcutKeys.record} from anywhere), or import a recording you already
               have. No bots, no calendar.
             </p>
           </div>

@@ -87,8 +87,11 @@ fn restart_engine(engine: tauri::State<Engine>) -> Result<(), String> {
 /// it's visible even with the window closed.
 #[tauri::command]
 fn set_recording_indicator(app: AppHandle, recording: bool) {
+    if let Some(keys) = app.try_state::<Keys>() {
+        keys.0.lock().unwrap().recording = recording;
+    }
     #[cfg(desktop)]
-    hold_recording_shortcuts(&app, recording);
+    sync_keys(&app, Vec::new(), false);
     let Some(tray) = app.tray_by_id("main") else {
         return;
     };
@@ -106,73 +109,225 @@ fn set_recording_indicator(app: AppHandle, recording: bool) {
     }
 }
 
-/// Ctrl+Alt+B (bookmark) and Ctrl+Alt+S (snapshot) only mean something during a
-/// recording, so they are held only then: the rest of the time Word, an IDE, or a keyboard
-/// whose AltGr+S types a letter keep them. Ctrl+Alt+R (start or stop) is always held.
-#[cfg(desktop)]
-fn recording_shortcuts() -> [(tauri_plugin_global_shortcut::Shortcut, &'static str); 2] {
-    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
-    [
-        (
-            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyB),
-            "Ctrl+Alt+B",
-        ),
-        (
-            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyS),
-            "Ctrl+Alt+S",
-        ),
-    ]
+/// The global shortcuts, with their default keys, in the order Settings lists them.
+/// Settings can change the keys; the page passes them on (set_shortcuts).
+const ACTIONS: [(&str, &str); 4] = [
+    ("record", "Ctrl+Alt+R"),
+    ("bookmark", "Ctrl+Alt+B"),
+    ("snapshot", "Ctrl+Alt+S"),
+    ("dictate", "Ctrl+Alt+D"),
+];
+
+/// Which keys each shortcut has, and what decides when each is held: start or stop
+/// recording always; bookmark and snapshot only while recording (the rest of the time Word,
+/// an IDE, or a keyboard whose AltGr+S types a letter keep them); dictate only while
+/// dictation is on.
+#[derive(Default)]
+struct KeyState {
+    /// Keys picked in Settings, by shortcut ("Ctrl+Alt+P"); the default where absent.
+    keys: std::collections::HashMap<String, String>,
+    recording: bool,
+    dictation: bool,
+    /// While Settings waits for new keys, ZachCap lets go of its own so the page gets them.
+    paused: bool,
 }
 
-#[cfg(desktop)]
-fn hold_recording_shortcuts(app: &AppHandle, recording: bool) {
-    use tauri_plugin_global_shortcut::GlobalShortcutExt;
-    let shortcuts = app.global_shortcut();
-    for (shortcut, keys) in recording_shortcuts() {
-        let held = shortcuts.is_registered(shortcut);
-        let result = if recording && !held {
-            shortcuts.register(shortcut)
-        } else if !recording && held {
-            shortcuts.unregister(shortcut)
-        } else {
-            Ok(())
-        };
-        if let Err(error) = result {
-            // Another app may own the combination; the tray menu still works.
-            eprintln!("{keys} is unavailable: {error}");
-        }
+impl KeyState {
+    fn keys_for(&self, action: &str) -> String {
+        self.keys.get(action).cloned().unwrap_or_else(|| {
+            let (_, default) = ACTIONS.iter().find(|(name, _)| *name == action).unwrap();
+            default.to_string()
+        })
+    }
+
+    fn wanted(&self, action: &str) -> bool {
+        !self.paused
+            && match action {
+                "record" => true,
+                "bookmark" | "snapshot" => self.recording,
+                "dictate" => self.dictation,
+                _ => false,
+            }
     }
 }
 
-/// Ctrl+Alt+D: hold to dictate. Held only while dictation is on in Settings.
+struct Keys(Mutex<KeyState>);
+
+/// What Settings shows for a shortcut.
+#[derive(Clone, Serialize)]
+struct KeyStatus {
+    action: String,
+    keys: String,
+    /// "on" (held now), "free" (not needed now, and no other app has the keys), "off" (not
+    /// needed now, not checked), "taken" (another app has the keys) or "invalid".
+    state: &'static str,
+}
+
+/// "Ctrl+Alt+R" as the plugin reads it (it calls the Windows key Super).
 #[cfg(desktop)]
-fn dictation_shortcut() -> tauri_plugin_global_shortcut::Shortcut {
-    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
-    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyD)
+fn parse_keys(keys: &str) -> Option<tauri_plugin_global_shortcut::Shortcut> {
+    keys.split('+')
+        .map(|part| match part.trim() {
+            win if win.eq_ignore_ascii_case("win") => "Super",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+        .parse()
+        .ok()
+}
+
+/// Holds the shortcuts wanted now, lets go of the rest and of keys no longer used
+/// (`retired`), and says how each one is. With `probe`, a shortcut not needed now is held
+/// and let go at once, to learn whether another app has its keys. The plugin is called
+/// without our lock held, since its handler takes the lock.
+#[cfg(desktop)]
+fn sync_keys(app: &AppHandle, retired: Vec<String>, probe: bool) -> Vec<KeyStatus> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let Some(keys) = app.try_state::<Keys>() else {
+        return Vec::new();
+    };
+    let plan: Vec<(String, String, bool)> = {
+        let state = keys.0.lock().unwrap();
+        ACTIONS
+            .iter()
+            .map(|(action, _)| {
+                (
+                    action.to_string(),
+                    state.keys_for(action),
+                    state.wanted(action),
+                )
+            })
+            .collect()
+    };
+    let shortcuts = app.global_shortcut();
+    for old in retired.iter().filter_map(|old_keys| parse_keys(old_keys)) {
+        if shortcuts.is_registered(old) {
+            let _ = shortcuts.unregister(old);
+        }
+    }
+    plan.into_iter()
+        .map(|(action, keys, wanted)| {
+            let state = match parse_keys(&keys) {
+                None => "invalid",
+                Some(shortcut) => {
+                    let held = shortcuts.is_registered(shortcut);
+                    if wanted && !held {
+                        match shortcuts.register(shortcut) {
+                            Ok(()) => "on",
+                            Err(error) => {
+                                // Another app owns the combination; the tray menu still works.
+                                eprintln!("{keys} is unavailable: {error}");
+                                "taken"
+                            }
+                        }
+                    } else if wanted {
+                        "on"
+                    } else {
+                        if held {
+                            let _ = shortcuts.unregister(shortcut);
+                        }
+                        if !probe {
+                            "off"
+                        } else if shortcuts.register(shortcut).is_ok() {
+                            let _ = shortcuts.unregister(shortcut);
+                            "free"
+                        } else {
+                            "taken"
+                        }
+                    }
+                }
+            };
+            KeyStatus {
+                action,
+                keys,
+                state,
+            }
+        })
+        .collect()
+}
+
+/// Which shortcut, if any, has these keys now.
+#[cfg(desktop)]
+fn action_for(
+    app: &AppHandle,
+    shortcut: &tauri_plugin_global_shortcut::Shortcut,
+) -> Option<&'static str> {
+    let keys = app.try_state::<Keys>()?;
+    let state = keys.0.lock().unwrap();
+    ACTIONS
+        .iter()
+        .map(|(action, _)| *action)
+        .find(|action| parse_keys(&state.keys_for(action)).as_ref() == Some(shortcut))
+}
+
+/// The keys picked in Settings (the page passes them on at start and on every change).
+/// Returns how each shortcut is, for Settings.
+#[tauri::command]
+fn set_shortcuts(
+    app: AppHandle,
+    keys: std::collections::HashMap<String, String>,
+) -> Vec<KeyStatus> {
+    let retired = {
+        let Some(held) = app.try_state::<Keys>() else {
+            return Vec::new();
+        };
+        let mut state = held.0.lock().unwrap();
+        let before: Vec<String> = ACTIONS
+            .iter()
+            .map(|(action, _)| state.keys_for(action))
+            .collect();
+        state.keys = keys;
+        state.paused = false;
+        let after: Vec<String> = ACTIONS
+            .iter()
+            .map(|(action, _)| state.keys_for(action))
+            .collect();
+        before
+            .into_iter()
+            .filter(|keys| !after.contains(keys))
+            .collect::<Vec<_>>()
+    };
+    #[cfg(desktop)]
+    return sync_keys(&app, retired, true);
+    #[cfg(not(desktop))]
+    {
+        let _ = retired;
+        Vec::new()
+    }
+}
+
+/// How each shortcut is now, for Settings (checking the ones not needed now).
+#[tauri::command]
+fn shortcut_status(app: AppHandle) -> Vec<KeyStatus> {
+    #[cfg(desktop)]
+    return sync_keys(&app, Vec::new(), true);
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+        Vec::new()
+    }
+}
+
+/// Settings is waiting for new keys: let go of ZachCap's own until it's done, so pressing
+/// one of them reaches the page instead of starting a recording.
+#[tauri::command]
+fn pause_shortcuts(app: AppHandle, paused: bool) {
+    if let Some(keys) = app.try_state::<Keys>() {
+        keys.0.lock().unwrap().paused = paused;
+    }
+    #[cfg(desktop)]
+    sync_keys(&app, Vec::new(), false);
 }
 
 /// Dictation turned on or off in Settings (the page says so at start and on every change).
 #[tauri::command]
 fn set_dictation(app: AppHandle, enabled: bool) {
-    #[cfg(desktop)]
-    {
-        use tauri_plugin_global_shortcut::GlobalShortcutExt;
-        let shortcuts = app.global_shortcut();
-        let shortcut = dictation_shortcut();
-        let held = shortcuts.is_registered(shortcut);
-        let result = if enabled && !held {
-            shortcuts.register(shortcut)
-        } else if !enabled && held {
-            shortcuts.unregister(shortcut)
-        } else {
-            Ok(())
-        };
-        if let Err(error) = result {
-            eprintln!("Ctrl+Alt+D is unavailable: {error}");
-        }
+    if let Some(keys) = app.try_state::<Keys>() {
+        keys.0.lock().unwrap().dictation = enabled;
     }
-    #[cfg(not(desktop))]
-    let _ = (app, enabled);
+    #[cfg(desktop)]
+    sync_keys(&app, Vec::new(), false);
 }
 
 /// The app icon with a red recording dot (and a white ring) in its bottom-right corner.
@@ -421,50 +576,31 @@ pub fn run() {
                 }
             });
 
-            // Ctrl+Alt+R starts or stops recording, from anywhere; while recording,
-            // Ctrl+Alt+B bookmarks the moment and Ctrl+Alt+S takes a snapshot of the call
-            // (held only then: see hold_recording_shortcuts). Handed to the page like the tray
-            // menu, so the window's state stays in sync.
+            // The global shortcuts (see KeyState): start or stop recording from anywhere;
+            // while recording, bookmark the moment and snapshot the call; hold to dictate.
+            // Handed to the page like the tray menu, so the window's state stays in sync.
+            app.manage(Keys(Mutex::new(KeyState::default())));
             #[cfg(desktop)]
             {
-                use tauri_plugin_global_shortcut::{
-                    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-                };
-                let toggle = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyR);
-                let [(bookmark, _), (snapshot, _)] = recording_shortcuts();
-                let dictate = dictation_shortcut();
+                use tauri_plugin_global_shortcut::ShortcutState;
                 app.handle().plugin(
                     tauri_plugin_global_shortcut::Builder::new()
                         .with_handler(move |app, shortcut, event| {
-                            // Dictation listens while the keys are held: down starts, up stops.
-                            if shortcut == &dictate {
-                                let _ = app.emit(
-                                    if event.state() == ShortcutState::Pressed {
-                                        "dictate-start"
-                                    } else {
-                                        "dictate-stop"
-                                    },
-                                    (),
-                                );
-                                return;
-                            }
-                            if event.state() != ShortcutState::Pressed {
-                                return;
-                            }
-                            if shortcut == &toggle {
-                                let _ = app.emit("toggle-recording", ());
-                            } else if shortcut == &bookmark {
-                                let _ = app.emit("bookmark", ());
-                            } else if shortcut == &snapshot {
-                                let _ = app.emit("snapshot", ());
-                            }
+                            let pressed = event.state() == ShortcutState::Pressed;
+                            let event = match action_for(app, shortcut) {
+                                // Dictation listens while the keys are held: down starts, up stops.
+                                Some("dictate") if pressed => "dictate-start",
+                                Some("dictate") => "dictate-stop",
+                                Some("record") if pressed => "toggle-recording",
+                                Some("bookmark") if pressed => "bookmark",
+                                Some("snapshot") if pressed => "snapshot",
+                                _ => return,
+                            };
+                            let _ = app.emit(event, ());
                         })
                         .build(),
                 )?;
-                if let Err(error) = app.global_shortcut().register(toggle) {
-                    // Another app may own the combination; the tray menu still works.
-                    eprintln!("Ctrl+Alt+R is unavailable: {error}");
-                }
+                sync_keys(app.handle(), Vec::new(), false);
             }
 
             let record = MenuItem::with_id(app, "record", "Start or stop recording", true, None::<&str>)?;
@@ -526,7 +662,10 @@ pub fn run() {
             restart_engine,
             open_data_folder,
             set_recording_indicator,
-            set_dictation
+            set_dictation,
+            set_shortcuts,
+            shortcut_status,
+            pause_shortcuts
         ])
         .build(tauri::generate_context!())
         .expect("error while building ZachCap")
