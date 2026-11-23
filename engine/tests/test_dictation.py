@@ -85,6 +85,28 @@ def test_text_is_typed_as_characters_never_as_enter_or_tab():
     assert dictation.printable(" Call\r\nback\tat  noon. ") == "Call back at noon."
 
 
+@pytest.mark.parametrize(
+    ("said", "typed"),
+    [
+        ("Um, the printer is back online.", "The printer is back online."),
+        (
+            "The uh DNS record was wrong, hmm, on the old server.",
+            "The DNS record was wrong, on the old server.",
+        ),
+        ("Call Dana at three. Scratch that. Call Dana at four.", "Call Dana at four."),
+        ("Call Dana at three. Scratch that, call her at four.", "Call her at four."),
+        ("Reset the password. Call Dana at three, scratch that.", "Reset the password."),
+        ("Scratch that.", ""),
+        (
+            "Took the ER visit notes. Ah, and 5 mm screws.",
+            "Took the ER visit notes. Ah, and 5 mm screws.",
+        ),
+    ],
+)
+def test_what_you_say_is_tidied_on_this_pc(said: str, typed: str):
+    assert dictation.tidy(said) == typed
+
+
 def test_audio_is_resampled_to_16k_mono():
     stereo = np.zeros((48000, 2), np.int16)
     stereo[:, 0] = 1000

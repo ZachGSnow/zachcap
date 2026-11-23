@@ -173,6 +173,38 @@ class Transcriber:
         return " ".join(segment.text.strip() for segment in segments).strip()
 
 
+# Sounds, not words: dropped from dictation (lowercase, or capitalized at a sentence's
+# start; "ER" and "Ah" are left alone, and so is "mm" for millimetres).
+FILLERS = re.compile(r"(?<![\w'])(?:[Uu]m+|[Uu]h+|[Uu]hm|[Ee]rm|[Hh]mm+)(?![\w'])[,.]?\s*")
+SCRATCH = re.compile(r"(?i)^scratch that\b[\s,.;:!-]*")
+SCRATCHED = re.compile(r"(?i)[,;:]?\s*\bscratch that\W*$")
+
+
+def _capital(sentence: str) -> str:
+    return sentence[:1].upper() + sentence[1:]
+
+
+def tidy(text: str) -> str:
+    """What was said, tidied on this PC: filler sounds (um, uh) go, and "scratch that" takes
+    back the sentence before it ("Call at three. Scratch that, call at four." is "Call at
+    four."), or the one it ends. A sentence that lost its first word starts with a capital
+    again; anything else is left as said."""
+    kept: list[str] = []
+    for said in re.split(r"(?<=[.!?])\s+", text.strip()):
+        sentence = FILLERS.sub("", said).strip()
+        if SCRATCH.match(sentence):
+            if kept:
+                kept.pop()
+            sentence = _capital(SCRATCH.sub("", sentence))
+        elif SCRATCHED.search(sentence):
+            continue
+        elif sentence[:1] != said.strip()[:1] and said.strip()[:1].isupper():
+            sentence = _capital(sentence)
+        if sentence:
+            kept.append(sentence)
+    return " ".join(kept)
+
+
 def cue(text: str) -> str:
     """Words as a snippet's cue is matched: lowercase, no punctuation ("Reboot note." is
     "reboot note")."""
@@ -583,6 +615,7 @@ class Dictation:
         text = self.transcriber.text(audio, language, hotwords)
         if fix is not None and text:
             text = fix(text)
+        text = tidy(text) if text else text
         text = printable(snippets.get(cue(text), text) if text else text)
         typed, why = 0, None
         if text and type_it:
