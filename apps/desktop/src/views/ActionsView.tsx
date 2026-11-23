@@ -1,7 +1,7 @@
 import { ListChecks } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import { ActionRow } from "@/components/SummaryPanel";
+import { ActionRow, toggleAction } from "@/components/SummaryPanel";
 import { StatCard } from "@/components/Visuals";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -38,7 +38,7 @@ export function ActionsView({ onOpen }: { onOpen: (meetingId: number, at?: numbe
   }, [shown]);
 
   const toggle = async (item: ActionItem) => {
-    await api(`/api/actions/${item.id}`, { method: "PATCH", json: { status: item.status === "done" ? "open" : "done" } });
+    await toggleAction(item);
     await refresh();
   };
 

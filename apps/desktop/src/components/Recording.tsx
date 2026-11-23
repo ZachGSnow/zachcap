@@ -1,5 +1,6 @@
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Circle, Mic, Square } from "lucide-react";
+import { Circle, Mic, Square, TriangleAlert } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -16,8 +17,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type RecordState } from "@/lib/engine";
+import { announce, notify, windowShowing } from "@/lib/feedback";
 import { clock, levelPercent } from "@/lib/format";
-
 
 type RecordingContext = {
   state: RecordState | undefined;
@@ -51,7 +52,7 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
   const stop = useCallback(async () => {
     const { meeting_id } = await api<{ meeting_id: number }>("/api/record/stop", { method: "POST" });
     await refresh();
-    toast.success("Recording saved", { description: "Transcribing and finding speakers..." });
+    void announce("Recording saved", "Transcribing and finding speakers...", "success");
     onSaved(meeting_id);
     return meeting_id;
   }, [refresh, onSaved]);
@@ -65,14 +66,21 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
       if (current.recording) await stop();
       else {
         await start("");
-        toast("Recording started", { description: "Press Ctrl+Alt+R again to stop." });
+        void announce("Recording started", "Press Ctrl+Alt+R again to stop.");
       }
     } catch (error) {
-      toast.error("Recording didn't change", { description: String(error) });
+      // From the tray or the hotkey the window may be hidden: say it where it will be seen.
+      void announce("Recording didn't change", String(error), "error");
     } finally {
       busy.current = false;
     }
   }, [start, stop]);
+
+  // The tray icon's tooltip says when a recording is running, even with the window closed.
+  const recording = state?.recording ?? false;
+  useEffect(() => {
+    if (isTauri()) void invoke("set_recording_indicator", { recording }).catch(() => undefined);
+  }, [recording]);
 
   // The tray menu and Ctrl+Alt+R (both registered by the Rust shell) toggle recording,
   // even when the window is hidden in the tray.
@@ -105,8 +113,15 @@ export function CallWatcher() {
       prompted.current = "";
       return;
     }
-    if (recording || prompted.current === key) return;
+    if (prompted.current === key) return;
+    // Recording already (or stopped while still on the call): don't offer this call again.
     prompted.current = key;
+    if (recording) return;
+    if (!(await windowShowing())) {
+      // Toasts wait in a hidden window; a Windows notification is seen right away.
+      await notify(`${apps[0]} is using your microphone`, "Press Ctrl+Alt+R to record this call.");
+      return;
+    }
     toast(`${apps[0]} is using your microphone`, {
       description: "Looks like a call started. Record it?",
       duration: 20_000,
@@ -234,6 +249,12 @@ export function RecordingBar() {
         <Meter label="You" dbfs={state.levels.mic} />
         <Meter label="Meeting" dbfs={state.levels.system} />
       </div>
+      {state.errors && state.errors.length > 0 && (
+        <span className="flex min-w-0 items-center gap-1.5 text-xs text-destructive" title={state.errors.join("\n")}>
+          <TriangleAlert className="size-3.5 shrink-0" />
+          <span className="truncate">{state.errors[0]}</span>
+        </span>
+      )}
       <Button size="sm" variant="destructive" className="ml-auto" disabled={stopping} onClick={() => void finish()}>
         <Square className="size-3.5 fill-current" />
         {stopping ? "Saving..." : "Stop"}

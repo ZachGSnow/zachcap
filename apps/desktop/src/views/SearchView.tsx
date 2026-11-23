@@ -42,12 +42,17 @@ export function SearchView({ onOpen }: { onOpen: (meetingId: number, at?: number
       setHits(null);
       return;
     }
+    // Answers for older text arriving late must not replace the results for what's typed now.
+    let stale = false;
     const timer = window.setTimeout(() => {
       api<SearchHit[]>(`/api/search?q=${encodeURIComponent(words.join(" "))}`)
-        .then(setHits)
-        .catch(() => setHits([]));
+        .then((found) => !stale && setHits(found))
+        .catch(() => !stale && setHits([]));
     }, 200);
-    return () => window.clearTimeout(timer);
+    return () => {
+      stale = true;
+      window.clearTimeout(timer);
+    };
   }, [query]);
 
   return (

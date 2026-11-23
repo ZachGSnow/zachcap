@@ -49,6 +49,7 @@ export function dayGroup(iso: string): string {
 }
 
 export const STATUS_LABEL: Record<MeetingStatus, string> = {
+  recording: "Recording",
   recorded: "Recorded",
   processing: "Processing",
   needs_names: "Needs names",

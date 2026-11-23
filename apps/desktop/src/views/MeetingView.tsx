@@ -41,6 +41,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { usePoll } from "@/hooks/usePoll";
 import { api, mediaUrl, type MeetingDetail, type Person, type Speaker } from "@/lib/engine";
+import { attempt, copyText } from "@/lib/feedback";
 import { clock, colorMap, minutes, when } from "@/lib/format";
 import { StatusBadge } from "@/views/MeetingsView";
 
@@ -49,7 +50,7 @@ const TRACK_LABEL: Record<Track, string> = { mix: "Everyone", mic: "Your mic onl
 
 export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBack: () => void }) {
   const [busy, setBusy] = useState(false);
-  const { data, refresh } = usePoll(() => api<MeetingDetail>(`/api/meetings/${id}`), busy ? 1500 : 0, id);
+  const { data, error, refresh } = usePoll(() => api<MeetingDetail>(`/api/meetings/${id}`), busy ? 1500 : 0, id);
   const { data: people = [], refresh: refreshPeople } = usePoll(() => api<Person[]>("/api/people"), 0);
   const audio = useRef<HTMLAudioElement>(null);
   const [player, setPlayer] = useState<PlayerState>({ playing: false, time: 0, duration: 0, rate: 1 });
@@ -59,11 +60,18 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   const [title, setTitle] = useState("");
   const [renaming, setRenaming] = useState<Speaker | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
   const pendingSeek = useRef<{ time: number; play: boolean } | null>(at != null ? { time: at, play: false } : null);
 
   const meeting = data?.meeting;
-  const processing = meeting?.status === "processing" || meeting?.progress === "queued";
-  useEffect(() => setBusy(processing ?? false), [processing]);
+  const progress = meeting?.progress ?? null;
+  const failedNow = progress?.startsWith("failed:") ?? false;
+  // A job is running only while the engine reports on it. "processing" or "recorded" with
+  // nothing reported means it was cut off (ZachCap closed mid-job) and can be run again.
+  const processing = progress === "queued" || (meeting?.status === "processing" && progress != null && !failedNow);
+  const stalled = !processing && (meeting?.status === "processing" || meeting?.status === "recorded");
+  useEffect(() => setBusy(processing), [processing]);
   useEffect(() => {
     if (data && tab === null) setTab(data.summary ? "summary" : "transcript");
   }, [data, tab]);
@@ -112,7 +120,12 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
       if (!inside) {
         const next = soloSegments.find((s) => s.start > t);
         if (next) element.currentTime = next.start;
-        else element.pause();
+        else {
+          // Past their last line: back to their first, so Play starts over instead of stalling.
+          element.pause();
+          element.currentTime = soloSegments[0].start;
+          toast(`That was ${solo}'s last line`, { description: "Play starts again from their first." });
+        }
       }
     }
     sync(element);
@@ -121,14 +134,23 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   const seek = useCallback((seconds: number) => {
     const element = audio.current;
     if (!element) return;
+    if (element.readyState === 0) {
+      // Still loading (the first open of a long meeting builds its audio): seek once it can.
+      pendingSeek.current = { time: seconds, play: true };
+      return;
+    }
     element.currentTime = seconds;
     void element.play();
   }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (event.code !== "Space" || event.defaultPrevented || event.repeat) return;
       const target = event.target as HTMLElement;
-      if (event.code !== "Space" || ["INPUT", "TEXTAREA", "BUTTON"].includes(target.tagName)) return;
+      if (target.closest("input, textarea, select, [contenteditable], [role=menu], [role=menuitem], [role=dialog], [role=listbox]")) {
+        return;
+      }
+      // Also stops Space from clicking whichever button was clicked last.
       event.preventDefault();
       const element = audio.current;
       if (!element) return;
@@ -140,13 +162,16 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   }, []);
 
   const reprocess = async () => {
-    await api(`/api/meetings/${id}/process`, { method: "POST" });
-    setBusy(true);
-    await refresh();
+    if (await attempt("Couldn't start processing", () => api(`/api/meetings/${id}/process`, { method: "POST" }))) {
+      setBusy(true);
+      await refresh();
+    }
   };
 
   const summarize = async () => {
+    if (summarizing) return;
     setTab("summary");
+    setSummarizing(true);
     const toastId = toast.loading("Summarizing with Claude...");
     try {
       await api(`/api/meetings/${id}/summary`, { method: "POST" });
@@ -154,39 +179,64 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
       await refresh();
     } catch (error) {
       toast.error("Couldn't create the summary", { id: toastId, description: String(error) });
+    } finally {
+      setSummarizing(false);
     }
   };
 
   const saveTitle = async () => {
     setEditingTitle(false);
     if (!title.trim() || title.trim() === meeting?.title) return;
-    await api(`/api/meetings/${id}`, { method: "PATCH", json: { title: title.trim() } });
+    await attempt("Couldn't rename the meeting", () =>
+      api(`/api/meetings/${id}`, { method: "PATCH", json: { title: title.trim() } }),
+    );
     await refresh();
   };
 
   const copyTranscript = () => {
     const text = (data?.segments ?? []).map((s) => `[${clock(s.start)}] ${s.speaker}: ${s.text}`).join("\n");
-    void navigator.clipboard.writeText(`${meeting?.title}\n\n${text}`);
-    toast.success("Transcript copied");
+    void copyText(`${meeting?.title}\n\n${text}`, "Transcript copied");
   };
 
   const remove = async () => {
-    await api(`/api/meetings/${id}`, { method: "DELETE" });
+    setDeleting(true);
+    const removed = await attempt("Couldn't delete the meeting", () => api(`/api/meetings/${id}`, { method: "DELETE" }));
+    setDeleting(false);
+    if (!removed) return;
     toast.success("Meeting deleted", { description: "Its audio, transcript and the voice samples it taught were removed." });
     onBack();
   };
 
   const nameSpeaker = async (speaker: Speaker, name: string) => {
-    await api(`/api/meetings/${id}/speakers/${speaker.id}/name`, { method: "POST", json: { name } });
-    toast.success(`${speaker.display_name} is now ${name}`);
+    const named = await attempt(`Couldn't name ${speaker.display_name}`, () =>
+      api(`/api/meetings/${id}/speakers/${speaker.id}/name`, { method: "POST", json: { name } }),
+    );
+    if (named) toast.success(`${speaker.display_name} is now ${name}`);
     refreshAll();
   };
 
   const confirmAll = async () => {
-    const { confirmed } = await api<{ confirmed: number }>(`/api/meetings/${id}/confirm`, { method: "POST" });
-    toast.success(`Confirmed ${confirmed} speaker${confirmed === 1 ? "" : "s"}`);
+    await attempt("Couldn't confirm the matches", async () => {
+      const { confirmed } = await api<{ confirmed: number }>(`/api/meetings/${id}/confirm`, { method: "POST" });
+      toast.success(`Confirmed ${confirmed} speaker${confirmed === 1 ? "" : "s"}`);
+    });
     refreshAll();
   };
+
+  if (!data && error) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+        <p className="font-medium">This meeting didn't load</p>
+        <p className="max-w-md text-sm text-muted-foreground">{error.message}</p>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={onBack}>
+            Back
+          </Button>
+          <Button onClick={() => void refresh()}>Try again</Button>
+        </div>
+      </div>
+    );
+  }
 
   if (!data || !meeting) {
     return (
@@ -248,8 +298,8 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
         </div>
         <StatusBadge meeting={meeting} />
         {!data.summary && data.segments.length > 0 && !processing && (
-          <Button size="sm" onClick={() => void summarize()}>
-            <Sparkles className="size-3.5" />
+          <Button size="sm" disabled={summarizing} onClick={() => void summarize()}>
+            {summarizing ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
             Summarize
           </Button>
         )}
@@ -282,12 +332,30 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
           {processing && (
             <div className="mb-4 flex items-center gap-2 rounded-xl border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" />
-              {meeting.progress === "queued" ? "Waiting for the GPU..." : (meeting.progress ?? "Working...")}
+              {progress === "queued" ? "Waiting for the GPU..." : (progress ?? "Working...")}
+            </div>
+          )}
+          {stalled && (
+            <div className="mb-4 flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-sm">
+              <span className="flex-1">
+                {meeting.status === "processing"
+                  ? "Processing stopped when ZachCap closed."
+                  : "This recording hasn't been processed yet."}
+              </span>
+              <Button size="sm" onClick={() => void reprocess()}>
+                <RotateCw className="size-3.5" />
+                Process now
+              </Button>
             </div>
           )}
           {meeting.status === "failed" && (
             <div className="mb-4 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
-              Processing failed{meeting.progress ? `: ${meeting.progress.replace(/^failed: /, "")}` : "."}
+              Processing failed{progress ? `: ${progress.replace(/^failed: /, "")}` : "."}
+            </div>
+          )}
+          {failedNow && meeting.status !== "failed" && (
+            <div className="mb-4 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
+              Reprocessing failed: {progress?.replace(/^failed: /, "")} The previous transcript is kept.
             </div>
           )}
 
@@ -319,18 +387,20 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
               <TabsTrigger value="ask">Ask</TabsTrigger>
             </TabsList>
 
-            <TabsContent value="ask">
+            {/* Kept mounted, so questions and an answer still on its way survive a tab switch. */}
+            <TabsContent value="ask" forceMount className="data-[state=inactive]:hidden">
               <AskPanel meetingId={id} onSeek={seek} />
             </TabsContent>
 
             <TabsContent value="summary">
               <SummaryPanel
-                meetingId={id}
                 title={meeting.title}
                 summary={data.summary}
                 items={data.action_items}
                 me={data.me}
                 colorOf={colorOf}
+                summarizing={summarizing}
+                onSummarize={() => void summarize()}
                 onSeek={seek}
                 onChanged={() => void refresh()}
               />
@@ -465,7 +535,8 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
             <Button variant="outline" onClick={() => setConfirmDelete(false)}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={() => void remove()}>
+            <Button variant="destructive" disabled={deleting} onClick={() => void remove()}>
+              {deleting && <Loader2 className="size-4 animate-spin" />}
               Delete
             </Button>
           </DialogFooter>

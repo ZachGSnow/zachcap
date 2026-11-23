@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 /** Connection to the local Python engine (127.0.0.1 only, token-protected). */
 export type EngineInfo = { port: number; token: string };
 
-export type MeetingStatus = "recorded" | "processing" | "needs_names" | "ready" | "failed";
+export type MeetingStatus = "recording" | "recorded" | "processing" | "needs_names" | "ready" | "failed";
 
 export type Meeting = {
   id: number;
@@ -124,6 +124,7 @@ export type RecordState =
       elapsed: number;
       levels: { mic: number; system: number };
       devices?: { mic: string; system: string };
+      errors?: string[];
     };
 
 export type KeyStatus = Record<"anthropic" | "huggingface", string>;

@@ -23,11 +23,13 @@ const NAV = [
 export function Sidebar({
   view,
   openActions,
+  engineOk,
   onNavigate,
   onImport,
 }: {
   view: View;
   openActions: number;
+  engineOk: boolean;
   onNavigate: (view: View) => void;
   onImport: () => void;
 }) {
@@ -73,8 +75,8 @@ export function Sidebar({
         ))}
       </nav>
       <div className="mt-auto flex items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
-        <span className="size-1.5 rounded-full bg-emerald-500" />
-        Local engine running
+        <span className={cn("size-1.5 rounded-full", engineOk ? "bg-emerald-500" : "animate-pulse bg-red-500")} />
+        {engineOk ? "Local engine running" : "Engine not responding"}
       </div>
     </aside>
   );
