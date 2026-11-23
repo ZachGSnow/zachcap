@@ -132,11 +132,13 @@ Not verified yet: a live two-track recording of a real Teams call (capture was t
 
 ## Roadmap
 
-- Live captions during the call, on a small CPU model so the GPU stays free for processing
-- Capture one app only (process loopback) instead of all computer audio
-- A weekly digest of open commitments
-- Slide capture with on-device text recognition
-- Signed installer with automatic updates
+Researched and planned in [docs/PLAN.md](docs/PLAN.md#13-next-from-competitor-research-2026-11-23):
+
+- Record every speaker and headset, so a call on a non-default device or a mid-call switch isn't lost
+- Capture health warnings, keeping the PC awake while recording, and a smart stop when the call ends
+- Your own summary templates and one-click documents; redact a moment (a password read aloud); fix a line's words
+- A daily and weekly digest with draft time entries; markers where your name was said; a watch folder for recordings
+- Later: push-to-talk dictation for ticket notes, shared-screen snapshots with on-device text recognition, live transcript, signed installer
 
 ## License
 

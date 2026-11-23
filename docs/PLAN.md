@@ -306,5 +306,40 @@ The cost shown next to each answer prices every attempt at the rates of the mode
 
 Tests: 32 at v0.1, 95 now. CI no longer installs the GPU stack and checks `uv.lock`.
 
-Next: live captions on a small CPU model, one-app capture (process loopback), a weekly digest of
-open commitments, slide capture with on-device OCR, signed installer.
+## 13. Next, from competitor research (2026-11-23)
+
+Surveyed the current feature pages and changelogs of Granola, Otter, Fireflies, Fathom, tl;dv,
+Krisp, Jamie, Read.ai, Bluedot, Tactiq, Notion AI meeting notes, Teams Premium, Zoom AI
+Companion, Meetily, anarlog (formerly Hyprnote/Char), Screenpipe, MacWhisper, Superwhisper,
+Wispr Flow and the Recall.ai desktop SDK. ZachCap already matches them on summaries, action
+items, asking across meetings and MCP; the gaps are in capture reliability, help during the
+call, and output workflows. Ruled out by the constraints: calendar-driven features, bots,
+virtual audio or camera drivers, mobile apps.
+
+**Measured before planning: one-app capture can't record Teams.** WASAPI process loopback
+(`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) works from Python through comtypes on the test
+laptop: it streams continuously (4.00 s of audio in 4.00 s) and isolates one process (the
+target at RMS 0.044, a second process at 0.000). But it returns silence for the Teams desktop
+app, an open issue in Microsoft's own sample
+([Windows-classic-samples#414](https://github.com/microsoft/Windows-classic-samples/issues/414)),
+where communications-category audio was reproduced as silent on build 26200. So the roadmap's
+"one-app capture" is dropped in favor of capturing every output device.
+
+Build order (each its own pull request, then a review round):
+
+| # | Feature | Why | Who has it | Size |
+|---|---|---|---|---|
+| 1 | **Every speaker and headset**: loopback from all active output devices, mixed on one timeline by packet timestamps; devices plugged in mid-call join, unplugged ones drop out; 24-bit so quiet calls keep detail | Recording only the default output loses the far side when Teams plays on a headset that isn't the Windows default, or when the device changes mid-call | Wispr records every active output; Granola's Windows docs list calls lost this way | L |
+| 2 | **Capture health**: warn when call audio is silent while a call app holds the mic, or the mic is flat; keep the PC awake while recording; warn on low disk | A silent track loses the meeting, and today nothing says so | Wispr, Granola, Recall SDK | M |
+| 3 | **Smart stop**: when the call app releases the mic and both tracks go quiet, a countdown to stop (Keep recording cancels); a check-in after long silence for in-room meetings | Forgotten recordings run on and merge calls | Granola, Jamie, Notion, Wispr | M |
+| 4 | **Your own templates and prompts**: edit the kinds of meeting and the one-click documents, or add new ones (a client's ticket format) | Each client or ticket system wants its own format | Granola recipes, Notion, Zoom, Fathom, Tactiq | M |
+| 5 | **Redact a moment**: silence a stretch of both tracks and remove its lines (a password or MFA code read aloud) | IT calls carry secrets; masking covers only emails, phones and cards | Granola | M |
+| 6 | **Fix a line's words**, offering to add the fix to Words to know | Misheard names and terms stay wrong in search and summaries | Otter, MacWhisper | M |
+| 7 | **Daily and weekly digest**: a work log of calls with people, action items and draft time-entry lines, saved to the export folder and readable over MCP | Time entries and standups | tl;dv, Granola, Teams recap | M |
+| 8 | **Where your name was said**: markers on the timeline | Jump to where you were asked something | Teams Premium | S |
+| 9 | **Watch-folder import**: recordings dropped in a folder (softphone or phone-system exports) import themselves | No manual import for recorded calls | MacWhisper | S |
+
+Later: push-to-talk dictation with a "ticket note" mode (Fireflies Talk, Superwhisper, Wispr), a
+snapshot of the shared screen with on-device text recognition, client tags, topic trackers, live
+transcript and "catch me up", a Teams accessibility bridge for mute state and names (fragile),
+signed installer.
