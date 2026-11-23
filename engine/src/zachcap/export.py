@@ -11,7 +11,7 @@ import contextlib
 import os
 import re
 import threading
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from .store import Store
@@ -114,26 +114,73 @@ def file_name(store: Store, meeting_id: int, fmt: str, with_id: bool = False) ->
 _writing = threading.Lock()  # exports run on request threads and in the background
 
 
-def auto_export(store: Store, meeting_id: int) -> Path | None:
-    """Write the meeting's Markdown into the export folder, if one is set. Never raises:
-    a missing folder or a locked file only skips this copy."""
+def _export_folder(store: Store) -> Path | None:
     folder = store.setting("export_folder")
-    if not folder or not Path(folder).is_dir() or store.meeting(meeting_id) is None:
-        return None
-    folder = Path(folder)
-    target = folder / file_name(store, meeting_id, "md", with_id=True)
+    return Path(folder) if folder and Path(folder).is_dir() else None
+
+
+def _write_whole(target: Path, content: str) -> bool:
+    """Written whole, then moved into place: a notes app never reads half a file."""
     partial = target.with_name(f"{target.stem}.partial")
+    try:
+        partial.write_text(content, encoding="utf-8")
+        os.replace(partial, target)
+        return True
+    except OSError:
+        with contextlib.suppress(OSError):
+            partial.unlink(missing_ok=True)
+        return False
+
+
+def auto_export(store: Store, meeting_id: int) -> Path | None:
+    """Write the meeting's Markdown into the export folder, if one is set, and bring that
+    day's and week's work logs up to date if those are kept there too. Never raises: a
+    missing folder or a locked file only skips this copy."""
+    folder = _export_folder(store)
+    meeting = store.meeting(meeting_id)
+    if folder is None or meeting is None:
+        return None
+    target = folder / file_name(store, meeting_id, "md", with_id=True)
     with _writing:
-        try:
-            # Written whole, then moved into place: a notes app never reads half a file.
-            partial.write_text(markdown(store, meeting_id), encoding="utf-8")
-            os.replace(partial, target)
-        except OSError:
-            with contextlib.suppress(OSError):
-                partial.unlink(missing_ok=True)
+        if not _write_whole(target, markdown(store, meeting_id)):
             return None
         for old in folder.glob(f"* (M{meeting_id}).md"):  # the copy under an earlier title
             if old != target:
                 with contextlib.suppress(OSError):  # open in another app: it goes next time
                     old.unlink(missing_ok=True)
+    refresh_work_logs(store, date.fromisoformat(meeting["started_at"][:10]))
     return target
+
+
+def forget(store: Store, meeting_id: int, day: date) -> None:
+    """After a meeting is deleted: remove its copy from the export folder and take it out
+    of that day's and week's work logs."""
+    folder = _export_folder(store)
+    if folder is None:
+        return
+    with _writing:
+        for old in folder.glob(f"* (M{meeting_id}).md"):
+            with contextlib.suppress(OSError):
+                old.unlink(missing_ok=True)
+    refresh_work_logs(store, day)
+
+
+def save_work_log(store: Store, period: str, day: date) -> Path | None:
+    """The day's or week's work log, written into the export folder (None if there's none)."""
+    from . import digest
+
+    folder = _export_folder(store)
+    if folder is None:
+        return None
+    target = folder / digest.file_name(period, day)
+    with _writing:
+        written = _write_whole(target, digest.build(store, period, day)["markdown"])
+    return target if written else None
+
+
+def refresh_work_logs(store: Store, day: date) -> None:
+    """Keep the day's and the week's work logs current, if Settings keeps them."""
+    if store.setting("export_work_log") != "1":
+        return
+    for period in ("day", "week"):
+        save_work_log(store, period, day)

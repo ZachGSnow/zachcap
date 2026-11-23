@@ -29,6 +29,7 @@ import { MeetingsView } from "@/views/MeetingsView";
 import { PeopleView } from "@/views/PeopleView";
 import { SearchView } from "@/views/SearchView";
 import { SettingsView } from "@/views/SettingsView";
+import { WorkLogView } from "@/views/WorkLogView";
 
 const MEDIA = ["mp4", "m4a", "mp3", "wav", "flac", "ogg", "webm", "mkv", "aac", "wma", "mov"];
 
@@ -253,6 +254,7 @@ function Shell() {
             )}
             {view.name === "ask" && <AskView library={library} onOpen={openMeeting} />}
             {view.name === "actions" && <ActionsView onOpen={openMeeting} />}
+            {view.name === "worklog" && <WorkLogView onOpen={openMeeting} />}
             {view.name === "people" && (
               <PeopleView onBrief={brief} />
             )}

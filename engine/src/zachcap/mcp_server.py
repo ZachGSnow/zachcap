@@ -92,6 +92,21 @@ def create_server() -> MCPServer:
             return privacy.outgoing(store, assistant.action_items_list(store, status, owner))
 
     @server.tool(annotations=READ_ONLY)
+    def get_work_log(
+        day: Annotated[
+            str | None, Field(description="A date in the period, YYYY-MM-DD; today if not given")
+        ] = None,
+        period: Annotated[str, Field(description='"day", or "week" for Monday to Sunday')] = "day",
+    ) -> str:
+        """A work log for a day or a week: each meeting's time, people, overview, decisions and
+        action items, with draft time entries rounded up to 15 minutes."""
+        with library() as store:
+            try:
+                return privacy.outgoing(store, assistant.work_log(store, period, day))
+            except ValueError as exc:
+                raise ToolError(str(exc)) from None
+
+    @server.tool(annotations=READ_ONLY)
     def list_people() -> str:
         """Everyone ZachCap knows by voice, with how many meetings and how long they talked."""
         with library() as store:

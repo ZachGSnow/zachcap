@@ -114,7 +114,7 @@ export function ActionRow({
 }
 
 /** Toggles an action item and says so when it fails. */
-export async function toggleAction(item: ActionItem) {
+export async function toggleAction(item: Pick<ActionItem, "id" | "status">) {
   return attempt("Couldn't update the action item", () =>
     api(`/api/actions/${item.id}`, { method: "PATCH", json: { status: item.status === "done" ? "open" : "done" } }),
   );

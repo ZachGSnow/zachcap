@@ -25,6 +25,7 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 - **Summaries with names** from Claude (Opus 5.5 by default): overview, decisions, action items marked as commitments or assignments with due dates, who said what, open questions and topics. Every item links to the moment it was said. Pick the **kind of meeting** (1:1, standup, customer call, project status, incident or troubleshooting, interview) to set what the summary focuses on; **edit them or add your own** in Settings (a vendor call, a client's quarterly review).
 - **Write from a meeting** in one click: a follow-up email, a status update, or notes for a service ticket, ready to copy. Edit these or add your own documents (a client's ticket format, a time entry).
 - **Action item tracker** across all meetings, with Open/Done, "Mine", and commitments vs assigned tasks.
+- **Work log** for a day or a week: each meeting with who was there, what came of it and its action items, plus a **draft time entry** per meeting rounded up to 15 minutes, ready to copy into a time sheet or ticket. Built from your summaries, free and instant; it can also be kept in the export folder, and Ask and the MCP server can read it.
 - **Ask across all your meetings**: "What did I commit to this week?", "What's still open with Dana?". Claude searches your transcripts, summaries and action items with read-only tools and links every fact to the moment it was said. **Brief me** on a person prepares you for your next meeting with them. Each meeting also has its own Ask tab.
 - **History and search**: every meeting, searchable by anything anyone said.
 - **Your meetings in Claude Code or the Claude app**: a read-only MCP server (`zachcap mcp`) lets Claude search your transcripts and read summaries, action items and notes. Settings has the command and config to copy.
@@ -86,6 +87,7 @@ Everything is set in the app under **Settings**:
 | Stop when the call ends | Count down and stop when the call app lets go of the mic and it goes quiet, or after ten quiet minutes | on |
 | Theme | Light, dark, or the same as Windows | Same as Windows |
 | Export folder | Keeps a Markdown copy of every meeting in a folder you choose, one file per meeting, named with its id (M12) | off |
+| Work logs there too | Also keeps a daily and a weekly work log in the export folder | off |
 
 Environment variables for development: `ZACHCAP_HOME` (data folder, default `%LOCALAPPDATA%\ZachCap`), `ZACHCAP_ENGINE_DIR` (engine location for the desktop app).
 
@@ -116,7 +118,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 143 tests: storage, matching, audio, capture and mixing, the recording watch, crash recovery, API, summaries and templates, Ask, redaction
+uv run pytest -q             # 150 tests: storage, matching, audio, capture and mixing, the recording watch, crash recovery, API, summaries and templates, Ask, redaction, work logs
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```

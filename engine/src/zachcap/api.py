@@ -18,7 +18,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +32,7 @@ from . import (
     __version__,
     apikeys,
     audio,
+    digest,
     export,
     insights,
     paths,
@@ -159,9 +160,24 @@ class SettingsBody(BaseModel):
     keep_audio_days: int | None = None  # 0 keeps recordings forever
     mask_before_claude: bool | None = None
     stop_when_call_ends: bool | None = None
+    export_work_log: bool | None = None  # keep a daily and weekly work log in the export folder
 
 
 KEEP_AUDIO_CHOICES = (0, 7, 30, 90, 365)
+
+
+class WorkLogBody(BaseModel):
+    period: str = "day"
+    day: str | None = None  # YYYY-MM-DD, today if not given
+
+
+def work_log_period(period: str, day: str | None) -> tuple[str, date]:
+    if period not in ("day", "week"):
+        raise HTTPException(status_code=400, detail='The period is "day" or "week"')
+    try:
+        return period, date.fromisoformat(day) if day else date.today()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Use a date like 2026-11-23") from None
 
 
 class Worker:
@@ -395,12 +411,29 @@ def create_app(token: str) -> FastAPI:
 
     @app.delete("/api/meetings/{meeting_id}", dependencies=auth)
     def delete_meeting(meeting_id: int, store: Store = Depends(db)):
-        folder = Path(meeting_or_404(store, meeting_id)["folder"]).resolve()
+        meeting = meeting_or_404(store, meeting_id)
+        folder = Path(meeting["folder"]).resolve()
         store.delete_meeting(meeting_id)
+        # Its copy leaves the export folder too, and it leaves that day's work log.
+        export.forget(store, meeting_id, date.fromisoformat(meeting["started_at"][:10]))
         # Only remove audio ZachCap recorded or imported itself, never a folder elsewhere.
         if folder.is_relative_to(paths.meetings_dir().resolve()) and folder.exists():
             shutil.rmtree(folder, ignore_errors=True)
         return {"deleted": meeting_id}
+
+    @app.get("/api/worklog", dependencies=auth)
+    def work_log(period: str = "day", day: str | None = None, store: Store = Depends(db)):
+        """The day's or week's meetings, people, action items and draft time entries."""
+        return digest.build(store, *work_log_period(period, day))
+
+    @app.post("/api/worklog/save", dependencies=auth)
+    def save_work_log(body: WorkLogBody, store: Store = Depends(db)):
+        if not store.setting("export_folder"):
+            raise HTTPException(status_code=400, detail="Choose an export folder in Settings first")
+        path = export.save_work_log(store, *work_log_period(body.period, body.day))
+        if path is None:
+            raise HTTPException(status_code=400, detail="Couldn't write to the export folder")
+        return {"path": str(path)}
 
     @app.post("/api/meetings/{meeting_id}/summary", dependencies=auth)
     def create_summary(
@@ -954,6 +987,7 @@ def create_app(token: str) -> FastAPI:
             "mask_before_claude": store.setting("mask_before_claude") == "1",
             # Offer to stop (with a countdown) when the call ends or after a long silence.
             "stop_when_call_ends": store.setting("stop_when_call_ends", "1") == "1",
+            "export_work_log": store.setting("export_work_log") == "1",
             "templates": prompts.choices(store, "template"),
             "recipes": prompts.choices(store, "recipe"),
             "language": store.setting("language", "en"),
@@ -983,6 +1017,10 @@ def create_app(token: str) -> FastAPI:
             store.set_setting("mask_before_claude", "1" if body.mask_before_claude else "0")
         if body.stop_when_call_ends is not None:
             store.set_setting("stop_when_call_ends", "1" if body.stop_when_call_ends else "0")
+        if body.export_work_log is not None:
+            store.set_setting("export_work_log", "1" if body.export_work_log else "0")
+            if body.export_work_log:  # today's and this week's, right away
+                export.refresh_work_logs(store, date.today())
         if body.export_folder is not None:
             folder = body.export_folder.strip()
             if folder and not Path(folder).is_dir():

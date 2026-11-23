@@ -585,3 +585,25 @@ def test_a_meeting_being_recorded_or_processed_cant_be_changed(
             break
         time.sleep(0.1)
     assert client.patch(f"/api/segments/{lines[0]}", headers=AUTH, json=edit).status_code == 200
+
+
+def test_the_work_log_through_the_api(client: TestClient, tmp_path: Path):
+    store = Store()
+    store.create_meeting("Sync", "2026-11-23T09:00:00-05:00", tmp_path / "a", duration=1200.0)
+    store.close()
+
+    week = client.get("/api/worklog?period=week&day=2026-11-25", headers=AUTH).json()
+    assert week["totals"] == {"meetings": 1, "seconds": 1200.0, "hours": 0.5}
+    assert week["markdown"].startswith("# Work log: week of November 23, 2026")
+    assert client.get("/api/worklog?period=month", headers=AUTH).status_code == 400
+    assert client.get("/api/worklog?day=yesterday", headers=AUTH).status_code == 400
+
+    unsaved = client.post("/api/worklog/save", headers=AUTH, json={"day": "2026-11-23"})
+    assert unsaved.status_code == 400 and "export folder" in unsaved.json()["detail"]
+    folder = tmp_path / "vault"
+    folder.mkdir()
+    client.put("/api/settings", headers=AUTH, json={"export_folder": str(folder)})
+    saved = client.post("/api/worklog/save", headers=AUTH, json={"day": "2026-11-23"}).json()
+    assert Path(saved["path"]).name == "Work log 2026-11-23.md"
+    on = client.put("/api/settings", headers=AUTH, json={"export_work_log": True}).json()
+    assert on["export_work_log"] is True

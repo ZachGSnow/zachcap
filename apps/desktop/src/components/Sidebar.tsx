@@ -1,4 +1,4 @@
-import { AudioLines, FileUp, ListChecks, ListVideo, MessagesSquare, Search, Settings, Users } from "lucide-react";
+import { AudioLines, FileUp, ListChecks, ListVideo, MessagesSquare, NotebookText, Search, Settings, Users } from "lucide-react";
 
 import { RecordButton } from "@/components/Recording";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ export type View =
   | { name: "meeting"; id: number; at?: number }
   | { name: "ask" }
   | { name: "actions" }
+  | { name: "worklog" }
   | { name: "people" }
   | { name: "search" }
   | { name: "settings" };
@@ -17,6 +18,7 @@ const NAV = [
   { name: "meetings", label: "Meetings", icon: ListVideo },
   { name: "ask", label: "Ask", icon: MessagesSquare },
   { name: "actions", label: "Action items", icon: ListChecks },
+  { name: "worklog", label: "Work log", icon: NotebookText },
   { name: "people", label: "People", icon: Users },
   { name: "search", label: "Search", icon: Search },
   { name: "settings", label: "Settings", icon: Settings },

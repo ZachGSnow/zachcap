@@ -205,6 +205,19 @@ def people_list(store: Store) -> str:
     return "\n".join(lines) or "Nobody named yet."
 
 
+def work_log(store: Store, period: str = "day", day: str | None = None) -> str:
+    """The day's or week's work log, citing each meeting as [M12]."""
+    from . import digest
+
+    if period not in ("day", "week"):
+        raise ValueError('The period is "day" or "week".')
+    try:
+        when = date.fromisoformat(day) if day else date.today()
+    except ValueError:
+        raise ValueError("Use a date like 2026-11-23.") from None
+    return digest.markdown(digest.build(store, period, when), cite=True)
+
+
 def make_tools(store: Store) -> list:
     """The library, read-only, as tools for Claude."""
 
@@ -253,7 +266,18 @@ def make_tools(store: Store) -> list:
         """
         return privacy.outgoing(store, action_items_list(store, status, owner))
 
-    return [search_transcripts, list_meetings, get_meeting, list_action_items]
+    @beta_tool
+    def get_work_log(day: str | None = None, period: str = "day") -> str:
+        """A work log: each meeting of a day or a week with its time, people, overview,
+        decisions and action items, plus draft time entries (rounded up to 15 minutes).
+
+        Args:
+            day: A date in the period, YYYY-MM-DD; today if not given.
+            period: "day", or "week" for Monday to Sunday.
+        """
+        return privacy.outgoing(store, work_log(store, period, day))
+
+    return [search_transcripts, list_meetings, get_meeting, list_action_items, get_work_log]
 
 
 def ask_everything(store: Store, question: str, history: list[dict] | None = None) -> dict:
