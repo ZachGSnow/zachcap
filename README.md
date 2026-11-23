@@ -131,9 +131,10 @@ Not verified yet: a live two-track recording of a real Teams call (capture was t
 
 ## Roadmap
 
-- Live transcript during the call
+- Live captions during the call, on a small CPU model so the GPU stays free for processing
 - Capture one app only (process loopback) instead of all computer audio
-- Ask across all meetings; weekly digest of open commitments
+- A weekly digest of open commitments
+- Slide capture with on-device text recognition
 - Signed installer with automatic updates
 
 ## License

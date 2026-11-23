@@ -143,7 +143,7 @@ export function AskView({
                       />
                       <div className="mt-2 text-[10px] text-muted-foreground">
                         {exchange.model ? modelLabel(exchange.model) : ""}
-                        {exchange.cost != null ? ` · $${exchange.cost.toFixed(3)}` : ""}
+                        {exchange.cost != null ? ` \u00b7 $${exchange.cost.toFixed(3)}` : ""}
                       </div>
                     </>
                   ) : exchange.failed ? (

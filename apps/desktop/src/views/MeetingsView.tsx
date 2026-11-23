@@ -120,7 +120,7 @@ function MyOpenItems({ me, onOpen }: { me: string; onOpen: (id: number, at?: num
                 <div className="truncate text-xs">{item.task}</div>
                 <div className="truncate text-[10px] text-muted-foreground">
                   {item.meeting_title}
-                  {item.due ? ` · due ${item.due}` : ""}
+                  {item.due ? ` \u00b7 due ${item.due}` : ""}
                 </div>
               </button>
             </div>

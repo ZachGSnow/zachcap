@@ -279,4 +279,30 @@ Built and tested in the app with synthetic meetings, plus the real recording abo
 - History with stats, full-text search, people with talk time and voice samples.
 - Settings: your name, devices, language, Claude model, API keys, data folder.
 
-Next: live transcript, one-app capture (process loopback), ask across meetings, signed installer.
+## 12. Added after v0.1 (2026-11-23)
+
+Each change went through its own pull request with green CI, after two rounds of code review
+(engine, UI, shell and CI) and competitor research.
+
+| Area | What | How it was checked |
+|---|---|---|
+| Interruptions | The meeting row exists from the first second; Quit, sign-out and shutdown stop and save the recording; the engine's watchdog saves it if the app dies; startup recovers cut-off recordings and re-queues interrupted processing; an unfinished FLAC chunk is read with FFmpeg | Killing the app mid-recording saved an 8.2 s meeting; hard-killing the engine left `complete: false`, and the next start processed it; a 77 s recording with unclosed chunks transcribed to 76.6 s on the GPU |
+| Reprocessing | Results replace the old ones in one transaction, so a failed reprocess keeps the last good transcript | Unit tests; failure paths keep names and lines |
+| Data integrity | Correcting a name moves the voiceprint; Regenerate keeps done marks; no empty voiceprints; lines move to unnamed voices by id; atomic playback cache | Unit tests |
+| UI robustness | Interrupted jobs can be run again; failures are reported; notifications while in the tray; Space, seek and speed fixes; error boundary | Browser and desktop checks |
+| Performance | Memoized transcript rows, one shared menu, memoized lane bars | A 2,000-line meeting: worst UI stall during playback went from 2.7 s to 83 ms |
+| Shell | Single instance, Start with Windows (release builds), tray hint, red recording dot, engine restart banner, CSP, no opener plugin, `open_data_folder` takes no path | Release build checks |
+| Ask across meetings | Claude searches the library with read-only tools and cites `[M12 04:31]`; Brief me on a person | Real questions on the demo library: $0.02-0.05 each, every fact cited |
+| Words to know | Hotwords for Whisper (as a sentence), corrections, spellings for Claude | A bare comma list made Whisper drop every full stop (6 to 0); a sentence kept all 6 |
+| Kinds of meeting and recipes | Seven summary focuses; follow-up email, status update, ticket notes | A real follow-up email for $0.026 |
+| Notes, bookmarks, pause | Recording bar notes, Ctrl+Alt+B bookmarks, private pause that writes silence | A real 7 s recording: notes at 1.9 s and 3.1 s, tracks stayed in sync through the pause |
+| Exports | Markdown, text, SRT; export folder kept up to date | Downloads and the folder backfill on the demo library |
+| MCP server | `zachcap mcp`, five read-only tools, database opened read-only | A real stdio client listed the tools and searched |
+| Conversation stats | Pace, longest stretch, questions, talked over | Unit tests; demo meeting |
+| Privacy | Keep recordings for N days; mask contact details for Claude; heads-up text | Unit tests (retention touches only finished meetings in ZachCap's folder) |
+| Home page | Two weeks of meeting time; your open items | Browser check |
+
+Tests: 32 at v0.1, 79 now. CI no longer installs the GPU stack and checks `uv.lock`.
+
+Next: live captions on a small CPU model, one-app capture (process loopback), a weekly digest of
+open commitments, slide capture with on-device OCR, signed installer.
