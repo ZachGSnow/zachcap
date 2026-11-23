@@ -306,3 +306,35 @@ def test_an_older_database_gets_the_edited_column(tmp_path: Path):
 
     assert store.segment(1)["edited"] == 0
     store.close()
+
+
+def test_a_deleted_meetings_id_is_never_given_out_again(tmp_path: Path):
+    store = Store(tmp_path / "test.db")
+    first = store.create_meeting("One", "2026-11-22T09:00:00", tmp_path)
+    second = store.create_meeting("Two", "2026-11-22T10:00:00", tmp_path)
+    store.delete_meeting(second)
+
+    third = store.create_meeting("Three", "2026-11-22T11:00:00", tmp_path)
+
+    assert (first, second, third) == (1, 2, 3)  # 2 stays retired: [M2] never means "Three"
+    store.close()
+
+
+def test_ids_stay_unique_for_a_library_from_before(tmp_path: Path):
+    import sqlite3
+
+    store = Store(tmp_path / "test.db")
+    store.create_meeting("One", "2026-11-22T09:00:00", tmp_path)
+    store.close()
+    old = sqlite3.connect(tmp_path / "test.db")  # as an older version left it: nothing remembered
+    old.execute("DELETE FROM settings WHERE key = 'last_meeting_id'")
+    old.execute(
+        "INSERT INTO meetings (title, started_at, folder) VALUES ('Two', '2026-11-22', '.')"
+    )
+    old.commit()
+    old.close()
+
+    store = Store(tmp_path / "test.db")
+    store.delete_meeting(2)
+    assert store.create_meeting("Three", "2026-11-22T11:00:00", tmp_path) == 3
+    store.close()

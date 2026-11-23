@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS watched_files (
 
 # What a redacted line says instead.
 REDACTED = "[redacted]"
+LAST_MEETING_ID = "last_meeting_id"  # the highest meeting id ever given out
 
 # Suggestions show as "Speaker 2 (Dana?)" until confirmed.
 SPEAKER_NAME = (
@@ -320,10 +321,18 @@ class Store:
     # meetings ---------------------------------------------------------------
 
     def create_meeting(self, title: str, started_at: str, folder: Path, **fields) -> int:
-        cur = self.db.execute(
-            "INSERT INTO meetings (title, started_at, folder, source_app, duration, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+        """A new meeting, with an id never used before: SQLite would give a deleted
+        meeting's id to the next one, and old citations ([M12]) and export file names
+        ("... (M12).md") would then point at the wrong meeting."""
+        if not self.db.in_transaction:
+            self.db.execute("BEGIN IMMEDIATE")  # the write lock first, so the id stays ours
+        highest = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM meetings").fetchone()[0]
+        meeting_id = max(highest, int(self.setting(LAST_MEETING_ID, "0") or 0)) + 1
+        self.db.execute(
+            "INSERT INTO meetings (id, title, started_at, folder, source_app, duration, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
+                meeting_id,
                 title,
                 started_at,
                 str(folder),
@@ -332,8 +341,9 @@ class Store:
                 fields.get("status", "recorded"),
             ),
         )
+        self.set_setting(LAST_MEETING_ID, str(meeting_id))
         self._commit()
-        return cur.lastrowid
+        return meeting_id
 
     def update_meeting(self, meeting_id: int, **fields) -> None:
         columns = ", ".join(f"{name} = ?" for name in fields)
@@ -788,6 +798,9 @@ class Store:
 
     def delete_meeting(self, meeting_id: int) -> None:
         """Remove a meeting and everything learned from it, voice samples included."""
+        # Its id is never given out again (a library from before ids were remembered).
+        if meeting_id > int(self.setting(LAST_MEETING_ID, "0") or 0):
+            self.set_setting(LAST_MEETING_ID, str(meeting_id))
         self.db.execute("DELETE FROM voice_samples WHERE meeting_id = ?", (meeting_id,))
         self.db.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
         self._commit()
