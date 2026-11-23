@@ -177,7 +177,8 @@ NO_STORE = {"Cache-Control": "no-store"}
 
 
 class DictateBody(BaseModel):
-    type: bool = True  # type the text into the app in front (False: only return it)
+    type: bool = False  # type the text into the app in front (the page asks for it)
+    id: int | None = None  # which dictation (the number start gave); the newest if not given
 
 
 class WorkLogBody(BaseModel):
@@ -282,6 +283,16 @@ def create_app(token: str) -> FastAPI:
         return None if language == "auto" else language
 
     lock = threading.Lock()
+
+    def leave_dictation_out(listening: bool) -> None:
+        """While you dictate during a recording, its mic track records silence: a ticket
+        note isn't part of the meeting (the call goes on being recorded)."""
+        with lock:
+            recorder = recording.get("recorder")
+        if recorder is not None:
+            recorder.mute_mic(listening)
+
+    dictator.on_listening = leave_dictation_out
 
     startup = Store()
     try:
@@ -980,6 +991,8 @@ def create_app(token: str) -> FastAPI:
                 raise HTTPException(
                     status_code=500, detail=f"Couldn't start recording: {exc}"
                 ) from exc
+            if dictator.holding:  # started mid-dictation: that's left out too
+                recorder.mute_mic(True)
             # The meeting exists from the first second, so a crash can't lose it.
             title = body.title or f"Meeting {datetime.now():%b %d %H:%M}"
             started = recorder.started_at or datetime.now().astimezone()
@@ -1046,36 +1059,42 @@ def create_app(token: str) -> FastAPI:
 
     @app.post("/api/dictate/start", dependencies=auth)
     def dictate_start(store: Store = Depends(db)):
-        """The dictation keys went down: listen."""
+        """The dictation keys went down: listen. Returns the dictation's number for stop."""
         if store.setting(dictation.SETTING) != "1":
             raise HTTPException(status_code=400, detail="Dictation is off (Settings)")
         try:
-            dictator.start(store.setting("mic_device") or None)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            number = dictator.start(store.setting("mic_device") or None)
+        except dictation.NotHere as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except OSError as exc:
             raise HTTPException(status_code=400, detail=f"Couldn't open the mic: {exc}") from exc
-        return {"listening": True}
+        return {"listening": True, "id": number}
 
     @app.post("/api/dictate/stop", dependencies=auth)
     def dictate_stop(body: DictateBody | None = None, store: Store = Depends(db)):
         """The keys came up: transcribe what was said and type it where the cursor is."""
+        body = body or DictateBody()
         vocab = words.parse(store.setting("vocabulary"))
         names = [p["name"] for p in store.people() if p["name"].lower() not in {"you", "me"}]
         try:
             return dictator.finish(
+                body.id,
                 language_of(store),
                 vocab.hotwords(names),
                 fix=vocab.correct,
-                type_it=body.type if body else True,
+                type_it=body.type,
             )
-        except RuntimeError as exc:
+        except dictation.NotListening as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:  # the speech model or the mic: say what went wrong
+            raise HTTPException(status_code=500, detail=f"Dictation failed: {exc}") from exc
 
     @app.post("/api/dictate/cancel", dependencies=auth)
-    def dictate_cancel():
-        dictator.cancel()
-        return {"listening": False}
+    def dictate_cancel(body: DictateBody | None = None):
+        """Stops listening without typing: one dictation, or all of them (a page that loads
+        drops any its last copy left listening)."""
+        dictator.cancel(body.id if body else None)
+        return {"listening": dictator.listening}
 
     @app.get("/api/call", dependencies=auth)
     def call():
@@ -1230,6 +1249,8 @@ def create_app(token: str) -> FastAPI:
             store.set_setting(dictation.SETTING, "1" if body.dictation else "0")
             if body.dictation:  # loaded now, so the first dictation is quick
                 dictator.transcriber.warm_up(language_of(store))
+            else:  # turned off mid-dictation: the keys' release won't come
+                dictator.cancel()
         if body.export_work_log is not None:
             store.set_setting("export_work_log", "1" if body.export_work_log else "0")
             if body.export_work_log:  # today's and this week's, right away
