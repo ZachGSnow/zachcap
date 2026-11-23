@@ -36,6 +36,11 @@ class FakeTranscriber:
         pass
 
 
+@pytest.fixture(autouse=True)
+def quiet(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(dictation, "_sound", lambda name: None)  # no listening sounds in tests
+
+
 def test_text_is_typed_as_characters_with_enter_for_line_breaks():
     events = dictation.key_events("Hi\nok")
     assert ctypes.sizeof(dictation.INPUT) == 40  # what SendInput expects on 64-bit Windows
@@ -71,6 +76,43 @@ def test_a_dictation_is_spelled_your_way_and_not_typed_when_asked_not_to():
     assert not dictator.listening
     with pytest.raises(RuntimeError):
         dictator.finish("en", None)
+
+
+def test_text_is_copied_only_when_the_window_in_front_refuses_typing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    typed, copied = [], []
+    monkeypatch.setattr(dictation, "copy_to_clipboard", lambda text: copied.append(text) or True)
+    dictator = dictation.Dictation(FakeTranscriber("Call back at noon."), microphone=FakeMic)
+
+    monkeypatch.setattr(dictation, "type_text", lambda text: typed.append(text) or 2 * len(text))
+    dictator.start()
+    result = dictator.finish("en", None)
+    assert typed == ["Call back at noon. "] and not copied  # a space, ready for the next one
+    assert result["typed"] == 38 and not result["copied"]
+
+    monkeypatch.setattr(dictation, "type_text", lambda text: 0)  # refused: runs as administrator
+    dictator.start()
+    result = dictator.finish("en", None)
+    assert copied == ["Call back at noon."] and result["copied"]
+
+
+def test_a_mic_that_wont_open_is_reported_and_nothing_is_left_listening(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    def no_mic(name=None):
+        raise OSError("Device unavailable")
+
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    monkeypatch.setattr(dictation, "Microphone", no_mic)
+    monkeypatch.setattr(dictation, "Transcriber", lambda: FakeTranscriber("unused"))
+    client = TestClient(create_app("test-token"))
+    client.put("/api/settings", headers=AUTH, json={"dictation": True})
+
+    failed = client.post("/api/dictate/start", headers=AUTH)
+    assert failed.status_code == 400 and "Couldn't open the mic" in failed.json()["detail"]
+    stop = client.post("/api/dictate/stop", headers=AUTH, json={"type": False})
+    assert stop.status_code == 409  # not listening
 
 
 def test_dictation_through_the_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
