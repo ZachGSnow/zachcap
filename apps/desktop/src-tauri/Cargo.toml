@@ -28,6 +28,16 @@ tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 
+# Dictation's keys are read with a keyboard hook (src/dictation_keys.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
 # https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
 codegen-units = 1

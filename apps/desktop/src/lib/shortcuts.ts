@@ -12,13 +12,14 @@ export const DEFAULT_KEYS: Record<ShortcutAction, string> = {
   dictate: "Ctrl+Alt+D",
 };
 
-/** How a shortcut is, as the shell found it: "on" (held now), "free" (not needed now, and no
- * other app has the keys), "off" (not needed now, not checked), "taken" (another app has the
- * keys, so they never reach ZachCap) or "invalid". */
+/** How a shortcut is, as the shell found it: "on" (held now), "shared" (held now, and another
+ * app has the same keys: dictation gets them first), "free" (not needed now, and no other app
+ * has the keys), "off" (not needed now, not checked), "taken" (another app has the keys, so
+ * they never reach ZachCap) or "invalid". */
 export type ShortcutStatus = {
   action: ShortcutAction;
   keys: string;
-  state: "on" | "free" | "off" | "taken" | "invalid";
+  state: "on" | "shared" | "free" | "off" | "taken" | "invalid";
 };
 
 let current: Record<ShortcutAction, string> = DEFAULT_KEYS;
