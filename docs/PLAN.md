@@ -320,7 +320,7 @@ Each change went through its own pull request with green CI, after two rounds of
 
 The cost shown next to each answer prices every attempt at the rates of the model that ran it (a fallback included), cache reads at that model's own rate.
 
-Tests: 32 at v0.1, 224 now. CI no longer installs the GPU stack and checks `uv.lock`.
+Tests: 32 at v0.1, 344 now (engine), plus unit tests for the page. CI no longer installs the GPU stack and checks `uv.lock`.
 
 ## 13. Next, from competitor research (2026-11-23)
 
@@ -379,7 +379,67 @@ tools, which ask before saving).
 
 Build order: 1, 2 and 3, then 4; 5 and 6 after a review round.
 
-Later: topic trackers (FTS5), attaching a file's text to a meeting's notes, picking the kind of
-meeting automatically, related past calls (local embeddings), summaries on this PC (a local
-model, for incidents), auto-record rules for chosen apps with a consent record, vocabulary from
-documents, live transcript.
+Built since: topic trackers (#55) and attached files (#57). The rest is in section 15.
+
+## 15. Backlog (2026-11-23)
+
+Open items from the code reviews of 2026-11-23, then the features still to build. Each fix
+comes with tests for the cases named.
+
+### Clients (review of #54)
+
+| # | Problem | Fix |
+|---|---|---|
+| C1 | `keep_history` freezes meetings it shouldn't: ones that still need names, ones where the person was only suggested, and every meeting when your own client changes (yours never counts). The frozen client then shows as if it came from the people, and survives Reprocess | Freeze only meetings where the person counts (auto or confirmed, not you); refuse a client for yourself in the API; clear kept clients on reprocess; report "kept" apart from "inferred" |
+| C2 | Nothing sends a meeting back to following its people (`""` now means no client) | `PATCH {client: null}` follows the people again, and the page offers it |
+| C3 | The page can't set "No client" on a meeting whose client comes from its people: the box opens empty, and an unchanged box saves nothing | Open with the inferred name selected, or count "" as a change |
+| C4 | A client's capitals can't be corrected ("contoso" stays "contoso") | A change of case renames the client everywhere |
+| C5 | The client box keeps showing a name the engine didn't store (after a failed save), and clicking out of it pulls focus back to its button | `onSave` returns a promise; refocus only after Enter or Escape |
+| C6 | Merging people changes the kept person's past meetings, and merging into You gives You a hidden client | `keep_history` on the kept person before the client moves; never a client for You |
+| C7 | A saved client work log (`Work log <day> <client>.md`) keeps a meeting that was deleted or redacted | Refresh and forget also rewrite the client files for that day and week |
+| C8 | `clients.checked()` glues words around a non-breaking space or a tab | Collapse whitespace first |
+| C9 | `keep_history` takes about 2 s for 1,500 meetings and isn't atomic | One transaction and `executemany` |
+| C10 | Small: cached client spellings lag a change for a moment, and `by_lines` hands out its cached lists | Fold case in the cache; return copies |
+
+Tests to add with these: the cache invalidating, the `keep_history` cases, case corrections,
+client log refresh and forget, and page tests for the client box.
+
+### Dictation (review of #53)
+
+Fixed in #58. Left as they are on purpose: "scratch that" ending a sentence without a comma
+("Call Dana at three scratch that.") is typed as said, since "You can scratch that." would be
+taken back too; and "No. Scratch that." counts as "No, scratch that.", so "Is the server up?
+No. Scratch that, it is." loses the question.
+
+### Security hardening (review of 2026-11-23)
+
+No critical findings: every engine route needs the token, the page and the shell are locked
+down, SQL is parameterized, and dictation can't press keys. Snapshot pictures blocked by the
+release build's CSP were fixed in #59. To do, most important first:
+
+| # | Risk | Fix |
+|---|---|---|
+| S1 | The installed app runs the engine and its venv from the clone, so anyone who can write to that folder can run code as you | Deploy copies the engine next to the exe in `%LOCALAPPDATA%\Programs\ZachCap` and syncs it there with `uv sync --locked`; the exe looks next to itself first and starts it with `uv run --locked`. Until then, keep the clone in a folder only you can write to |
+| S2 | Imported media, and the watch folder with no click, is decoded by FFmpeg in the engine's process with no format list and no length cap | `av.open` with `protocol_whitelist=file` and a format whitelist; refuse files over a size and duration cap; mark a watch-folder file as tried before decoding; later, decode in a child process under a Job Object |
+| S3 | Other people's text (transcript, snapshot text, attached files) reaches MCP clients unmarked, and Ask puts the transcript in the system prompt | Tagged blocks for that text in MCP output; the transcript in a user-turn block marked as data; a warning next to the MCP snippet in Settings |
+| S4 | Exports and work logs write that text as raw Markdown, so an image or HTML tag in it loads from the internet when the file is opened in Obsidian | Escape `![` and HTML tags in those fields |
+| S5 | The token is checked after FastAPI reads the body; a non-ASCII token gives a 500 and a traceback in `engine.log`, which never rotates | An ASGI middleware checks the token (as bytes) before routing, with a body size limit and a 127.0.0.1/localhost Host check; rotate `engine.log` |
+| S6 | The shell picks the engine's port, releases it, and reuses port and token on a restart | The engine binds port 0 and reports it; a new port and token on each restart |
+| S7 | Browser dev mode falls back to the token "dev" | No default; `serve` refuses short tokens |
+| S8 | Path endpoints take any path, including network (UNC) paths | Paths come from the shell's file dialogs; refuse UNC and device paths otherwise |
+| S9 | Speech models download by name with no pinned revision (pyannote loads pickles) | Pin `revision=` to the commits in use |
+
+### Features still to build
+
+From section 14: picking the kind of meeting automatically, related past calls (local
+embeddings), summaries on this PC (a local model, for incidents), auto-record rules for chosen
+apps with a consent record, vocabulary from documents, live transcript, and automatic screen
+snapshots (waiting on a decision about its privacy guardrails: which windows, how often, how
+long the pictures are kept).
+
+### Housekeeping
+
+- GitHub Actions can't start jobs on this account (billing) since 2026-11-23. Until it can,
+  each PR runs the jobs in `ci.yml` locally and the results go in a PR comment. Run CI on main
+  again once Actions works.
+- Torch and torchaudio are left out of Dependabot, so they need bumping by hand.
