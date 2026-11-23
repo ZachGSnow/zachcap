@@ -289,7 +289,11 @@ export function SettingsView() {
               {health?.data ?? "..."}
             </code>
             {isTauri() && health?.data && (
-              <Button size="sm" variant="outline" onClick={() => void invoke("open_folder", { path: health.data })}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void attempt("Couldn't open the folder", () => invoke("open_data_folder"))}
+              >
                 <FolderOpen className="size-3.5" />
                 Open
               </Button>

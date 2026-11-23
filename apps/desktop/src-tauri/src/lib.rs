@@ -32,7 +32,12 @@ struct EngineInfo {
 struct Engine {
     info: Result<EngineInfo, String>,
     child: Mutex<Option<Child>>,
+    /// Why the engine stopped, once it has; cleared by a restart.
+    stopped: Mutex<Option<String>>,
 }
+
+/// Set while ZachCap exits, so the engine going away then isn't reported as a crash.
+static EXITING: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 fn engine_info(engine: tauri::State<Engine>) -> Result<EngineInfo, String> {
@@ -42,14 +47,40 @@ fn engine_info(engine: tauri::State<Engine>) -> Result<EngineInfo, String> {
 /// Why the engine stopped, if it has; the startup screen uses it to fail fast.
 #[tauri::command]
 fn engine_exited(engine: tauri::State<Engine>) -> Option<String> {
+    check_engine(&engine);
+    engine.stopped.lock().unwrap().clone()
+}
+
+/// Notices that the engine process has ended and records why. Returns the message the
+/// first time only.
+fn check_engine(engine: &Engine) -> Option<String> {
     let mut child = engine.child.lock().unwrap();
     let status = child.as_mut()?.try_wait().ok()??;
+    *child = None;
     let log = if cfg!(debug_assertions) {
         "Its output is in the terminal that ran `npm run tauri dev`.".to_string()
     } else {
         format!("Its log is {}.", data_dir().join("engine.log").display())
     };
-    Some(format!("The engine stopped ({status}). {log}"))
+    let message = format!("The engine stopped ({status}). {log}");
+    *engine.stopped.lock().unwrap() = Some(message.clone());
+    Some(message)
+}
+
+/// Starts the engine again after it stopped, on the same port and token, so the window
+/// reconnects without reloading. Does nothing while it is still running.
+#[tauri::command]
+fn restart_engine(engine: tauri::State<Engine>) -> Result<(), String> {
+    let info = engine.info.clone()?;
+    let mut child = engine.child.lock().unwrap();
+    if child.is_some() {
+        return Ok(());
+    }
+    let started = start_engine(info.port, &info.token)
+        .map_err(|error| format!("Couldn't run uv ({error})."))?;
+    *child = Some(started);
+    *engine.stopped.lock().unwrap() = None;
+    Ok(())
 }
 
 /// The tray icon shows a red dot and says so in its tooltip while a recording runs, so
@@ -96,12 +127,13 @@ fn with_red_dot(icon: &Image<'_>) -> Image<'static> {
     Image::new_owned(rgba, width, height)
 }
 
-/// Opens a folder in Explorer (the data folder, from Settings).
+/// Opens ZachCap's data folder in Explorer (from Settings). It takes no path, so the page
+/// can't ask it to open anything else.
 #[tauri::command]
-fn open_folder(path: String) -> Result<(), String> {
-    let folder = PathBuf::from(&path);
+fn open_data_folder() -> Result<(), String> {
+    let folder = data_dir();
     if !folder.is_dir() {
-        return Err(format!("{path} is not a folder"));
+        return Err(format!("{} doesn't exist yet", folder.display()));
     }
     Command::new("explorer")
         .arg(folder)
@@ -285,7 +317,6 @@ pub fn run() {
         }
     }
     builder
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
@@ -299,7 +330,25 @@ pub fn run() {
                     None,
                 ),
             };
-            app.manage(Engine { info, child: Mutex::new(child) });
+            app.manage(Engine {
+                info,
+                child: Mutex::new(child),
+                stopped: Mutex::new(None),
+            });
+
+            // Notice when the engine stops later (a crash), so the window can offer a restart.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                while !EXITING.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_secs(1));
+                    if let Some(engine) = handle.try_state::<Engine>()
+                        && let Some(message) = check_engine(&engine)
+                        && !EXITING.load(Ordering::Relaxed)
+                    {
+                        let _ = handle.emit("engine-exited", message);
+                    }
+                }
+            });
 
             // Ctrl+Alt+R starts or stops recording from anywhere. Registered here, once,
             // and handed to the page like the tray menu, so the window's state stays in sync.
@@ -372,7 +421,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             engine_info,
             engine_exited,
-            open_folder,
+            restart_engine,
+            open_data_folder,
             set_recording_indicator
         ])
         .build(tauri::generate_context!())
@@ -381,6 +431,7 @@ pub fn run() {
             if let RunEvent::Exit = event
                 && let Some(engine) = app.try_state::<Engine>()
             {
+                EXITING.store(true, Ordering::Relaxed);
                 if let Ok(info) = &engine.info {
                     stop_recording(info);
                 }

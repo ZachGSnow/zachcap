@@ -1,4 +1,6 @@
-import { AudioLines, FileUp, Loader2 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { AudioLines, FileUp, Loader2, RotateCw, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -27,7 +29,7 @@ import { SettingsView } from "@/views/SettingsView";
 
 const MEDIA = ["mp4", "m4a", "mp3", "wav", "flac", "ogg", "webm", "mkv", "aac", "wma", "mov"];
 
-function Startup({ error }: { error?: string }) {
+function Startup({ error, onRetry }: { error?: string; onRetry?: () => void }) {
   return (
     <div className="flex h-screen select-none flex-col items-center justify-center gap-3 text-center">
       <div className="flex size-12 items-center justify-center rounded-xl bg-foreground text-background">
@@ -37,6 +39,12 @@ function Startup({ error }: { error?: string }) {
         <>
           <p className="font-medium">The ZachCap engine didn't start</p>
           <p className="max-w-md text-sm text-muted-foreground">{error}</p>
+          {onRetry && (
+            <Button size="sm" className="mt-2" onClick={onRetry}>
+              <RotateCw className="size-3.5" />
+              Try again
+            </Button>
+          )}
         </>
       ) : (
         <p className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -44,6 +52,37 @@ function Startup({ error }: { error?: string }) {
           Starting the local engine...
         </p>
       )}
+    </div>
+  );
+}
+
+/** Shown when the engine stops after startup (a crash): one click starts it again. */
+function EngineStopped({ message, onRestarted }: { message: string; onRestarted: () => void }) {
+  const [restarting, setRestarting] = useState(false);
+  const restart = async () => {
+    setRestarting(true);
+    try {
+      await invoke("restart_engine");
+      await waitForEngine(90_000);
+      toast.success("The engine is running again");
+      onRestarted();
+    } catch (error) {
+      toast.error("Couldn't restart the engine", { description: String(error) });
+    } finally {
+      setRestarting(false);
+    }
+  };
+  return (
+    <div className="flex items-center gap-3 border-b bg-destructive/10 px-5 py-2.5 text-sm">
+      <TriangleAlert className="size-4 shrink-0 text-destructive" />
+      <span className="min-w-0 flex-1">
+        <span className="font-medium">The ZachCap engine stopped.</span>{" "}
+        <span className="text-muted-foreground">{message}</span>
+      </span>
+      <Button size="sm" disabled={restarting} onClick={() => void restart()}>
+        {restarting ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
+        Restart engine
+      </Button>
     </div>
   );
 }
@@ -123,6 +162,21 @@ function Shell() {
   const [view, setView] = useState<View>({ name: "meetings" });
   const [importPath, setImportPath] = useState<string | null>(null);
   const { data: stats, error: engineError } = usePoll(() => api<Stats>("/api/stats"), 5000);
+  const [engineStopped, setEngineStopped] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listen<string>("engine-exited", (event) => setEngineStopped(event.payload)).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   // Tell the user when a meeting finishes processing, even if they're looking elsewhere.
   const statuses = useRef<Map<number, string> | null>(null);
@@ -170,6 +224,7 @@ function Shell() {
           onImport={() => void chooseFile()}
         />
         <main className="flex min-w-0 flex-1 flex-col">
+          {engineStopped && <EngineStopped message={engineStopped} onRestarted={() => setEngineStopped(null)} />}
           <RecordingBar />
           <CallWatcher />
           {view.name === "meetings" && (
@@ -193,13 +248,25 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string>();
 
-  useEffect(() => {
+  const start = useCallback(() => {
+    setError(undefined);
     connect()
       .then(() => waitForEngine())
       .then(() => setReady(true))
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
+  useEffect(start, [start]);
 
-  if (!ready) return <Startup error={error} />;
+  const retry = async () => {
+    try {
+      await invoke("restart_engine");
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
+    start();
+  };
+
+  if (!ready) return <Startup error={error} onRetry={isTauri() ? () => void retry() : undefined} />;
   return <Shell />;
 }
