@@ -1,5 +1,5 @@
 import { Check, Copy, FileText, Loader2, Mail, Megaphone, MessageSquareQuote, RotateCw, Sparkles, Ticket } from "lucide-react";
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { PersonAvatar } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useReturnFocus } from "@/hooks/useReturnFocus";
 import { api, type ActionItem, type RecipeResult, type Summary } from "@/lib/engine";
@@ -153,15 +154,27 @@ function RecipeDialog({
   run,
   onClose,
   onRewrite,
+  onRefine,
   onCloseAutoFocus,
 }: {
   open: boolean;
   run: RecipeRun | null;
   onClose: () => void;
   onRewrite: (recipe: Choice) => void;
+  /** Rewrite the document as it stands (edits included) the way asked. */
+  onRefine: (recipe: Choice, previous: string, change: string) => void;
   onCloseAutoFocus: (event: Event) => void;
 }) {
   const writing = run !== null && !run.result && !run.error;
+  // The document can be edited before copying, and a change asked of the edited version.
+  const [text, setText] = useState("");
+  const [change, setChange] = useState("");
+  useEffect(() => setText(run?.result?.text ?? ""), [run?.result]);
+  const refine = () => {
+    if (!run || !change.trim() || !text.trim()) return;
+    onRefine(run.recipe, text, change.trim());
+    setChange("");
+  };
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="sm:max-w-2xl" onCloseAutoFocus={onCloseAutoFocus}>
@@ -172,7 +185,31 @@ function RecipeDialog({
         {run?.error ? (
           <p className="text-sm text-destructive">{run.error}</p>
         ) : run?.result ? (
-          <Textarea readOnly value={run.result.text} className="min-h-72 text-sm leading-relaxed" />
+          <>
+            <Textarea
+              aria-label="The document"
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+              className="min-h-72 text-sm leading-relaxed"
+            />
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label="Change it"
+                placeholder="Change it: shorter, for the client, add next steps..."
+                value={change}
+                maxLength={500}
+                onChange={(event) => setChange(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") refine();
+                }}
+                className="h-8 text-sm"
+              />
+              <Button size="sm" variant="outline" disabled={!change.trim()} onClick={refine}>
+                <Sparkles className="size-3.5" />
+                Rewrite
+              </Button>
+            </div>
+          </>
         ) : (
           <p className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
@@ -192,7 +229,7 @@ function RecipeDialog({
             <RotateCw className="size-4" />
             Write again
           </Button>
-          <Button disabled={!run?.result} onClick={() => run?.result && void copyText(run.result.text, "Copied")}>
+          <Button disabled={!run?.result} onClick={() => run?.result && void copyText(text, "Copied")}>
             <Copy className="size-4" />
             Copy
           </Button>
@@ -249,8 +286,9 @@ export function SummaryPanel({
     onChanged();
   };
 
-  // Started from a click (not an effect), so it runs exactly once.
-  const write = async (recipe: Choice) => {
+  // Started from a click (not an effect), so it runs exactly once. With ``refine``, the
+  // document as it stands is rewritten the way asked.
+  const write = async (recipe: Choice, refine?: { previous: string; change: string }) => {
     const id = nextRun.current++;
     const settle = (patch: Partial<RecipeRun>) =>
       setRuns((all) => (all[recipe.id]?.id === id ? { ...all, [recipe.id]: { ...all[recipe.id], ...patch } } : all));
@@ -258,7 +296,12 @@ export function SummaryPanel({
     setShown(recipe.id);
     setDialogOpen(true);
     try {
-      settle({ result: await api<RecipeResult>(`/api/meetings/${meetingId}/recipe`, { method: "POST", json: { recipe: recipe.id } }) });
+      settle({
+        result: await api<RecipeResult>(`/api/meetings/${meetingId}/recipe`, {
+          method: "POST",
+          json: { recipe: recipe.id, ...refine },
+        }),
+      });
     } catch (error) {
       settle({ error: String(error) });
     }
@@ -353,6 +396,7 @@ export function SummaryPanel({
         run={shown ? (runs[shown] ?? null) : null}
         onClose={() => setDialogOpen(false)}
         onRewrite={(recipe) => void write(recipe)}
+        onRefine={(recipe, previous, change) => void write(recipe, { previous, change })}
         onCloseAutoFocus={returnFocus.onCloseAutoFocus}
       />
 

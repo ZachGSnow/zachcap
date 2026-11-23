@@ -176,6 +176,29 @@ def test_a_recipe_writes_a_document_from_the_meeting(meeting, monkeypatch):
         summarize.recipe(store, meeting_id, "poem")
 
 
+def test_a_document_is_rewritten_the_way_you_ask(meeting, monkeypatch):
+    store, meeting_id = meeting
+    calls = fake_claude(monkeypatch, sample_summary())
+
+    written = summarize.recipe(
+        store, meeting_id, "email", previous="Subject: Cutover (edited)", change="shorter"
+    )
+
+    assert written["text"].startswith("Subject:")
+    first, mine, ask = calls["messages"]
+    assert first["content"][0]["cache_control"] == {"type": "ephemeral"}  # the meeting, cached
+    assert mine == {"role": "assistant", "content": "Subject: Cutover (edited)"}
+    assert ask["role"] == "user" and ask["content"].startswith("Rewrite it: shorter")
+    for previous, change, reason in [
+        ("Text", None, "together"),
+        ("Text", " ", "Say what to change"),
+        ("Text", "x" * 501, "at most 500"),
+        (" ", "shorter", "must be 1 to"),
+    ]:
+        with pytest.raises(RuntimeError, match=reason):
+            summarize.recipe(store, meeting_id, "email", previous, change)
+
+
 def test_summaries_cover_the_notes_taken_during_the_meeting(meeting, monkeypatch):
     store, meeting_id = meeting
     store.add_note(meeting_id, 61.5, "note", "Confirm the change window")
