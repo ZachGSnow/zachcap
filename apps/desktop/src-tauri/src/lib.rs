@@ -132,7 +132,8 @@ struct KeyState {
     recording: bool,
     dictation: bool,
     /// While Settings waits for new keys, ZachCap lets go of its own so the page gets them.
-    paused: bool,
+    /// Counted: only pause_shortcuts changes it, so nothing else takes the keys back early.
+    pauses: u32,
 }
 
 impl KeyState {
@@ -144,7 +145,7 @@ impl KeyState {
     }
 
     fn wanted(&self, action: &str) -> bool {
-        !self.paused
+        self.pauses == 0
             && match action {
                 "record" => true,
                 "bookmark" | "snapshot" => self.recording,
@@ -161,9 +162,10 @@ struct Keys(Mutex<KeyState>);
 struct KeyStatus {
     action: String,
     keys: String,
-    /// "on" (held now), "shared" (held now, and another app has the same keys: it doesn't
-    /// get them meanwhile), "free" (not needed now, and no other app has the keys), "off"
-    /// (not needed now, not checked), "taken" (another app has the keys) or "invalid".
+    /// "on" (held now), "shared" (dictate only: another app has registered the same keys,
+    /// and dictation gets them first while it's on), "free" (not needed now, and no other app
+    /// has registered them), "off" (not needed now, not checked), "taken" (another app has
+    /// registered them), "failed" (Windows refused the keyboard hook) or "invalid".
     state: &'static str,
 }
 
@@ -273,30 +275,26 @@ fn sync_dictation_keys(
     if shortcuts.is_registered(shortcut) {
         let _ = shortcuts.unregister(shortcut);
     }
-    let others_have_them = || {
+    // The hook gets the keys before another app's registered hotkey: "shared", not "taken".
+    let shared = probe && {
         let taken = shortcuts.register(shortcut).is_err();
         if !taken {
             let _ = shortcuts.unregister(shortcut);
         }
         taken
     };
-    if wanted {
-        if !dictation_keys::listen(Some(chord)) {
-            eprintln!("The dictation keys couldn't be read: Windows refused the keyboard hook");
-            return "off";
-        }
-        if probe && others_have_them() {
-            "shared"
-        } else {
-            "on"
-        }
-    } else {
+    if wanted && !dictation_keys::listen(Some(chord)) {
+        eprintln!("The dictation keys couldn't be read: Windows refused the keyboard hook");
+        return "failed";
+    }
+    if !wanted {
         dictation_keys::listen(None);
-        match probe {
-            false => "off",
-            true if others_have_them() => "taken",
-            true => "free",
-        }
+    }
+    match (wanted, probe, shared) {
+        (_, _, true) => "shared",
+        (true, _, false) => "on",
+        (false, false, _) => "off",
+        (false, true, false) => "free",
     }
 }
 
@@ -331,7 +329,7 @@ fn set_shortcuts(
             .map(|(action, _)| state.keys_for(action))
             .collect();
         state.keys = keys;
-        state.paused = false;
+        save_keys(&state.keys);
         let after: Vec<String> = ACTIONS
             .iter()
             .map(|(action, _)| state.keys_for(action))
@@ -367,7 +365,12 @@ fn shortcut_status(app: AppHandle) -> Vec<KeyStatus> {
 #[tauri::command]
 fn pause_shortcuts(app: AppHandle, paused: bool) {
     if let Some(keys) = app.try_state::<Keys>() {
-        keys.0.lock().unwrap().paused = paused;
+        let mut state = keys.0.lock().unwrap();
+        state.pauses = if paused {
+            state.pauses + 1
+        } else {
+            state.pauses.saturating_sub(1)
+        };
     }
     #[cfg(desktop)]
     sync_keys(&app, Vec::new(), false);
@@ -426,6 +429,26 @@ fn engine_dir() -> PathBuf {
     std::env::var("ZACHCAP_ENGINE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../engine"))
+}
+
+/// The keys last passed on from Settings, kept so the next start holds yours from the first
+/// moment, not the defaults until the engine answers (an app starting meanwhile could lose
+/// keys you gave it).
+fn keys_file() -> PathBuf {
+    data_dir().join("shortcuts.json")
+}
+
+fn save_keys(keys: &std::collections::HashMap<String, String>) {
+    if let Ok(text) = serde_json::to_string(keys) {
+        let _ = std::fs::write(keys_file(), text);
+    }
+}
+
+fn saved_keys() -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(keys_file())
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
 }
 
 /// Where the engine keeps its data; matches engine/src/zachcap/paths.py.
@@ -632,7 +655,10 @@ pub fn run() {
             // The global shortcuts (see KeyState): start or stop recording from anywhere;
             // while recording, bookmark the moment and snapshot the call; hold to dictate.
             // Handed to the page like the tray menu, so the window's state stays in sync.
-            app.manage(Keys(Mutex::new(KeyState::default())));
+            app.manage(Keys(Mutex::new(KeyState {
+                keys: saved_keys(),
+                ..KeyState::default()
+            })));
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::ShortcutState;
@@ -745,4 +771,30 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_the_engine_saves_parse_in_both_shell_parsers() {
+        // The forms engine/src/zachcap/shortcuts.py writes (tests/test_shortcuts.py keeps the
+        // same list): modifiers in the order Ctrl, Alt, Shift, Win, then the key.
+        for keys in [
+            "Ctrl+Alt+R",
+            "Ctrl+Alt+F9",
+            "Ctrl+Alt+Shift+9",
+            "Shift+Win+D",
+            "Ctrl+Win+F24",
+            "Alt+Win+0",
+            "F13",
+        ] {
+            assert!(parse_keys(keys).is_some(), "the plugin can't read {keys}");
+            assert!(
+                dictation_keys::Chord::parse(keys).is_some(),
+                "the hook can't read {keys}"
+            );
+        }
+    }
 }

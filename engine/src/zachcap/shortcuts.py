@@ -53,10 +53,16 @@ def normalized(keys: str) -> str:
     key = key.upper()
     if not KEY.fullmatch(key):
         raise ValueError("The last key must be a letter, a digit, or F1 to F24")
-    if not held & {"Ctrl", "Alt", "Win"} and not ALONE.fullmatch(key):
+    strong = held & {"Ctrl", "Alt", "Win"}
+    if not strong and not ALONE.fullmatch(key):
         raise ValueError(
             "Hold Ctrl, Alt or Win with it: on its own (or with Shift) it would be taken "
             "from every app"
+        )
+    if strong and len(strong) < 2 and "Win" not in strong and not ALONE.fullmatch(key):
+        raise ValueError(
+            "Hold two of Ctrl, Alt and Win with it: with just one it would take a shortcut "
+            "apps use (Ctrl+R reloads, Alt+F4 closes)"
         )
     return "+".join([name for name in ORDER if name in held] + [key])
 
@@ -70,12 +76,22 @@ def _saved(store) -> dict[str, str]:
 
 
 def current(store) -> dict[str, str]:
-    """The keys for each shortcut: the ones picked in Settings, or the defaults."""
+    """The keys for each shortcut: the ones picked in Settings, or the defaults. Saved keys
+    are checked again (saved by hand, or before a stricter check): ones that can't be used go
+    back to the default, and of two on the same keys the later goes back to its own ("" when
+    that's taken too, which Settings shows as keys that can't be used)."""
     saved = _saved(store)
-    return {
-        action: saved[action] if isinstance(saved.get(action), str) else keys
-        for action, keys in DEFAULTS.items()
-    }
+    keys: dict[str, str] = {}
+    for action, default in DEFAULTS.items():
+        wanted = saved.get(action)
+        try:
+            chosen = normalized(wanted) if isinstance(wanted, str) and wanted else default
+        except ValueError:
+            chosen = default
+        if chosen in keys.values():
+            chosen = default if default not in keys.values() else ""
+        keys[action] = chosen
+    return keys
 
 
 def change(store, changes: dict[str, str]) -> dict[str, str]:

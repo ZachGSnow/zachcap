@@ -20,6 +20,30 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store.close()
 
 
+def test_every_form_saved_is_one_the_shell_reads():
+    # The shell's own test (lib.rs, keys_the_engine_saves_parse_in_both_shell_parsers) parses
+    # this same list with both of its parsers; keep the two lists the same.
+    written = ["ctrl+alt+r", "alt+ctrl+f9", "shift+alt+ctrl+9", "win+shift+d", "win+ctrl+f24",
+               "win+alt+0", "f13"]  # fmt: skip
+    assert [shortcuts.normalized(keys) for keys in written] == [
+        "Ctrl+Alt+R",
+        "Ctrl+Alt+F9",
+        "Ctrl+Alt+Shift+9",
+        "Shift+Win+D",
+        "Ctrl+Win+F24",
+        "Alt+Win+0",
+        "F13",
+    ]
+    assert shortcuts.normalized("Win+D") == "Win+D"  # Win counts on its own
+
+
+def test_saved_keys_are_checked_again(store: Store):
+    store.set_setting(shortcuts.SETTING, '{"record": "Ctrl+R", "bookmark": "Ctrl+Alt+S"}')
+    keys = shortcuts.current(store)
+    assert keys["record"] == "Ctrl+Alt+R"  # can't be used any more: the default again
+    assert keys["bookmark"] == "Ctrl+Alt+S" and keys["snapshot"] == ""  # its default is taken
+
+
 def test_keys_are_written_one_way():
     assert shortcuts.normalized("alt + ctrl + p") == "Ctrl+Alt+P"
     assert shortcuts.normalized("Win+Shift+9") == "Shift+Win+9"
@@ -36,6 +60,9 @@ def test_keys_are_written_one_way():
         ("F5", "Hold Ctrl, Alt or Win"),  # every browser's reload
         ("Ctrl+Alt+Tab", "letter, a digit"),
         ("Ctrl+Hyper+P", "isn't Ctrl, Alt, Shift or Win"),
+        ("Ctrl+R", "two of Ctrl, Alt and Win"),  # every browser's reload
+        ("Alt+F4", "two of Ctrl, Alt and Win"),
+        ("Ctrl+Shift+T", "two of Ctrl, Alt and Win"),
     ],
 )
 def test_keys_that_cant_be_a_shortcut_are_refused(keys: str, reason: str):
