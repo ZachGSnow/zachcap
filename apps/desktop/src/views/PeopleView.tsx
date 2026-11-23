@@ -13,6 +13,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { usePoll } from "@/hooks/usePoll";
 import { api, type Person } from "@/lib/engine";
@@ -21,6 +29,7 @@ import { day, minutes, personColor } from "@/lib/format";
 export function PeopleView() {
   const { data: people, refresh } = usePoll(() => api<Person[]>("/api/people"), 0);
   const [renaming, setRenaming] = useState<Person | null>(null);
+  const [removing, setRemoving] = useState<Person | null>(null);
   const top = Math.max(...(people ?? []).map((p) => p.talk_seconds), 1);
 
   const act = async (label: string, action: () => Promise<unknown>) => {
@@ -96,12 +105,7 @@ export function PeopleView() {
                       {!isMe && (
                         <>
                           <DropdownMenuSeparator />
-                          <DropdownMenuItem
-                            variant="destructive"
-                            onSelect={() =>
-                              void act(`Removed ${person.name}`, () => api(`/api/people/${person.id}`, { method: "DELETE" }))
-                            }
-                          >
+                          <DropdownMenuItem variant="destructive" onSelect={() => setRemoving(person)}>
                             <Trash2 className="size-4" />
                             Remove person
                           </DropdownMenuItem>
@@ -146,6 +150,32 @@ export function PeopleView() {
           if (person) void act(`Renamed to ${name}`, () => api(`/api/people/${person.id}`, { method: "PATCH", json: { name } }));
         }}
       />
+      <Dialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Remove {removing?.name}?</DialogTitle>
+            <DialogDescription>
+              Their voice samples are deleted and their lines in past meetings go back to an unnamed speaker. This
+              can't be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRemoving(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                const person = removing;
+                setRemoving(null);
+                if (person) void act(`Removed ${person.name}`, () => api(`/api/people/${person.id}`, { method: "DELETE" }));
+              }}
+            >
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </ScrollArea>
   );
 }

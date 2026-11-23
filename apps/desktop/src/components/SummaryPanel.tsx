@@ -1,11 +1,11 @@
 import { Check, Copy, Loader2, MessageSquareQuote, RotateCw, Sparkles } from "lucide-react";
-import { useState, type ReactNode } from "react";
-import { toast } from "sonner";
+import type { ReactNode } from "react";
 
 import { PersonAvatar } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api, type ActionItem, type Summary } from "@/lib/engine";
+import { attempt, copyText } from "@/lib/feedback";
 import { clock, toSeconds, type SpeakerColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -72,6 +72,7 @@ export function ActionRow({
       <button
         role="checkbox"
         aria-checked={done}
+        aria-label={item.task}
         onClick={() => onToggle(item)}
         className={cn(
           "mt-0.5 flex size-4.5 shrink-0 items-center justify-center rounded-[5px] border transition-colors",
@@ -103,41 +104,37 @@ export function ActionRow({
   );
 }
 
+/** Toggles an action item and says so when it fails. */
+export async function toggleAction(item: ActionItem) {
+  return attempt("Couldn't update the action item", () =>
+    api(`/api/actions/${item.id}`, { method: "PATCH", json: { status: item.status === "done" ? "open" : "done" } }),
+  );
+}
+
 export function SummaryPanel({
-  meetingId,
   title,
   summary,
   items,
   me,
   colorOf,
+  summarizing,
+  onSummarize,
   onSeek,
   onChanged,
 }: {
-  meetingId: number;
   title: string;
   summary: Summary | null;
   items: ActionItem[];
   me: string;
   colorOf: (name: string) => SpeakerColor;
+  /** Owned by the meeting page, so its header button and this panel can't both start one. */
+  summarizing: boolean;
+  onSummarize: () => void;
   onSeek: (seconds: number) => void;
   onChanged: () => void;
 }) {
-  const [working, setWorking] = useState(false);
-
-  const generate = async () => {
-    setWorking(true);
-    try {
-      await api(`/api/meetings/${meetingId}/summary`, { method: "POST" });
-      onChanged();
-    } catch (error) {
-      toast.error("Couldn't create the summary", { description: String(error) });
-    } finally {
-      setWorking(false);
-    }
-  };
-
   const toggle = async (item: ActionItem) => {
-    await api(`/api/actions/${item.id}`, { method: "PATCH", json: { status: item.status === "done" ? "open" : "done" } });
+    await toggleAction(item);
     onChanged();
   };
 
@@ -152,9 +149,9 @@ export function SummaryPanel({
           Claude reads the named transcript (text only, never audio) and pulls out decisions, action items,
           commitments and who said what.
         </p>
-        <Button className="mt-5" disabled={working} onClick={() => void generate()}>
-          {working ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-          {working ? "Summarizing..." : "Summarize with Claude"}
+        <Button className="mt-5" disabled={summarizing} onClick={onSummarize}>
+          {summarizing ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+          {summarizing ? "Summarizing..." : "Summarize with Claude"}
         </Button>
       </div>
     );
@@ -175,16 +172,13 @@ export function SummaryPanel({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => {
-              void navigator.clipboard.writeText(toMarkdown(title, summary, items));
-              toast.success("Summary copied as Markdown");
-            }}
+            onClick={() => void copyText(toMarkdown(title, summary, items), "Summary copied as Markdown")}
           >
             <Copy className="size-3.5" />
             Copy
           </Button>
-          <Button size="sm" variant="outline" disabled={working} onClick={() => void generate()}>
-            {working ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
+          <Button size="sm" variant="outline" disabled={summarizing} onClick={onSummarize}>
+            {summarizing ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
             Regenerate
           </Button>
         </div>

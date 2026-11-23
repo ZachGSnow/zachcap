@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { usePoll } from "@/hooks/usePoll";
 import { api, connect, isTauri, waitForEngine, type Meeting, type Stats } from "@/lib/engine";
+import { notify } from "@/lib/feedback";
 import { ActionsView } from "@/views/ActionsView";
 import { MeetingView } from "@/views/MeetingView";
 import { MeetingsView } from "@/views/MeetingsView";
@@ -45,17 +46,6 @@ function Startup({ error }: { error?: string }) {
       )}
     </div>
   );
-}
-
-async function notify(title: string, body: string) {
-  if (!isTauri()) return;
-  try {
-    const { isPermissionGranted, requestPermission, sendNotification } = await import("@tauri-apps/plugin-notification");
-    if (!(await isPermissionGranted()) && (await requestPermission()) !== "granted") return;
-    sendNotification({ title, body });
-  } catch {
-    // Notifications are a nicety; the in-app toast already told the user.
-  }
 }
 
 function ImportDialog({ path, onClose, onImported }: { path: string | null; onClose: () => void; onImported: (id: number) => void }) {
@@ -132,7 +122,7 @@ function ImportDialog({ path, onClose, onImported }: { path: string | null; onCl
 function Shell() {
   const [view, setView] = useState<View>({ name: "meetings" });
   const [importPath, setImportPath] = useState<string | null>(null);
-  const { data: stats } = usePoll(() => api<Stats>("/api/stats"), 5000);
+  const { data: stats, error: engineError } = usePoll(() => api<Stats>("/api/stats"), 5000);
 
   // Tell the user when a meeting finishes processing, even if they're looking elsewhere.
   const statuses = useRef<Map<number, string> | null>(null);
@@ -155,6 +145,8 @@ function Shell() {
   }, 4000);
 
   const openMeeting = useCallback((id: number, at?: number) => setView({ name: "meeting", id, at }), []);
+  // Stable, so the recording provider doesn't re-subscribe to the hotkey on every render.
+  const onSaved = useCallback((id: number) => setView({ name: "meeting", id }), []);
 
   const chooseFile = async () => {
     if (isTauri()) {
@@ -168,9 +160,15 @@ function Shell() {
   };
 
   return (
-    <RecordingProvider onSaved={(id) => setView({ name: "meeting", id })}>
+    <RecordingProvider onSaved={onSaved}>
       <div className="flex h-screen overflow-hidden bg-background text-foreground">
-        <Sidebar view={view} openActions={stats?.open_actions ?? 0} onNavigate={setView} onImport={() => void chooseFile()} />
+        <Sidebar
+          view={view}
+          openActions={stats?.open_actions ?? 0}
+          engineOk={!engineError}
+          onNavigate={setView}
+          onImport={() => void chooseFile()}
+        />
         <main className="flex min-w-0 flex-1 flex-col">
           <RecordingBar />
           <CallWatcher />
@@ -186,7 +184,7 @@ function Shell() {
           {view.name === "settings" && <SettingsView />}
         </main>
       </div>
-      <ImportDialog path={importPath} onClose={() => setImportPath(null)} onImported={(id) => setView({ name: "meeting", id })} />
+      <ImportDialog path={importPath} onClose={() => setImportPath(null)} onImported={onSaved} />
     </RecordingProvider>
   );
 }

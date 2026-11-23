@@ -11,6 +11,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type Devices, type KeyStatus, type Settings } from "@/lib/engine";
+import { attempt } from "@/lib/feedback";
 
 const KEYS = [
   {
@@ -54,16 +55,19 @@ function Row({ label, help, children }: { label: string; help?: string; children
 }
 
 function Select({
+  label,
   value,
   onChange,
   options,
 }: {
+  label: string;
   value: string;
   onChange: (value: string) => void;
   options: { value: string; label: string }[];
 }) {
   return (
     <select
+      aria-label={label}
       value={value}
       onChange={(event) => onChange(event.target.value)}
       className="h-8 w-full min-w-0 rounded-md border bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
@@ -142,7 +146,13 @@ function StartWithWindows() {
 
   return (
     <Row label="Start with Windows" help="Opens in the tray when you sign in, so it can offer to record your calls.">
-      <Switch className="ml-auto" checked={on ?? false} disabled={on === undefined} onCheckedChange={(next) => void change(next)} />
+      <Switch
+        className="ml-auto"
+        aria-label="Start with Windows"
+        checked={on ?? false}
+        disabled={on === undefined}
+        onCheckedChange={(next) => void change(next)}
+      />
     </Row>
   );
 }
@@ -167,8 +177,10 @@ export function SettingsView() {
 
   const saveName = async () => {
     if (!settings || !name.trim() || name.trim() === settings.me.name) return;
-    await api(`/api/people/${settings.me.id}`, { method: "PATCH", json: { name: name.trim() } });
-    toast.success(`Your lines now show as ${name.trim()}`);
+    const saved = await attempt("Couldn't save your name", () =>
+      api(`/api/people/${settings.me.id}`, { method: "PATCH", json: { name: name.trim() } }),
+    );
+    if (saved) toast.success(`Your lines now show as ${name.trim()}`);
     await refresh();
   };
 
@@ -199,6 +211,7 @@ export function SettingsView() {
         <Section icon={<Mic className="size-3.5" />} title="Recording">
           <Row label="Microphone" help="Your voice. Use the one Teams uses: a headset, or the laptop mic.">
             <Select
+              label="Microphone"
               value={settings?.mic_device ?? ""}
               onChange={(value) => void save({ mic_device: value })}
               options={deviceOptions(devices?.inputs)}
@@ -209,6 +222,7 @@ export function SettingsView() {
             help="Everyone else: ZachCap records what plays on this device. No virtual microphone needed; a virtual cable works too if you use one."
           >
             <Select
+              label="Computer audio from"
               value={settings?.output_device ?? ""}
               onChange={(value) => void save({ output_device: value })}
               options={deviceOptions(devices?.outputs)}
@@ -225,6 +239,7 @@ export function SettingsView() {
         <Section icon={<Speaker className="size-3.5" />} title="Transcription">
           <Row label="Language" help="Whisper runs on your GPU. Pick the meeting language, or let it detect.">
             <Select
+              label="Language"
               value={settings?.language ?? "en"}
               onChange={(value) => void save({ language: value })}
               options={(settings?.languages ?? []).map((l) => ({ value: l.id, label: l.label }))}
@@ -235,6 +250,7 @@ export function SettingsView() {
         <Section icon={<Sparkles className="size-3.5" />} title="Summaries">
           <Row label="Claude model" help="Opus 5.5 caught more implicit commitments in testing. Cost is per hour-long meeting.">
             <Select
+              label="Claude model"
               value={settings?.summary_model ?? ""}
               onChange={(value) => void save({ summary_model: value })}
               options={(settings?.summary_models ?? []).map((m) => ({

@@ -10,9 +10,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+
+// Start with Windows is release-only (see run()); this keeps debug builds from warning
+// that the plugin is unused.
+#[cfg(all(desktop, debug_assertions))]
+use tauri_plugin_autostart as _;
 
 /// Added to the sign-in launch: ZachCap starts in the tray instead of opening its window.
 const HIDDEN_ARG: &str = "--hidden";
@@ -44,6 +50,50 @@ fn engine_exited(engine: tauri::State<Engine>) -> Option<String> {
         format!("Its log is {}.", data_dir().join("engine.log").display())
     };
     Some(format!("The engine stopped ({status}). {log}"))
+}
+
+/// The tray icon shows a red dot and says so in its tooltip while a recording runs, so
+/// it's visible even with the window closed.
+#[tauri::command]
+fn set_recording_indicator(app: AppHandle, recording: bool) {
+    let Some(tray) = app.tray_by_id("main") else {
+        return;
+    };
+    let _ = tray.set_tooltip(Some(if recording {
+        "ZachCap: recording"
+    } else {
+        "ZachCap"
+    }));
+    if let Some(icon) = app.default_window_icon() {
+        let _ = tray.set_icon(Some(if recording {
+            with_red_dot(icon)
+        } else {
+            icon.clone().to_owned()
+        }));
+    }
+}
+
+/// The app icon with a red recording dot (and a white ring) in its bottom-right corner.
+fn with_red_dot(icon: &Image<'_>) -> Image<'static> {
+    let (width, height) = (icon.width(), icon.height());
+    let mut rgba = icon.rgba().to_vec();
+    let radius = width.min(height) as f32 * 0.24;
+    let (cx, cy) = (width as f32 - radius - 1.0, height as f32 - radius - 1.0);
+    for y in 0..height {
+        for x in 0..width {
+            let distance = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            if distance <= radius * 1.25 {
+                let color = if distance <= radius {
+                    [239, 68, 68, 255]
+                } else {
+                    [255, 255, 255, 255]
+                };
+                let at = ((y * width + x) * 4) as usize;
+                rgba[at..at + 4].copy_from_slice(&color);
+            }
+        }
+    }
+    Image::new_owned(rgba, width, height)
 }
 
 /// Opens a folder in Explorer (the data folder, from Settings).
@@ -319,7 +369,12 @@ pub fn run() {
                 tell_about_tray(window.app_handle());
             }
         })
-        .invoke_handler(tauri::generate_handler![engine_info, engine_exited, open_folder])
+        .invoke_handler(tauri::generate_handler![
+            engine_info,
+            engine_exited,
+            open_folder,
+            set_recording_indicator
+        ])
         .build(tauri::generate_context!())
         .expect("error while building ZachCap")
         .run(|app, event| {

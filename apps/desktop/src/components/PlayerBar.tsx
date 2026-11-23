@@ -34,7 +34,9 @@ export function PlayerBar({
   };
   const cycleSpeed = () => {
     const a = element();
-    if (a) a.playbackRate = SPEEDS[(SPEEDS.indexOf(a.playbackRate) + 1) % SPEEDS.length];
+    // The default rate too: switching tracks for solo playback loads a new source,
+    // which resets playbackRate to defaultPlaybackRate.
+    if (a) a.defaultPlaybackRate = a.playbackRate = SPEEDS[(SPEEDS.indexOf(a.playbackRate) + 1) % SPEEDS.length];
   };
 
   return (
