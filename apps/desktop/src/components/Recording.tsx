@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Bookmark, Circle, Megaphone, Mic, Pause, Play, Square, TriangleAlert } from "lucide-react";
+import { Bookmark, Circle, Megaphone, Mic, Pause, Play, Square, Timer, TriangleAlert } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -16,10 +16,18 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { usePoll } from "@/hooks/usePoll";
-import { api, isTauri, type RecordState } from "@/lib/engine";
+import { api, isTauri, type RecordState, type Settings } from "@/lib/engine";
 import { announce, copyText, notify, windowInFront } from "@/lib/feedback";
 import { clock, levelPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
+
+/** Quiet this long after the call app lets go of the mic: the call ended. */
+const CALL_END_SETTLE = 10;
+/** Nobody heard this long, with no call app: an in-room meeting that ended. */
+const QUIET_CHECK_IN = 600;
+
+/** A countdown to stop: the call ended, or it has been quiet for ten minutes. */
+type AutoStop = { reason: "call" | "quiet"; deadline: number };
 
 /** To paste in the meeting chat: recording laws differ, and people should know. */
 const HEADS_UP =
@@ -36,6 +44,9 @@ type RecordingContext = {
   /** The note being typed in the recording bar. Stopping saves it into this meeting. */
   draft: string;
   setDraft: (next: string | ((current: string) => string)) => void;
+  /** Counting down to stop on its own; Keep recording cancels it. */
+  autoStop: AutoStop | null;
+  keepRecording: () => void;
 };
 
 const Context = createContext<RecordingContext | null>(null);
@@ -145,6 +156,69 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     if (!recording) setDraft("");
   }, [recording, setDraft]);
 
+  // The engine's warnings (a muted mic, no call audio, a nearly full disk), each said once
+  // while it lasts: as a Windows notification when the window is behind the call.
+  const warned = useRef(new Set<string>());
+  useEffect(() => {
+    const present = new Set(state?.recording ? (state.warnings ?? []).map((w) => w.key) : []);
+    for (const key of warned.current) if (!present.has(key)) warned.current.delete(key);
+    for (const warning of state?.recording ? (state.warnings ?? []) : []) {
+      if (warned.current.has(warning.key)) continue;
+      warned.current.add(warning.key);
+      void announce("Check the recording", warning.text, "warning");
+    }
+  }, [state]);
+
+  // Stop when the call ends (the call app let go of the mic and it went quiet), or after ten
+  // quiet minutes with no call app (an in-room meeting). Always a countdown that Keep
+  // recording cancels, so a lull in the conversation never ends a meeting.
+  const [stopWhenCallEnds, setStopWhenCallEnds] = useState(true);
+  useEffect(() => {
+    if (!recording) return;
+    void api<Settings>("/api/settings")
+      .then((settings) => setStopWhenCallEnds(settings.stop_when_call_ends))
+      .catch(() => undefined);
+  }, [recording]);
+  const [autoStop, setAutoStop] = useState<AutoStop | null>(null);
+  // "Keep recording" holds until things change: the call app is back, or someone spoke.
+  const kept = useRef({ call: false, quiet: false });
+  useEffect(() => {
+    if (!state?.recording) {
+      kept.current = { call: false, quiet: false };
+      setAutoStop(null);
+      return;
+    }
+    const ended = state.call?.ended_for ?? null;
+    const quiet = state.quiet_for ?? 0;
+    if (ended === null) kept.current.call = false;
+    if (quiet < QUIET_CHECK_IN) kept.current.quiet = false;
+    let reason: AutoStop["reason"] | null = null;
+    if (stopWhenCallEnds && !state.paused) {
+      if (ended !== null && ended >= CALL_END_SETTLE && quiet >= CALL_END_SETTLE && !kept.current.call) reason = "call";
+      else if (!state.call?.apps.length && quiet >= QUIET_CHECK_IN && !kept.current.quiet) reason = "quiet";
+    }
+    setAutoStop((current) =>
+      reason === null ? null : current?.reason === reason ? current : { reason, deadline: Date.now() + (reason === "call" ? 15_000 : 60_000) },
+    );
+  }, [state, stopWhenCallEnds]);
+  useEffect(() => {
+    if (!autoStop) return;
+    const seconds = Math.round((autoStop.deadline - Date.now()) / 1000);
+    void announce(
+      autoStop.reason === "call" ? "The call ended" : "Nothing heard for ten minutes",
+      `The recording stops in ${seconds} seconds unless you keep it going in ZachCap.`,
+    );
+    const timer = window.setTimeout(() => {
+      setAutoStop(null);
+      void stop().catch((error) => void announce("Couldn't stop recording", String(error), "error"));
+    }, Math.max(0, autoStop.deadline - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [autoStop, stop]);
+  const keepRecording = useCallback(() => {
+    if (autoStop) kept.current[autoStop.reason] = true;
+    setAutoStop(null);
+  }, [autoStop]);
+
   // The tray menu, Ctrl+Alt+R and Ctrl+Alt+B (registered by the Rust shell) work even when
   // the window is hidden in the tray.
   useEffect(() => {
@@ -169,7 +243,9 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
   }, [toggle, note]);
 
   return (
-    <Context.Provider value={{ state, start, stop, toggle, note, pause, draft, setDraft }}>{children}</Context.Provider>
+    <Context.Provider value={{ state, start, stop, toggle, note, pause, draft, setDraft, autoStop, keepRecording }}>
+      {children}
+    </Context.Provider>
   );
 }
 
@@ -294,7 +370,7 @@ function Meter({ label, dbfs }: { label: string; dbfs: number }) {
 /** One row when there's room. In a narrower window the note field gets a row of its own and
  * the level meters go, so Pause and Stop always stay on screen. */
 export function RecordingBar() {
-  const { state, stop, note, pause, draft, setDraft } = useRecording();
+  const { state, stop, note, pause, draft, setDraft, autoStop, keepRecording } = useRecording();
   const [stopping, setStopping] = useState(false);
   const saving = useRef(false);
   if (!state?.recording) return null;
@@ -370,6 +446,31 @@ export function RecordingBar() {
             </span>
           )}
         </form>
+        {autoStop && (
+          <div className="order-last flex basis-full items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-xs">
+            <Timer className="size-3.5 shrink-0 text-amber-600" />
+            <span className="min-w-0 flex-1">
+              {autoStop.reason === "call" ? "The call ended." : "Nothing heard for ten minutes."} Stopping in{" "}
+              <span className="font-mono tabular-nums">{Math.max(0, Math.ceil((autoStop.deadline - Date.now()) / 1000))}</span> s.
+            </span>
+            <Button size="sm" variant="outline" className="h-7" onClick={keepRecording}>
+              Keep recording
+            </Button>
+            <Button size="sm" variant="destructive" className="h-7" disabled={stopping} onClick={() => void finish()}>
+              Stop now
+            </Button>
+          </div>
+        )}
+        {(state.warnings ?? []).map((warning) => (
+          <span
+            key={warning.key}
+            className="order-last flex min-w-0 basis-full items-center gap-1.5 text-xs text-amber-700 dark:text-amber-300"
+            title={warning.text}
+          >
+            <TriangleAlert className="size-3.5 shrink-0" />
+            <span className="truncate">{warning.text}</span>
+          </span>
+        ))}
         {state.errors && state.errors.length > 0 && (
           <span
             className="order-last flex min-w-0 basis-full items-center gap-1.5 text-xs text-destructive"

@@ -356,3 +356,24 @@ def test_the_default_records_every_output_with_the_mic(tmp_path: Path, monkeypat
     # PortAudio only opened the mic: no loopback stream and no silent keep-alive stream.
     streams = capture.pyaudio.instances[-1].streams
     assert len(streams) == 1 and streams[0].closed
+
+
+def test_tracks_remember_when_they_last_had_any_sound_and_speech(tmp_path: Path, monkeypatch):
+    import numpy as np
+
+    fake = fake_pyaudio()
+    monkeypatch.setattr(capture, "pyaudio", fake)
+    track = capture.TrackRecorder("mic", MIC, tmp_path, chunk_seconds=300)
+    track.start(fake.PyAudio())
+    track._callback(bytes(2048), 1024, None, 0)  # exact zeros: a muted mic
+    drained(track)
+    assert track.signal_at is None and track.heard_at is None
+
+    track._callback(np.full(1024, 3, np.int16).tobytes(), 1024, None, 0)  # room hiss
+    drained(track)
+    assert track.signal_at is not None and track.heard_at is None
+
+    track._callback(np.full(1024, 4000, np.int16).tobytes(), 1024, None, 0)  # a voice
+    drained(track)
+    assert track.heard_at is not None
+    track.stop()

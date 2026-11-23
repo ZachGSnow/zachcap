@@ -29,9 +29,13 @@ export async function windowInFront(): Promise<boolean> {
 }
 
 /** A toast in the window, or a Windows notification when the window isn't in front. */
-export async function announce(title: string, body?: string, kind: "info" | "success" | "error" = "info") {
+export async function announce(
+  title: string,
+  body?: string,
+  kind: "info" | "success" | "warning" | "error" = "info",
+) {
   if (await windowInFront()) {
-    const show = kind === "error" ? toast.error : kind === "success" ? toast.success : toast;
+    const show = { info: toast, success: toast.success, warning: toast.warning, error: toast.error }[kind];
     show(title, body ? { description: body } : undefined);
   } else {
     await notify(title, body ?? "");

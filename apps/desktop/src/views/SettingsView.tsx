@@ -53,6 +53,7 @@ type SettingsChange = Partial<{
   export_folder: string;
   keep_audio_days: number;
   mask_before_claude: boolean;
+  stop_when_call_ends: boolean;
 }>;
 
 const THEMES: { value: Theme; label: string }[] = [
@@ -343,6 +344,17 @@ export function SettingsView() {
               <RefreshCw className="size-3.5" />
               Refresh devices
             </Button>
+          </Row>
+          <Row
+            label="Stop when the call ends"
+            help="When Teams or another call app lets go of your microphone and it goes quiet, or after ten quiet minutes in a room, ZachCap counts down and stops. Keep recording cancels it."
+          >
+            <Switch
+              className="ml-auto"
+              aria-label="Stop when the call ends"
+              checked={settings?.stop_when_call_ends ?? true}
+              onCheckedChange={(on) => void save({ stop_when_call_ends: on })}
+            />
           </Row>
         </Section>
 

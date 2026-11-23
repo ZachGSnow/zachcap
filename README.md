@@ -15,7 +15,7 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 
 ## Features
 
-- **Record any call** with one button or **Ctrl+Alt+R** from anywhere; the app lives in the tray and can start with Windows. It notices when Teams or another app starts using your microphone and offers to record. The other side is recorded from **every speaker and headset at once**, so a call on a headset that isn't the Windows default, or a headset plugged in mid-call, isn't lost.
+- **Record any call** with one button or **Ctrl+Alt+R** from anywhere; the app lives in the tray and can start with Windows. It notices when Teams or another app starts using your microphone and offers to record. The other side is recorded from **every speaker and headset at once**, so a call on a headset that isn't the Windows default, or a headset plugged in mid-call, isn't lost. While it records it warns about a muted mic, a call with no call audio and a nearly full disk, keeps the PC from going to sleep, and when the call ends it **counts down and stops** (Keep recording cancels).
 - **Notes and bookmarks while you record**: type a note in the recording bar, or press **Ctrl+Alt+B** to bookmark the moment. They appear on the meeting's timeline, and summaries make sure to cover them. **Pause** privately: nothing is recorded until you resume, and the tracks stay in sync.
 - **Nothing lost to a crash**: the meeting is saved from its first second. If ZachCap is quit mid-call, crashes, or Windows restarts, the audio recorded so far is recovered and processed at the next start.
 - **Import recordings** you already have (a Teams .mp4, .m4a, .mp3, .wav...), with an optional time range.
@@ -82,6 +82,7 @@ Everything is set in the app under **Settings**:
 | Kinds of meeting, one-click documents | Edit the built-in ones (and reset them), or add your own with your own instructions | As shipped |
 | API keys | Hugging Face token and Anthropic key | not set |
 | Start with Windows | Opens ZachCap in the tray when you sign in (release builds) | off |
+| Stop when the call ends | Count down and stop when the call app lets go of the mic and it goes quiet, or after ten quiet minutes | on |
 | Theme | Light, dark, or the same as Windows | Same as Windows |
 | Export folder | Keeps a Markdown copy of every meeting in a folder you choose, one file per meeting, named with its id (M12) | off |
 
@@ -114,7 +115,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 122 tests: storage, matching, audio, capture and mixing, crash recovery, API, summaries and templates, Ask
+uv run pytest -q             # 130 tests: storage, matching, audio, capture and mixing, the recording watch, crash recovery, API, summaries and templates, Ask
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```

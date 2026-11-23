@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from . import __version__, apikeys, audio, export, insights, paths, pipeline, privacy, prompts
 from .store import Store
+from .watchdog import Watch
 
 ALLOWED_ORIGINS = ["http://tauri.localhost", "tauri://localhost", "http://localhost:1420"]
 RECORDING_FOLDER = re.compile(r"\d{4}-\d{2}-\d{2}_\d{6}")
@@ -131,6 +132,7 @@ class SettingsBody(BaseModel):
     export_folder: str | None = None  # "" turns automatic export off
     keep_audio_days: int | None = None  # 0 keeps recordings forever
     mask_before_claude: bool | None = None
+    stop_when_call_ends: bool | None = None
 
 
 KEEP_AUDIO_CHOICES = (0, 7, 30, 90, 365)
@@ -245,6 +247,9 @@ def create_app(token: str) -> FastAPI:
         with lock:
             recorder = recording.pop("recorder", None)
             meeting_id = recording.pop("meeting_id", None)
+            watch = recording.pop("watch", None)
+            if watch is not None:
+                watch.stop()
             if recorder is None:
                 return None
             duration = recorder.elapsed
@@ -641,6 +646,7 @@ def create_app(token: str) -> FastAPI:
         recorder = recording.get("recorder")
         if recorder is None:
             return {"recording": False}
+        watch = recording.get("watch")
         return {
             "recording": True,
             "title": recording.get("title"),
@@ -650,6 +656,9 @@ def create_app(token: str) -> FastAPI:
             "errors": recorder.errors(),
             "paused": recorder.paused,
             "notes": recording.get("notes", 0),
+            # Warnings, whether the call app still holds the mic, and how long it's been quiet
+            # (for stopping when the call ends).
+            **(watch.status() if watch is not None else {}),
         }
 
     @app.post("/api/record/pause", dependencies=auth)
@@ -708,7 +717,15 @@ def create_app(token: str) -> FastAPI:
                 raise HTTPException(
                     status_code=500, detail=f"Couldn't start recording: {exc}"
                 ) from exc
-            recording.update(recorder=recorder, meeting_id=meeting_id, title=title, notes=0)
+            # Warnings while it runs, call-end detection, and no sleep until it stops.
+            watch = Watch(recorder, folder)
+            try:
+                watch.start()
+            except Exception:  # never worth losing the recording over
+                traceback.print_exc()
+            recording.update(
+                recorder=recorder, meeting_id=meeting_id, title=title, notes=0, watch=watch
+            )
         return {"recording": True, "meeting_id": meeting_id}
 
     @app.post("/api/record/stop", dependencies=auth)
@@ -824,6 +841,8 @@ def create_app(token: str) -> FastAPI:
             "export_folder": store.setting("export_folder", ""),
             "keep_audio_days": int(store.setting("keep_audio_days", "0") or 0),
             "mask_before_claude": store.setting("mask_before_claude") == "1",
+            # Offer to stop (with a countdown) when the call ends or after a long silence.
+            "stop_when_call_ends": store.setting("stop_when_call_ends", "1") == "1",
             "templates": prompts.choices(store, "template"),
             "recipes": prompts.choices(store, "recipe"),
             "language": store.setting("language", "en"),
@@ -851,6 +870,8 @@ def create_app(token: str) -> FastAPI:
             privacy.remove_old_audio(store)
         if body.mask_before_claude is not None:
             store.set_setting("mask_before_claude", "1" if body.mask_before_claude else "0")
+        if body.stop_when_call_ends is not None:
+            store.set_setting("stop_when_call_ends", "1" if body.stop_when_call_ends else "0")
         if body.export_folder is not None:
             folder = body.export_folder.strip()
             if folder and not Path(folder).is_dir():
