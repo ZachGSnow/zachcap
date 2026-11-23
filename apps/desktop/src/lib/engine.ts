@@ -23,6 +23,9 @@ export type Meeting = {
   audio_removed_at?: string | null;
   /** The service ticket it was about, if any. */
   ticket?: string | null;
+  /** Its client: set on it, or (inferred) the one its people all work for. */
+  client?: string | null;
+  client_inferred?: boolean;
 };
 
 /** A ticket number found in a meeting, and where: offered to pick as its ticket. */
@@ -122,6 +125,9 @@ export type MeetingDetail = {
   mentions: Mention[];
   /** Ticket numbers found in it, best first, other than its own. */
   ticket_suggestions: TicketFound[];
+  /** The clients of the people in it, and every client named so far. */
+  clients_heard: string[];
+  clients_known: string[];
 };
 
 export type Person = {
@@ -132,6 +138,8 @@ export type Person = {
   meetings: number;
   talk_seconds: number;
   last_seen: string | null;
+  /** The client they work for. */
+  org: string | null;
 };
 
 export type Stats = {
@@ -364,6 +372,7 @@ export type WorkLogMeeting = {
   status: string;
   /** The service ticket it was about, if any. */
   ticket: string | null;
+  client: string | null;
 };
 
 export type WorkLog = {
@@ -377,6 +386,8 @@ export type WorkLog = {
   your_items: WorkLogItem[];
   waiting_on: WorkLogItem[];
   markdown: string;
+  /** The one client it's for, if it was asked for one. */
+  client: string | null;
 };
 
 export type SoundCheckSide = { device: string; peak_dbfs: number | null; heard: boolean };

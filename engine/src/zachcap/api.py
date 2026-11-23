@@ -33,6 +33,7 @@ from . import (
     __version__,
     apikeys,
     audio,
+    clients,
     dictation,
     digest,
     export,
@@ -88,6 +89,11 @@ class TitleBody(BaseModel):
 class MeetingChange(BaseModel):
     title: str | None = None
     ticket: str | None = None  # "" takes it off
+    client: str | None = None  # "" goes back to the client of the people in it
+
+
+class ClientBody(BaseModel):
+    client: str  # "" for none
 
 
 class QuestionBody(BaseModel):
@@ -447,14 +453,19 @@ def create_app(token: str) -> FastAPI:
     def list_meetings(store: Store = Depends(db)):
         participants = store.participants()
         mentioned = mentions.counts(store)
+        meetings = store.meetings()
+        client_of = clients.of_meetings(store, meetings)
         return [
             {
                 **dict(m),
                 "progress": worker.progress.get(m["id"]),
                 "participants": participants.get(m["id"], []),
                 "mentions": mentioned.get(m["id"], 0),
+                # Its client: the one set on it, else the one its people all work for.
+                "client": client_of[m["id"]]["client"],
+                "client_inferred": client_of[m["id"]]["inferred"],
             }
-            for m in store.meetings()
+            for m in meetings
         ]
 
     @app.get("/api/meetings/{meeting_id}", dependencies=auth)
@@ -463,8 +474,17 @@ def create_app(token: str) -> FastAPI:
         speakers = [
             {k: s[k] for k in s.keys() if k != "embedding"} for s in store.speakers(meeting_id)
         ]
+        client = clients.of_meeting(store, meeting)
         return {
-            "meeting": {**dict(meeting), "progress": worker.progress.get(meeting_id)},
+            "meeting": {
+                **dict(meeting),
+                "progress": worker.progress.get(meeting_id),
+                "client": client["client"],
+                "client_inferred": client["inferred"],
+            },
+            # The clients of the people in it, and every client named so far (to pick from).
+            "clients_heard": client["clients"],
+            "clients_known": clients.known(store),
             "speakers": speakers,
             "segments": [dict(row) for row in store.transcript(meeting_id)],
             "summary": store.summary(meeting_id),
@@ -503,13 +523,24 @@ def create_app(token: str) -> FastAPI:
                 changes["ticket"] = tickets.checked(body.ticket) or None
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if body.client is not None:
+            try:
+                changes["client"] = clients.checked(body.client) or None
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         if changes:
             store.update_meeting(meeting_id, **changes)
             if "ticket" not in changes:
                 tickets.fill(store, meeting_id)  # a ticket number typed in the title
             export.auto_export(store, meeting_id)
         meeting = store.meeting(meeting_id)
-        return {"title": meeting["title"], "ticket": meeting["ticket"]}
+        client = clients.of_meeting(store, meeting)
+        return {
+            "title": meeting["title"],
+            "ticket": meeting["ticket"],
+            "client": client["client"],
+            "client_inferred": client["inferred"],
+        }
 
     @app.delete("/api/meetings/{meeting_id}", dependencies=auth)
     def delete_meeting(meeting_id: int, store: Store = Depends(db)):
@@ -525,9 +556,15 @@ def create_app(token: str) -> FastAPI:
         return {"deleted": meeting_id}
 
     @app.get("/api/worklog", dependencies=auth)
-    def work_log(period: str = "day", day: str | None = None, store: Store = Depends(db)):
-        """The day's or week's meetings, people, action items and draft time entries."""
-        return digest.build(store, *work_log_period(period, day))
+    def work_log(
+        period: str = "day",
+        day: str | None = None,
+        client: str | None = None,
+        store: Store = Depends(db),
+    ):
+        """The day's or week's meetings, people, action items and draft time entries (for
+        one client, if given)."""
+        return digest.build(store, *work_log_period(period, day), client=client or None)
 
     @app.post("/api/worklog/save", dependencies=auth)
     def save_work_log(body: WorkLogBody, store: Store = Depends(db)):
@@ -949,6 +986,23 @@ def create_app(token: str) -> FastAPI:
         kept = store.rename_person(person_id, body.name.strip())
         export_soon(store, store.person_meetings(kept))
         return {"id": kept}
+
+    @app.put("/api/people/{person_id}/client", dependencies=auth)
+    def set_person_client(person_id: int, body: ClientBody, store: Store = Depends(db)):
+        """The client a person works for ("" for none): their meetings follow."""
+        if store.person(person_id) is None:
+            raise HTTPException(status_code=404, detail="No such person")
+        try:
+            client = clients.checked(body.client)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        store.set_client(person_id, client)
+        export_soon(store, store.person_meetings(person_id))
+        return {"client": client or None}
+
+    @app.get("/api/clients", dependencies=auth)
+    def list_clients(store: Store = Depends(db)):
+        return clients.known(store)
 
     @app.delete("/api/people/{person_id}/voice", dependencies=auth)
     def forget_voice(person_id: int, store: Store = Depends(db)):

@@ -116,11 +116,16 @@ def meetings_list(
     until: str | None = None,
     person: str | None = None,
     ticket: str | None = None,
+    client: str | None = None,
 ) -> str:
+    from . import clients
+
     participants = store.participants()
+    meetings = store.meetings()
+    client_of = clients.of_meetings(store, meetings)
     lines = []
     matching = 0
-    for m in store.meetings():
+    for m in meetings:
         day = _day(m["started_at"])
         names = participants.get(m["id"], [])
         if (since and day < since) or (until and day > until):
@@ -129,13 +134,18 @@ def meetings_list(
             continue
         if ticket and (m["ticket"] or "") != ticket.strip().upper():
             continue
+        if not clients.matches(client_of[m["id"]], client):
+            continue
         matching += 1
         if len(lines) >= MEETINGS_LIMIT:
             continue  # counted, so the note below says how many there are
         summary = store.summary(m["id"])
         overview = summary["content"]["overview"] if summary else "(not summarized)"
         minutes = round((m["duration"] or 0) / 60)
-        about = f" ticket {m['ticket']};" if m["ticket"] else ""
+        found = client_of[m["id"]]["client"]
+        about = (f" client {found};" if found else "") + (
+            f" ticket {m['ticket']};" if m["ticket"] else ""
+        )
         lines.append(
             f'M{m["id"]} {day} "{m["title"]}" {minutes} min;{about} '
             f"{', '.join(names) or 'speakers not named'}. {overview}"
@@ -247,17 +257,20 @@ def make_tools(store: Store) -> list:
         until: str | None = None,
         person: str | None = None,
         ticket: str | None = None,
+        client: str | None = None,
     ) -> str:
-        """Meetings, newest first, with date, length, ticket, who spoke and the summary's
-        overview.
+        """Meetings, newest first, with date, length, client, ticket, who spoke and the
+        summary's overview.
 
         Args:
             since: Only meetings on or after this date, YYYY-MM-DD.
             until: Only meetings on or before this date, YYYY-MM-DD.
             person: Only meetings this person spoke in.
             ticket: Only meetings about this service ticket number.
+            client: Only meetings with this client (the company the people work for).
         """
-        return privacy.outgoing(store, meetings_list(store, since, until, person, ticket))
+        listed = meetings_list(store, since, until, person, ticket, client)
+        return privacy.outgoing(store, listed)
 
     @beta_tool
     def get_meeting(meeting_id: int, start_at: str | None = None) -> str:

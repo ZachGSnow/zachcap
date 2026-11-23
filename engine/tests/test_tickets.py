@@ -126,7 +126,7 @@ def test_tickets_through_the_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert detail["ticket_suggestions"][0]["ticket"] == "1924086"
 
     chosen = client.patch(f"/api/meetings/{meeting_id}", headers=AUTH, json={"ticket": "1924086"})
-    assert chosen.json() == {"title": "Printer down", "ticket": "1924086"}
+    assert (chosen.json()["title"], chosen.json()["ticket"]) == ("Printer down", "1924086")
     detail = client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()
     assert detail["ticket_suggestions"] == []  # the one it has isn't offered again
 
@@ -144,5 +144,5 @@ def test_tickets_through_the_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     renamed = client.patch(
         f"/api/meetings/{meeting_id}", headers=AUTH, json={"title": "Printer down 7654321"}
     )
-    assert renamed.json() == {"title": "Printer down 7654321", "ticket": "7654321"}  # filled in
+    assert renamed.json()["ticket"] == "7654321"  # filled in from the new title
     store.close()
