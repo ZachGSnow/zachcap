@@ -177,29 +177,48 @@ class Transcriber:
 # "ER", "Ah", "mm" for millimetres, "Uh-huh" and "Mm-hmm" are left alone.
 FILLER = r"(?<![\w'-])(?:[Uu]m+|[Uu]h+|[Uu]hm|[Ee]rm|[Hh]mm+)(?![\w'-])"
 # "Scratch that" as a command: a sentence that is it, or opens with it (after "actually",
-# "sorry", "no" or "wait"), takes back the sentence before; "..., scratch that." ends one and
-# takes it back; "..., scratch that, ..." takes back what came before it in that sentence.
+# "no", "oh", "wait" and the like, one or more), takes back the sentence before;
+# "..., scratch that." ends one and takes it back; "..., scratch that, ..." takes back what
+# came before it in that sentence, unless what follows goes on from it ("..., and ...").
 # Used as words ("Did the cat scratch that?", "scratch that item") it's left as said.
-LEAD_IN = r"(?:(?:actually|sorry|no|oh wait|wait|oops)[,.!]?\s+)?"
+LEAD_WORDS = r"(?:actually|sorry|no|oh|okay|ok|ah|yeah|wait|oops)"
+LEAD_IN = rf"(?:{LEAD_WORDS}[,.!]?\s+)*"
 RETRACT = re.compile(rf"(?i)^{LEAD_IN}scratch that(?:[.!;:]\s*|,\s*|$)")
+ONLY_LEAD_IN = re.compile(rf"(?i)^(?:{LEAD_WORDS}[,.!]?\s*)+$")
 RETRACTED = re.compile(r"(?i),\s*scratch that[.!]?$")
-INSIDE = re.compile(r"(?i)^.*?,\s*scratch that,\s*(?=\S)")
-ABBREVIATIONS = {"dr", "mr", "mrs", "ms", "st", "vs", "etc", "jr", "sr", "no", "approx", "inc"}
+INSIDE = re.compile(r"(?i)^.*?,\s*scratch that,\s*(?=\S)(?!(?:and|or|but|then)\b)")
+# Before a name or an example, so always the same sentence ("Mr. Jones", "e.g. Contoso").
+TITLES = {"dr", "mr", "mrs", "ms", "st", "e.g", "i.e"}
+# The same sentence only when it goes on in lowercase or with a number ("3 p.m. tonight",
+# "no. 5"): "Contoso Inc. Next item" is two.
+ABBREVIATIONS = {"vs", "etc", "jr", "sr", "no", "approx", "inc"}
+
+
+def _goes_on(sentence: str, part: str) -> bool:
+    """Whether ``part`` is the rest of ``sentence``, which ended with a title, an initial
+    ("J. Smith") or an abbreviation, rather than a new sentence. A number isn't an initial:
+    "Meet at 3. Scratch that." is two sentences."""
+    words = sentence.split()
+    last = words[-1].lower().rstrip(".") if words else ""
+    if last in TITLES or (len(last) == 1 and last.isalpha()):
+        return True
+    if last in ABBREVIATIONS or re.fullmatch(r"(?:[a-z]\.)+[a-z]", last):
+        return part[:1].islower() or part[:1].isdigit()
+    return False
 
 
 def _sentences(text: str) -> list[str]:
-    """Sentences, not split after an abbreviation ("Mr.", "3 p.m.", "e.g.") or an initial."""
+    """Sentences, not split after an abbreviation ("Mr.", "3 p.m. tonight", "e.g. the") or
+    an initial. "Scratch that" always starts its own, or goes with lead-in words said just
+    before it ("No. Scratch that." is "No, scratch that.")."""
     sentences: list[str] = []
     for part in re.split(r"(?<=[.!?])\s+", text.strip()):
-        words = sentences[-1].split() if sentences else []
-        last = words[-1].lower().rstrip(".") if words else ""
-        if (
-            sentences
-            and sentences[-1].endswith(".")
-            and (
-                last in ABBREVIATIONS or len(last) == 1 or re.fullmatch(r"(?:[a-z]\.)+[a-z]", last)
-            )
-        ):
+        if sentences and RETRACT.match(_without_fillers(part)):
+            joined = bool(ONLY_LEAD_IN.match(_without_fillers(sentences[-1])))
+        else:
+            joined = bool(sentences) and sentences[-1].endswith(".")
+            joined = joined and _goes_on(sentences[-1], part)
+        if joined:
             sentences[-1] += " " + part
         else:
             sentences.append(part)
@@ -209,17 +228,20 @@ def _sentences(text: str) -> list[str]:
 def _without_fillers(sentence: str) -> str:
     # One before an end mark goes with the comma before it ("him, um." is "him."); elsewhere
     # with the comma or dots after it ("Uh... let me" is "let me").
+    said = sentence
     sentence = re.sub(rf",?\s*{FILLER}\s*(?=[.?!])", "", sentence)
     sentence = re.sub(rf"{FILLER}[,.]*\s*", "", sentence)
-    sentence = re.sub(r"^[\s.,;:?!]+", "", sentence)  # nothing left before the words
+    if sentence != said:  # and the marks it left before the words (".NET" keeps its dot)
+        sentence = re.sub(r"^(?:\s*[.,;:?!]+(?=\s|$))+", "", sentence)
     return re.sub(r"\s{2,}", " ", sentence).strip()
 
 
 def _as_said(said: str, sentence: str) -> str:
     """A sentence that lost its first words starts with a capital again, if it did as said
-    and the new first word is an ordinary lowercase one ("vCenter" stays as spelled)."""
-    first = sentence.split(maxsplit=1)[0] if sentence else ""
-    if said[:1].isupper() and first.isalpha() and first.islower():
+    and the new first word is an ordinary lowercase one ("thanks.", "let's", "follow-up";
+    "vCenter" stays as spelled)."""
+    first = sentence.split(maxsplit=1)[0].rstrip(".,;:!?") if sentence else ""
+    if said[:1].isupper() and first[:1].isalpha() and first.islower():
         return sentence[:1].upper() + sentence[1:]
     return sentence
 
@@ -695,8 +717,9 @@ class Dictation:
             "typed": typed,
             "copied": bool(why) and copy_to_clipboard(text),
             "why": why,
-            # Something was said, and "scratch that" took it all back: not "nothing heard".
-            "taken_back": bool(heard) and not text,
+            # "Scratch that" took back all that was said: not "nothing heard". A filler
+            # sound alone ("Um.") is nothing heard.
+            "taken_back": bool(heard) and not text and "scratch that" in heard.lower(),
         }
         if text and forgotten == self._forgotten:  # not forgotten while it was transcribed
             delivered = "typed" if typed and not why else "copied" if result["copied"] else "kept"

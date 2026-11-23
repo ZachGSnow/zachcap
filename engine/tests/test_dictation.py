@@ -122,6 +122,36 @@ def test_text_is_typed_as_characters_never_as_enter_or_tab():
         ("Hmm? Call Dana.", "Call Dana."),
         ("Uh, vCenter is down.", "vCenter is down."),  # spelled as Words to know has it
         ("Uh-huh, sure. Mm-hmm, sure.", "Uh-huh, sure. Mm-hmm, sure."),
+        # A sentence that ends in a number or an abbreviation is still a sentence.
+        ("Meet at 3. Scratch that. Meet at 4.", "Meet at 4."),
+        ("Reboot server 2. Scratch that, server 3.", "Server 3."),
+        ("Meet at 3 p.m. Scratch that, at 4 p.m.", "At 4 p.m."),
+        ("Tell him no. Scratch that. Tell him yes.", "Tell him yes."),
+        ("Send it to Contoso Inc. Scratch that, to Fabrikam.", "To Fabrikam."),
+        ("We met at 3. Dana wants a follow-up, scratch that.", "We met at 3."),
+        ("Item no. 5 is done.", "Item no. 5 is done."),
+        ("Use e.g. Contoso. Scratch that.", ""),
+        # Lead-ins, one or more, and the way Whisper often writes "No, scratch that".
+        ("Call Dana at three. Oh, scratch that. Call her at four.", "Call her at four."),
+        ("Call Dana at three. Wait, no, scratch that. Call her at four.", "Call her at four."),
+        ("Call Dana at three. Yeah, scratch that, call her at four.", "Call her at four."),
+        ("Call Dana at three. No. Scratch that. Call her at four.", "Call her at four."),
+        # The capital comes back whatever follows the new first word.
+        ("Um, thanks.", "Thanks."),
+        ("Um, let's meet at four.", "Let's meet at four."),
+        ("Scratch that, it's at four.", "It's at four."),
+        ("Uh, follow-up tomorrow.", "Follow-up tomorrow."),
+        # Dots that belong to a word stay.
+        (
+            "The server is patched. .NET 8 is installed.",
+            "The server is patched. .NET 8 is installed.",
+        ),
+        ("Uh, .NET is down.", ".NET is down."),
+        # "..., scratch that, and ..." goes on from it: words, typed as said.
+        (
+            "Find the lottery ticket, scratch that, and see if we won.",
+            "Find the lottery ticket, scratch that, and see if we won.",
+        ),
     ],
 )
 def test_what_you_say_is_tidied_on_this_pc(said: str, typed: str):
@@ -146,6 +176,10 @@ def test_a_dictation_taken_back_says_so_and_a_snippet_still_matches(
     dictator.start()
     done = dictator.finish(None, "en", None, type_it=False)
     assert done["text"] == "" and done["taken_back"]  # not "nothing heard"
+    dictator.transcriber.said = "Um."
+    dictator.start()
+    done = dictator.finish(None, "en", None, type_it=False)
+    assert done["text"] == "" and not done["taken_back"]  # a sound alone: nothing heard
 
 
 def test_audio_is_resampled_to_16k_mono():
