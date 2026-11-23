@@ -265,6 +265,11 @@ export function WorkLogView({ onOpen }: { onOpen: (meetingId: number) => void })
                           {m.title}
                         </button>
                         {m.people.length > 0 && <span className="text-xs text-muted-foreground">with {m.people.join(", ")}</span>}
+                        {(m.topics ?? []).map((topic) => (
+                          <span key={topic.topic} className="rounded-md bg-muted px-1.5 py-0.5 text-xs text-muted-foreground" title="A topic said in it">
+                            #{topic.topic} {topic.count}
+                          </span>
+                        ))}
                       </div>
                       <p className={cn("mt-2 text-sm leading-relaxed [overflow-wrap:anywhere]", !m.overview && "text-muted-foreground")}>
                         {m.overview || "Not summarized yet: summarize it for an overview, decisions and action items."}

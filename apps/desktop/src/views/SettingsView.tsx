@@ -3,6 +3,7 @@ import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
   Copy,
   FolderOpen,
+  Hash,
   KeyRound,
   Keyboard,
   MessageSquareText,
@@ -90,6 +91,7 @@ type SettingsChange = Partial<{
   dictation_snippets: string;
   also_answer_to: string;
   ticket_patterns: string;
+  topics: string;
   watch_folder: string;
   /** With watch_folder: import the recordings already there too. */
   watch_existing: boolean;
@@ -546,6 +548,35 @@ function Snippets({ saved, onSave }: { saved: string; onSave: (value: string) =>
   );
 }
 
+/** Topics to track across meetings: a name, a colon, then the words that mean it. */
+function TopicsEditor({ saved, onSave }: { saved: string; onSave: (value: string) => Promise<void> }) {
+  const [value, setValue] = useState(saved);
+  useEffect(() => setValue(saved), [saved]);
+  const changed = value.trim() !== saved.trim();
+  return (
+    <div className="px-4 py-3.5">
+      <div className="text-sm font-medium">Topics</div>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        One per line: a name, a colon, then the words or phrases that mean it, like{" "}
+        <code className="font-mono">Renewals: renewal, contract, quote</code>. Each meeting shows the topics said in it,
+        and the Topics page lists where each came up. Worked out on this computer.
+      </p>
+      <Textarea
+        aria-label="Topics"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        placeholder={"Renewals: renewal, contract, quote\nWindows 10: windows 10, win10, end of support"}
+        className="mt-2.5 min-h-20 font-mono text-xs"
+      />
+      <div className="mt-2 flex justify-end">
+        <Button size="sm" disabled={!changed} onClick={() => void onSave(value)}>
+          Save topics
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function StartWithWindows() {
   const [on, setOn] = useState<boolean>();
   useEffect(() => {
@@ -812,6 +843,10 @@ export function SettingsView() {
               <PromptList kind="recipe" items={library.recipes} limits={library.limits} onChanged={libraryChanged} />
             </>
           )}
+        </Section>
+
+        <Section icon={<Hash className="size-3.5" />} title="Topics">
+          <TopicsEditor saved={settings?.topics ?? ""} onSave={(topics) => save({ topics })} />
         </Section>
 
         <Section icon={<Ticket className="size-3.5" />} title="Tickets">

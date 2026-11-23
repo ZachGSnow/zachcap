@@ -47,6 +47,7 @@ from . import (
     redact,
     shortcuts,
     tickets,
+    topics,
     watchfolder,
 )
 from . import vocabulary as words
@@ -185,6 +186,7 @@ class SettingsBody(BaseModel):
     dictation_snippets: str | None = None  # "cue: text to type", one per line
     shortcuts: dict[str, str] | None = None  # new keys for some shortcuts, "" for the default
     ticket_patterns: str | None = None  # how ticket numbers look ("#######, INC-####"); "" off
+    topics: str | None = None  # "Topic: word, word", one per line
     also_answer_to: str | None = None  # other names you answer to, comma-separated
     watch_folder: str | None = None  # "" turns the watch folder off
     watch_existing: bool = False  # with watch_folder: import the files already there too
@@ -498,6 +500,8 @@ def create_app(token: str) -> FastAPI:
             "me": store.me()["name"],
             # Other people's lines that say your name.
             "mentions": mentions.find(store, meeting_id),
+            # The topics said in it, with their lines.
+            "topics": topics.find(store, meeting_id),
             # Ticket numbers found in it, best first, other than the one it has.
             "ticket_suggestions": [
                 found
@@ -1023,6 +1027,11 @@ def create_app(token: str) -> FastAPI:
         export_soon(store, store.person_meetings(person_id))
         return {"client": client or None}
 
+    @app.get("/api/topics", dependencies=auth)
+    def list_topics(store: Store = Depends(db)):
+        """Every topic, how often it came up, and in which meetings (newest first)."""
+        return topics.overview(store)
+
     @app.get("/api/clients", dependencies=auth)
     def list_clients(store: Store = Depends(db)):
         return clients.known(store)
@@ -1381,6 +1390,7 @@ def create_app(token: str) -> FastAPI:
                 "dictation_snippets": store.setting(dictation.SNIPPETS, ""),
                 "shortcuts": shortcuts.current(store),
                 "ticket_patterns": store.setting(tickets.SETTING, ""),
+                "topics": store.setting(topics.SETTING, ""),
                 "soundcheck_passed": store.setting("soundcheck_passed"),
                 "templates": prompts.choices(store, "template"),
                 "recipes": prompts.choices(store, "recipe"),
@@ -1402,6 +1412,12 @@ def create_app(token: str) -> FastAPI:
                 shortcuts.change(store, body.shortcuts)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if body.topics is not None:
+            try:
+                topics.parse(body.topics)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            store.set_setting(topics.SETTING, body.topics.strip())
         if body.ticket_patterns is not None:
             written = ", ".join(p.strip() for p in body.ticket_patterns.split(",") if p.strip())
             try:

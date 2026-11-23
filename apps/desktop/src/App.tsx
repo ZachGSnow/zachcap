@@ -30,6 +30,7 @@ import { MeetingView } from "@/views/MeetingView";
 import { MeetingsView } from "@/views/MeetingsView";
 import { PeopleView } from "@/views/PeopleView";
 import { SearchView } from "@/views/SearchView";
+import { TopicsView } from "@/views/TopicsView";
 import { SettingsView } from "@/views/SettingsView";
 import { WorkLogView } from "@/views/WorkLogView";
 
@@ -263,6 +264,9 @@ function Shell() {
               <PeopleView onBrief={brief} />
             )}
             {view.name === "search" && <SearchView onOpen={openMeeting} />}
+            {view.name === "topics" && (
+              <TopicsView onOpen={openMeeting} onSettings={() => setView({ name: "settings" })} />
+            )}
             {view.name === "settings" && <SettingsView />}
           </ErrorBoundary>
         </main>

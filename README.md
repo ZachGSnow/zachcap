@@ -29,6 +29,7 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 - **Work log** for a day or a week: each meeting with who was there, what came of it and its action items, plus a **draft time entry** per meeting rounded up to 15 minutes, ready to copy into a time sheet or ticket. Built from your summaries, free and instant; it can also be kept in the export folder, and Ask and the MCP server can read it.
 - **Tickets**: tell ZachCap how your ticket numbers look (`#######` for a 7-digit number, `INC-####`) and it finds them in a meeting's title, your notes, its snapshots and what was said. One you wrote or snapshotted becomes the meeting's ticket; ones only heard are offered to pick. The ticket shows in the meeting list, goes into time entries, ticket notes and exports, finds the meeting in search, and Ask and the MCP server can list a ticket's meetings.
 - **Clients**: say which client each person works for (on the People page), and their meetings are that client's; set a meeting's client yourself when it was with someone new or with two clients. The client shows in the meeting list and header, the meeting list and the work log can be narrowed to one client (a per-client time sheet), and exports, ticket notes, Ask and the MCP server know it.
+- **Topics**: track words and phrases across meetings ("Renewals: renewal, contract, quote"). Each meeting shows the topics said in it, and a filter on its transcript marks those lines; the Topics page lists where each came up, with the client; the work log notes each meeting's topics. Found on this PC with the full-text index.
 - **Ask across all your meetings**: "What did I commit to this week?", "What's still open with Dana?". Claude searches your transcripts, summaries and action items with read-only tools and links every fact to the moment it was said. **Brief me** on a person prepares you for your next meeting with them. Each meeting also has its own Ask tab.
 - **History and search**: every meeting, searchable by anything anyone said.
 - **Your meetings in Claude Code or the Claude app**: a read-only MCP server (`zachcap mcp`) lets Claude search your transcripts and read summaries, action items and notes. Settings has the command and config to copy.
@@ -98,6 +99,7 @@ Everything is set in the app under **Settings**:
 | Work logs there too | Also keeps a daily and a weekly work log in the export folder | off |
 | Watch folder | Recordings saved in this folder import themselves within a minute; turning it on asks about the ones already there | off |
 | Ticket numbers look like | Patterns for your ticket numbers: `#` a digit, `?` a letter, anything else itself, several separated by commas (`#######, INC-####`) | off |
+| Topics | Words and phrases to track, one topic per line: `Name: word, phrase` | empty |
 
 Environment variables for development: `ZACHCAP_HOME` (data folder, default `%LOCALAPPDATA%\ZachCap`), `ZACHCAP_ENGINE_DIR` (engine location for the desktop app).
 

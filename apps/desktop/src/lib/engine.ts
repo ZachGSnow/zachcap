@@ -114,6 +114,21 @@ export type Mention = {
   spans: [number, number][];
 };
 
+/** A topic said in a meeting, with the lines (``spans`` mark what was counted). */
+export type TopicFound = {
+  topic: string;
+  count: number;
+  lines: { segment_id: number; at: number; speaker: string; snippet: string; spans: [number, number][] }[];
+};
+
+/** A topic across meetings, newest first. */
+export type TopicOverview = {
+  topic: string;
+  words: string[];
+  count: number;
+  meetings: { id: number; title: string; started_at: string; client: string | null; count: number }[];
+};
+
 export type MeetingDetail = {
   meeting: Meeting;
   speakers: Speaker[];
@@ -127,6 +142,8 @@ export type MeetingDetail = {
   mentions: Mention[];
   /** Ticket numbers found in it, best first, other than its own. */
   ticket_suggestions: TicketFound[];
+  /** The topics said in it, most said first. */
+  topics?: TopicFound[];
   /** The clients of the people in it, and every client named so far. */
   clients_heard: string[];
   clients_known: string[];
@@ -241,6 +258,8 @@ export type Settings = {
   dictation_snippets: string;
   /** How ticket numbers look ("#######, INC-####": # a digit, ? a letter); "" when off. */
   ticket_patterns: string;
+  /** "Topic: word, word", one per line. */
+  topics: string;
   /** The keys for each global shortcut: picked in Settings, or the defaults. */
   shortcuts: Record<ShortcutAction, string>;
   templates: { id: string; label: string }[];
@@ -376,6 +395,8 @@ export type WorkLogMeeting = {
   /** The service ticket it was about, if any. */
   ticket: string | null;
   client: string | null;
+  /** Topics said in it, most said first. */
+  topics?: { topic: string; count: number }[];
 };
 
 export type WorkLog = {
