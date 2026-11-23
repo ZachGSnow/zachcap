@@ -133,6 +133,40 @@ def test_each_hold_is_its_own_dictation_spelled_your_way():
     assert not dictator.listening and FakeMic.made[-1].stopped
 
 
+def test_saying_just_a_snippets_cue_types_its_text():
+    written = "reboot note: Rebooted the workstation; it works now.\nMy extension: 4120\n\n"
+    saved = dictation.snippets(written)
+    assert saved == {
+        "reboot note": "Rebooted the workstation; it works now.",
+        "my extension": "4120",
+    }
+    dictator = dictation.Dictation(FakeTranscriber("Reboot note."), microphone=FakeMic)
+    dictator.start()
+    done = dictator.finish(None, "en", None, type_it=False, snippets=saved)
+    assert done["text"] == "Rebooted the workstation; it works now."
+    assert dictator.recent[0]["text"] == done["text"]
+
+    dictator.transcriber.said = "Add a reboot note to the ticket."  # the cue in a sentence
+    dictator.start()
+    done = dictator.finish(None, "en", None, type_it=False, snippets=saved)
+    assert done["text"] == "Add a reboot note to the ticket."  # typed as said
+
+
+@pytest.mark.parametrize(
+    ("written", "reason"),
+    [
+        ("reboot note", "the cue, a colon"),
+        (": text", "the cue, a colon"),
+        ("cue:", "the cue, a colon"),
+        ("Reboot note: one\nreboot NOTE: two", "already a cue"),
+        ("x" * 61 + ": y", "at most 60"),
+    ],
+)
+def test_snippets_that_cant_be_used_are_refused(written: str, reason: str):
+    with pytest.raises(ValueError, match=reason):
+        dictation.snippets(written)
+
+
 def test_the_mic_is_never_left_open(monkeypatch: pytest.MonkeyPatch):
     dictator = dictation.Dictation(FakeTranscriber("unused"), microphone=FakeMic)
     for _ in range(3):
@@ -356,6 +390,23 @@ def test_dictation_through_the_api(client: TestClient, monkeypatch: pytest.Monke
     client.post("/api/dictate/start", headers=AUTH)
     client.put("/api/settings", headers=AUTH, json={"dictation": False})  # off mid-dictation
     assert FakeMic.made[-1].stopped
+
+
+def test_snippets_through_the_api(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    refused = client.put("/api/settings", headers=AUTH, json={"dictation_snippets": "no colon"})
+    assert refused.status_code == 400 and "Line 1" in refused.json()["detail"]
+    saved = client.put(
+        "/api/settings",
+        headers=AUTH,
+        json={
+            "dictation": True,
+            "dictation_snippets": "ticket closed: Closed; the user confirmed.",
+        },
+    )
+    assert saved.json()["dictation_snippets"] == "ticket closed: Closed; the user confirmed."
+    started = client.post("/api/dictate/start", headers=AUTH).json()
+    done = client.post("/api/dictate/stop", headers=AUTH, json={"id": started["id"]}).json()
+    assert done["text"] == "Closed; the user confirmed."  # "Ticket closed." was said
 
 
 def test_recent_dictations_are_kept_in_memory_and_can_be_forgotten(client: TestClient):

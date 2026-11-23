@@ -227,6 +227,8 @@ export type Settings = {
   soundcheck_passed: string | null;
   /** Hold the dictation keys to dictate into any app. */
   dictation: boolean;
+  /** "cue: the text to type", one per line: saying just a cue types its text. */
+  dictation_snippets: string;
   /** How ticket numbers look ("#######, INC-####": # a digit, ? a letter); "" when off. */
   ticket_patterns: string;
   /** The keys for each global shortcut: picked in Settings, or the defaults. */
