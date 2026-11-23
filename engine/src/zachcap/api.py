@@ -53,6 +53,16 @@ class QuestionBody(BaseModel):
     question: str
 
 
+class Turn(BaseModel):
+    question: str
+    answer: str
+
+
+class LibraryQuestionBody(BaseModel):
+    question: str
+    history: list[Turn] = []
+
+
 class StatusBody(BaseModel):
     status: str
 
@@ -289,6 +299,22 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=400, detail="Ask a question first")
         try:
             return ask_claude(store, meeting_id, body.question.strip())
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Claude request failed: {exc}") from exc
+
+    @app.post("/api/ask", dependencies=auth)
+    def ask_library(body: LibraryQuestionBody, store: Store = Depends(db)):
+        """A question about every meeting; Claude looks things up with read-only tools."""
+        from .assistant import ask_everything
+
+        if not body.question.strip():
+            raise HTTPException(status_code=400, detail="Ask a question first")
+        try:
+            return ask_everything(
+                store, body.question.strip(), [turn.model_dump() for turn in body.history]
+            )
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
