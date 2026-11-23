@@ -35,7 +35,8 @@ class Resampler:
         length = block.size
         count = int(np.ceil((length - self.phase) / self.step)) if length > self.phase else 0
         positions = self.phase + np.arange(count) * self.step
-        index = np.floor(positions).astype(np.int64)
+        # Rounding can put the last position a hair past the block: stay inside it.
+        index = np.minimum(np.floor(positions).astype(np.int64), length - 1)
         fraction = (positions - index).astype(np.float32)
         out = extended[index] * (1 - fraction) + extended[index + 1] * fraction
         self.phase = self.phase + count * self.step - length
@@ -65,12 +66,20 @@ class Mixer:
         tolerance: float = 0.05,
         live_for: float = 0.5,
         delay: float = 0.3,
+        stuck_after: float = 1.0,
+        early_follows_on: bool = False,
     ) -> None:
         self.rate = rate
+        # Times measured by the device (WASAPI loopback) are trusted both ways: a packet
+        # clearly early or late is placed where its time says, so one odd time is corrected
+        # by the next packet. Times estimated on arrival (a PortAudio callback) aren't: a
+        # burst of packets after a hiccup looks early, and follows on instead.
+        self.early_follows_on = early_follows_on
         self.t0 = t0
         self.tolerance = int(tolerance * rate)
         self.live_for = live_for
         self.delay = int(delay * rate)
+        self.stuck_after = int(stuck_after * rate)
         self.lanes: dict[str, Lane] = {}
         self.written = 0
         self.dropped = 0  # frames that arrived after their place was already written
@@ -80,18 +89,34 @@ class Mixer:
         device: str,
         samples: np.ndarray,
         device_rate: int,
-        stamp: float,
+        stamp: float | None,
         now: float,
         discontinuity: bool = False,
     ) -> None:
         """``samples``: mono float32 in [-1, 1] at ``device_rate``. ``stamp``: when its first
-        frame was played. ``now``: when it arrived."""
+        frame was played (None when the device said its time is wrong: it then follows on
+        from the previous packet). ``now``: when it arrived.
+
+        A packet follows on from the previous one unless it starts clearly later (the
+        device sent nothing for a while: the gap stays silent), clearly earlier (see
+        ``early_follows_on``), or the device reported a break."""
         lane = self.lanes.get(device)
         if lane is None or lane.rate != device_rate:
             lane = self.lanes[device] = Lane(device_rate, Resampler(device_rate, self.rate))
         block = lane.resample(samples)
-        at = round((stamp - self.t0) * self.rate)
-        if lane.next_frame is None or discontinuity or abs(at - lane.next_frame) > self.tolerance:
+        if stamp is None:
+            at = lane.next_frame
+            if at is None:  # nothing to follow: about when it arrived
+                at = round((now - self.t0) * self.rate) - block.size
+        else:
+            at = round((stamp - self.t0) * self.rate)
+        off = 0 if lane.next_frame is None else at - lane.next_frame
+        if (
+            lane.next_frame is None
+            or discontinuity
+            or off > self.tolerance
+            or (-off > self.tolerance and not self.early_follows_on)
+        ):
             lane.next_frame = at
         start = lane.next_frame
         lane.next_frame = start + block.size
@@ -105,24 +130,40 @@ class Mixer:
             lane.blocks.append((start, block))
 
     def horizon(self, now: float) -> int:
-        """How far the track can be written now."""
+        """How far the track can be written now: where every live device has reached, never
+        past now minus the delay. A device that stopped sending, or that has fallen more than
+        ``stuck_after`` behind (its times are off), doesn't hold the track back."""
         latest = round((now - self.t0) * self.rate) - self.delay
         live = [
             lane.next_frame
             for lane in self.lanes.values()
-            if lane.next_frame is not None and now - lane.last_packet_at <= self.live_for
+            if lane.next_frame is not None
+            and now - lane.last_packet_at <= self.live_for
+            and latest - lane.next_frame <= self.stuck_after
         ]
         limit = min(live) if live else latest
         return max(self.written, min(limit, latest))
 
-    def drain(self, now: float) -> np.ndarray:
-        """Mixed audio (float32 in [-1, 1]) from the last write up to the horizon."""
-        return self._mix_until(self.horizon(now))
+    def end(self) -> int:
+        """The furthest any device has reached (the end of the audio received)."""
+        reached = [lane.next_frame for lane in self.lanes.values() if lane.next_frame is not None]
+        return max(reached, default=self.written)
 
-    def flush(self, until: int) -> np.ndarray:
-        """Everything up to frame ``until``, whether or not devices are still sending (the
-        end of a recording)."""
-        return self._mix_until(max(self.written, until))
+    def drain(self, now: float, most: int | None = None) -> np.ndarray:
+        """Mixed audio (float32 in [-1, 1]) from the last write up to the horizon, at most
+        ``most`` frames at a time (after a long stall the caller takes it in slices)."""
+        end = self.horizon(now)
+        if most is not None:
+            end = min(end, self.written + most)
+        return self._mix_until(end)
+
+    def flush(self, until: int, most: int | None = None) -> np.ndarray:
+        """Everything up to frame ``until`` (at most ``most`` frames of it per call), whether
+        or not devices are still sending: the end of a recording."""
+        end = max(self.written, until)
+        if most is not None:
+            end = min(end, self.written + most)
+        return self._mix_until(end)
 
     def _mix_until(self, end: int) -> np.ndarray:
         count = end - self.written
@@ -141,5 +182,6 @@ class Mixer:
                 if stop > end:
                     kept.append((start, block))
             lane.blocks = kept
-        self.written = end
-        return np.clip(mix, -1.0, 1.0)
+        np.clip(mix, -1.0, 1.0, out=mix)
+        self.written = end  # only once the slice exists
+        return mix

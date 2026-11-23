@@ -122,3 +122,53 @@ def test_resampling_in_blocks_matches_resampling_at_once():
 
     assert abs(pieces.size - RATE) <= 1
     assert np.allclose(pieces[: whole.size], whole[: pieces.size], atol=1e-5)
+
+
+def test_packets_without_a_usable_time_follow_on():
+    mixer = Mixer(RATE, t0=0.0)
+    mixer.add("speakers", tone(0.5, RATE), RATE, stamp=1.0, now=1.01)
+    mixer.add("speakers", tone(0.5, RATE), RATE, stamp=None, now=1.52)  # time flagged wrong
+    assert mixer.lanes["speakers"].next_frame == 2 * RATE  # 1.0 s + 0.5 s + 0.5 s
+
+
+def test_a_burst_of_late_packets_stays_in_order():
+    # A hiccup delivers several packets at once: their arrival makes them look early, but
+    # they still follow on, so nothing overlaps (for times estimated on arrival).
+    mixer = Mixer(RATE, t0=0.0, early_follows_on=True)
+    for index in range(5):
+        mixer.add("mic", tone(0.1, RATE), RATE, stamp=1.0, now=1.5 + index * 0.001)
+    assert mixer.lanes["mic"].next_frame == round(1.5 * RATE)
+
+
+def test_a_device_whose_times_are_stuck_doesnt_freeze_the_track():
+    mixer = Mixer(RATE, t0=0.0)
+    for second in range(1, 6):
+        mixer.add("good", tone(1.0, RATE), RATE, stamp=second - 1.0, now=float(second))
+        mixer.add("stuck", tone(0.01, RATE), RATE, stamp=0.0, now=float(second))
+    assert mixer.horizon(5.0) >= round(4.5 * RATE)
+
+
+def test_a_long_stall_is_written_in_slices():
+    mixer = Mixer(RATE, t0=0.0)
+    slices = []
+    while (block := mixer.drain(now=600.0, most=RATE)).size:
+        slices.append(block.size)
+    assert max(slices) == RATE and sum(slices) == 600 * RATE - mixer.delay
+
+
+def test_resampling_odd_block_sizes_never_reads_past_the_block():
+    rng = np.random.default_rng(7)
+    for rate in (22050, 32000, 44100):
+        resample = Resampler(rate, RATE)
+        for _ in range(3000):
+            resample(rng.standard_normal(int(rng.integers(1, 700))).astype(np.float32))
+
+
+def test_one_odd_time_from_the_device_is_corrected_by_the_next_packet():
+    # Loopback times come from Windows: one packet stamped seconds ahead (it happened when
+    # a sound started playing) must not push the rest of the call along with it.
+    mixer = Mixer(RATE, t0=0.0)
+    mixer.add("speakers", tone(0.01, RATE), RATE, stamp=1.00, now=1.01)
+    mixer.add("speakers", tone(0.01, RATE), RATE, stamp=6.00, now=1.02)  # an odd one
+    mixer.add("speakers", tone(0.01, RATE), RATE, stamp=1.02, now=1.03)
+    assert mixer.lanes["speakers"].next_frame == round(1.03 * RATE)

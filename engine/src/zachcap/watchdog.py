@@ -22,6 +22,9 @@ from pathlib import Path
 MIC_OFF_AFTER = 60.0  # no signal at all from the mic for this long: muted or broken
 NO_CALL_AUDIO_AFTER = 120.0  # in a call this long without ever hearing the other side
 LOW_DISK_BYTES = 500 * 1024 * 1024  # about three hours of recording
+# A meeting app (Teams, Zoom, a browser...) holding the mic this long is a call; Windows
+# Settings' input meter, a quick mic test or a screen recorder never count.
+CALL_AFTER = 60.0
 CHECK_EVERY = 2.0
 
 ES_CONTINUOUS = 0x80000000
@@ -65,17 +68,20 @@ class Watch:
         apps_using_mic: Callable[[], list[str]] | None = None,
         clock: Callable[[], float] = time.perf_counter,
         disk_free: Callable[[], int] | None = None,
+        meeting_app: Callable[[str], bool] | None = None,
     ) -> None:
-        if apps_using_mic is None:
-            from .calls import apps_using_mic
+        from . import calls
+
         self.recorder = recorder
-        self._apps = apps_using_mic
+        self._apps = apps_using_mic or calls.apps_using_mic
+        self._meeting_app = meeting_app or calls.is_meeting_app
         self._clock = clock
         self._disk_free = disk_free or (lambda: shutil.disk_usage(folder).free)
         self.started = clock()
         self.call_apps: list[str] = []
-        self.call_seen: list[str] = []
+        self.call_seen: list[str] = []  # meeting apps that held the mic long enough
         self.call_ended_at: float | None = None
+        self._holding: dict[str, float] = {}  # meeting app -> since when it holds the mic
         self.warnings: dict[str, str] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -113,9 +119,12 @@ class Watch:
         except OSError:
             apps = []
         self.call_apps = apps
-        self.call_seen += [app for app in apps if app not in self.call_seen]
-        if apps:
-            self.call_ended_at = None
+        meeting = [app for app in apps if self._meeting_app(app)]
+        self._holding = {app: self._holding.get(app, now) for app in meeting}
+        calls = [app for app, since in self._holding.items() if now - since >= CALL_AFTER]
+        self.call_seen += [app for app in calls if app not in self.call_seen]
+        if self._holding:
+            self.call_ended_at = None  # on a call (again)
         elif self.call_seen and self.call_ended_at is None:
             self.call_ended_at = now  # the call app let go of the microphone
 
@@ -130,9 +139,13 @@ class Watch:
         never_heard = system is not None and getattr(system, "heard_at", None) is None
         self._warn(
             "no-call-audio",
-            not paused and bool(apps) and never_heard and now - self.started >= NO_CALL_AUDIO_AFTER,
-            f"No call audio yet, two minutes into the call with {apps[0] if apps else 'the app'}. "
-            "If you can hear the others, check Settings, Recording, Computer audio from.",
+            not paused
+            and bool(calls)
+            and never_heard
+            and now - self.started >= NO_CALL_AUDIO_AFTER,
+            "No call audio yet, two minutes into the call with "
+            f"{calls[0] if calls else 'the app'}. If you can hear the others, check Settings, "
+            "Recording, Computer audio from.",
         )
         try:
             free = self._disk_free()
@@ -154,6 +167,12 @@ class Watch:
     def status(self) -> dict:
         now = self._clock()
         quiet = min(self._since("mic", "heard_at"), self._since("system", "heard_at"))
+        # A private pause is silent on purpose: quiet starts again when it ends.
+        if getattr(self.recorder, "paused", False):
+            quiet = 0.0
+        resumed = getattr(self.recorder, "resumed_at", None)
+        if resumed is not None:
+            quiet = min(quiet, now - resumed)
         return {
             "warnings": [{"key": key, "text": text} for key, text in self.warnings.items()],
             "call": {

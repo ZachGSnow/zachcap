@@ -57,6 +57,7 @@ def test_a_muted_microphone_is_noticed_after_a_minute_and_cleared(tmp_path: Path
 
 def test_a_call_with_no_call_audio_at_all_is_flagged(tmp_path: Path):
     watch, clock, tracks, _, calls = setup(tmp_path, apps=["Microsoft Teams"])
+    watch.check()  # the call app takes the mic
     tracks["mic"].signal_at = tracks["mic"].heard_at = clock.now + 100
     clock.now += 121
     watch.check()
@@ -83,8 +84,9 @@ def test_the_end_of_the_call_is_when_the_app_lets_go_of_the_mic(tmp_path: Path):
     assert watch.status()["call"] == {"apps": [], "ended_for": None}  # no call yet
 
     calls["apps"] = ["Microsoft Teams"]
-    clock.now += 60
     watch.check()
+    clock.now += 60
+    watch.check()  # held for a minute: a call
     assert watch.status()["call"] == {"apps": ["Microsoft Teams"], "ended_for": None}
 
     calls["apps"] = []
@@ -121,3 +123,33 @@ def test_keeping_awake_starts_and_stops(tmp_path: Path):
     awake.start()
     awake.stop()
     assert awake._thread is not None and not awake._thread.is_alive()
+
+
+def test_a_quick_look_at_the_mic_is_not_a_call(tmp_path: Path):
+    # Windows' Sound settings, a mic test or a screen recorder letting go of the mic must
+    # never count as a call ending (that would start a countdown to stop the meeting).
+    watch, clock, _, _, calls = setup(tmp_path)
+    for apps in (["SystemSettings"], ["obs64"], []):
+        calls["apps"] = apps
+        clock.now += 300
+        watch.check()
+    calls["apps"] = ["Microsoft Teams"]  # Teams for 20 s only
+    watch.check()
+    clock.now += 20
+    watch.check()
+    calls["apps"] = []
+    clock.now += 30
+    watch.check()
+    assert watch.status()["call"]["ended_for"] is None
+
+
+def test_a_private_pause_is_not_quiet(tmp_path: Path):
+    watch, clock, tracks, recorder, _ = setup(tmp_path)
+    tracks["mic"].heard_at = tracks["system"].heard_at = clock.now
+    recorder.paused = True
+    clock.now += 900
+    assert watch.status()["quiet_for"] == 0.0
+    recorder.paused = False
+    recorder.resumed_at = clock.now
+    clock.now += 30
+    assert watch.status()["quiet_for"] == 30.0  # counted from the end of the pause

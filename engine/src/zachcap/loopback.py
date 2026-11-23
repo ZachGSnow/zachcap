@@ -69,6 +69,7 @@ AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM = 0x80000000
 AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY = 0x08000000
 AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY = 0x1
 AUDCLNT_BUFFERFLAGS_SILENT = 0x2
+AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR = 0x4
 WAVE_FORMAT_IEEE_FLOAT = 3
 E_RENDER = 0
 E_CONSOLE = 0
@@ -223,7 +224,8 @@ class IMMDevice(IUnknown):
             (["in"], wintypes.DWORD, "stgmAccess"),
             (["out"], POINTER(POINTER(IPropertyStore)), "ppProperties"),
         ),
-        COMMETHOD([], HRESULT, "GetId", (["out"], POINTER(wintypes.LPWSTR), "ppstrId")),
+        # A string Windows allocates: read and freed by _take_string.
+        COMMETHOD([], HRESULT, "GetId", (["out"], POINTER(c_void_p), "ppstrId")),
         COMMETHOD([], HRESULT, "GetState", (["out"], POINTER(wintypes.DWORD), "pdwState")),
     ]
 
@@ -291,34 +293,51 @@ def _enumerator():
     return comtypes.CoCreateInstance(CLSID_MM_DEVICE_ENUMERATOR, IMMDeviceEnumerator, CLSCTX_ALL)
 
 
+def _take_string(address: int | None) -> str:
+    """A string Windows allocated for us, read and then freed."""
+    if not address:
+        return ""
+    try:
+        return ctypes.wstring_at(address)
+    finally:
+        ctypes.windll.ole32.CoTaskMemFree(c_void_p(address))
+
+
 def _name(device) -> str:
     value = device.OpenPropertyStore(STGM_READ).GetValue(byref(PKEY_DEVICE_FRIENDLY_NAME))
-    return ctypes.wstring_at(value.pointer) if value.pointer else "Unknown output"
+    try:
+        return ctypes.wstring_at(value.pointer) if value.pointer else "Unknown output"
+    finally:
+        ctypes.windll.ole32.PropVariantClear(byref(value))
+
+
+def _list_outputs() -> list[dict]:
+    """The listing itself: its COM objects are released when it returns, inside the
+    apartment that made them."""
+    enumerator = _enumerator()
+    try:
+        default = _take_string(enumerator.GetDefaultAudioEndpoint(E_RENDER, E_CONSOLE).GetId())
+    except OSError:  # no output device at all
+        default = None
+    collection = enumerator.EnumAudioEndpoints(E_RENDER, DEVICE_STATE_ACTIVE)
+    devices = []
+    for index in range(collection.GetCount()):
+        device = collection.Item(index)
+        device_id = _take_string(device.GetId())
+        devices.append({"id": device_id, "name": _name(device), "default": device_id == default})
+    return devices
 
 
 def output_devices() -> list[dict]:
     """The output devices Windows has active right now: id, name, and whether it's the
     default. Fresh every call, so plugged-in headsets show up."""
     with com_thread():
-        enumerator = _enumerator()
-        try:
-            default = enumerator.GetDefaultAudioEndpoint(E_RENDER, E_CONSOLE).GetId()
-        except OSError:  # no output device at all
-            default = None
-        collection = enumerator.EnumAudioEndpoints(E_RENDER, DEVICE_STATE_ACTIVE)
-        devices = []
-        for index in range(collection.GetCount()):
-            device = collection.Item(index)
-            device_id = device.GetId()
-            devices.append(
-                {"id": device_id, "name": _name(device), "default": device_id == default}
-            )
-        return devices
+        return _list_outputs()
 
 
-# on_packet(device_id, mono float32 samples, sample rate, when the first frame played,
-# whether the device reported a gap before this packet)
-Packet = Callable[[str, np.ndarray, int, float, bool], None]
+# on_packet(device_id, mono float32 samples, sample rate, when the first frame played (None
+# when the device says that time is wrong), whether the device reported a gap before it)
+Packet = Callable[[str, np.ndarray, int, float | None, bool], None]
 
 
 class LoopbackCapture:
@@ -351,62 +370,66 @@ class LoopbackCapture:
             self._thread.join(timeout=5)
 
     def _run(self) -> None:
-        kernel32 = ctypes.windll.kernel32
-        event = None
         try:
             with com_thread():
-                device = _enumerator().GetDevice(self.device_id)
-                pointer = device.Activate(byref(IAudioClient._iid_), CLSCTX_ALL, None)
-                client = ctypes.cast(pointer, POINTER(IAudioClient))
-                mix = client.GetMixFormat().contents
-                rate, channels = int(mix.nSamplesPerSec), int(mix.nChannels)
-                # Float samples at the device's own rate and channels, whatever it mixes in.
-                wanted = WAVEFORMATEX(
-                    WAVE_FORMAT_IEEE_FLOAT, channels, rate, rate * channels * 4, channels * 4, 32, 0
-                )
-                flags = (
-                    AUDCLNT_STREAMFLAGS_LOOPBACK
-                    | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-                    | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-                    | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
-                )
-                client.Initialize(
-                    AUDCLNT_SHAREMODE_SHARED, flags, BUFFER_100NS, 0, byref(wanted), None
-                )
-                event = kernel32.CreateEventW(None, False, False, None)
-                client.SetEventHandle(event)
-                service = client.GetService(byref(IAudioCaptureClient._iid_))
-                capture = ctypes.cast(service, POINTER(IAudioCaptureClient))
-                self.rate = rate
-                client.Start()
-                self._ready.set()
-                try:
-                    while not self._stop.is_set():
-                        kernel32.WaitForSingleObject(event, WAIT_MS)
-                        while capture.GetNextPacketSize() > 0:
-                            data, frames, flags_out, _position, qpc = capture.GetBuffer()
-                            if flags_out & AUDCLNT_BUFFERFLAGS_SILENT or not frames:
-                                mono = np.zeros(frames, np.float32)
-                            else:
-                                raw = ctypes.string_at(data, frames * channels * 4)
-                                samples = np.frombuffer(raw, np.float32).reshape(-1, channels)
-                                mono = samples.mean(axis=1)
-                            capture.ReleaseBuffer(frames)
-                            self.on_packet(
-                                self.device_id,
-                                mono,
-                                rate,
-                                qpc / 1e7,  # 100 ns units of the performance counter
-                                bool(flags_out & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY),
-                            )
-                finally:
-                    try:
-                        client.Stop()
-                    except OSError:
-                        pass
+                self._capture()  # its COM objects are released before the apartment ends
         except Exception as exc:  # unplugged mid-call (device invalidated), or refused
             self.error = f"{self.name}: {exc}"
         finally:
-            if event:
-                kernel32.CloseHandle(event)
             self._ready.set()
+
+    def _capture(self) -> None:
+        kernel32 = ctypes.windll.kernel32
+        device = _enumerator().GetDevice(self.device_id)
+        pointer = device.Activate(byref(IAudioClient._iid_), CLSCTX_ALL, None)
+        client = ctypes.cast(pointer, POINTER(IAudioClient))
+        mix_pointer = client.GetMixFormat()
+        mix = mix_pointer.contents
+        rate, channels = int(mix.nSamplesPerSec), int(mix.nChannels)
+        ctypes.windll.ole32.CoTaskMemFree(ctypes.cast(mix_pointer, c_void_p))
+        # Float samples at the device's own rate and channels, whatever it mixes in.
+        wanted = WAVEFORMATEX(
+            WAVE_FORMAT_IEEE_FLOAT, channels, rate, rate * channels * 4, channels * 4, 32, 0
+        )
+        flags = (
+            AUDCLNT_STREAMFLAGS_LOOPBACK
+            | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+            | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+            | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+        )
+        client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, BUFFER_100NS, 0, byref(wanted), None)
+        event = kernel32.CreateEventW(None, False, False, None)
+        try:
+            client.SetEventHandle(event)
+            service = client.GetService(byref(IAudioCaptureClient._iid_))
+            capture = ctypes.cast(service, POINTER(IAudioCaptureClient))
+            self.rate = rate
+            client.Start()
+            self._ready.set()
+            try:
+                while not self._stop.is_set():
+                    kernel32.WaitForSingleObject(event, WAIT_MS)
+                    while capture.GetNextPacketSize() > 0:
+                        data, frames, flags_out, _position, qpc = capture.GetBuffer()
+                        if flags_out & AUDCLNT_BUFFERFLAGS_SILENT or not frames:
+                            mono = np.zeros(frames, np.float32)
+                        else:
+                            raw = ctypes.string_at(data, frames * channels * 4)
+                            samples = np.frombuffer(raw, np.float32).reshape(-1, channels)
+                            mono = samples.mean(axis=1)
+                        capture.ReleaseBuffer(frames)
+                        self.on_packet(
+                            self.device_id,
+                            mono,
+                            rate,
+                            # 100 ns units of the performance counter, unless flagged wrong
+                            None if flags_out & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR else qpc / 1e7,
+                            bool(flags_out & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY),
+                        )
+            finally:
+                try:
+                    client.Stop()
+                except OSError:
+                    pass
+        finally:
+            kernel32.CloseHandle(event)
