@@ -90,6 +90,10 @@ class FakeRecorder:
         self.started_at = datetime.now().astimezone()
         self.elapsed = 12.5
         self.tracks: dict = {}
+        self.paused = False
+
+    def pause(self, paused: bool = True) -> None:
+        self.paused = paused
 
     def start(self) -> None:
         self.folder.mkdir(parents=True)
@@ -177,3 +181,34 @@ def test_the_player_never_gets_a_half_written_file(tmp_path: Path):
 
     assert len(set(built)) == 1 and sf.info(built[0]).frames == 16000 * 5
     assert not list(tmp_path.glob("*.partial.flac"))
+
+
+def test_notes_bookmarks_and_a_private_pause_while_recording(client: TestClient, monkeypatch):
+    monkeypatch.setattr(capture, "Recorder", FakeRecorder)
+    monkeypatch.setattr(pipeline, "process", lambda *args, **kwargs: "ready")
+    assert client.post("/api/record/note", headers=AUTH, json={}).status_code == 409
+
+    meeting_id = client.post("/api/record/start", headers=AUTH, json={}).json()["meeting_id"]
+    noted = client.post("/api/record/note", headers=AUTH, json={"text": " Ask about budget "})
+    marked = client.post("/api/record/note", headers=AUTH, json={"kind": "bookmark"})
+    assert (noted.json()["at"], noted.json()["text"]) == (12.5, "Ask about budget")
+    assert marked.json()["kind"] == "bookmark"
+    assert client.post("/api/record/note", headers=AUTH, json={"text": " "}).status_code == 400
+    assert client.post("/api/record/pause", headers=AUTH, json={"paused": True}).json() == {
+        "paused": True
+    }
+    status = client.get("/api/record", headers=AUTH).json()
+    assert status["paused"] and status["notes"] == 2
+    client.post("/api/record/stop", headers=AUTH)
+
+    notes = client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()["notes"]
+    assert [n["kind"] for n in notes] == ["note", "bookmark"]
+    edited = client.patch(f"/api/notes/{notes[1]['id']}", headers=AUTH, json={"text": "Key moment"})
+    assert edited.json()["text"] == "Key moment"
+    later = client.post(
+        f"/api/meetings/{meeting_id}/notes", headers=AUTH, json={"text": "Follow up", "at": 3}
+    )
+    assert later.json()["at"] == 3
+    client.delete(f"/api/notes/{notes[0]['id']}", headers=AUTH)
+    left = client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()["notes"]
+    assert [n["text"] for n in left] == ["Follow up", "Key moment"]

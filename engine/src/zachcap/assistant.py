@@ -13,7 +13,7 @@ from anthropic import beta_tool
 
 from . import apikeys
 from .store import Store
-from .summarize import MODELS, _clock, cost_usd, spellings, summary_model
+from .summarize import MODELS, _clock, cost_usd, notes_text, spellings, summary_model
 
 SYSTEM = """You answer questions about the meetings {me} recorded with ZachCap, their \
 private meeting notebook. Today is {today}.
@@ -131,7 +131,7 @@ def make_tools(store: Store) -> list:
                 transcript[:TRANSCRIPT_LIMIT] + "\n[... transcript trimmed; search for more]"
             )
         parts.append("Transcript:\n" + (transcript or "(no transcript)"))
-        return "\n\n".join(parts)
+        return "\n\n".join(parts) + notes_text(store, meeting_id)
 
     @beta_tool
     def list_action_items(status: str = "open", owner: str | None = None) -> str:

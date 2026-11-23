@@ -79,6 +79,20 @@ class RecordBody(BaseModel):
     title: str | None = None
 
 
+class PauseBody(BaseModel):
+    paused: bool
+
+
+class NoteBody(BaseModel):
+    text: str = ""
+    kind: str = "note"  # note|bookmark
+    at: float | None = None  # seconds; while recording, now
+
+
+class NoteTextBody(BaseModel):
+    text: str
+
+
 class KeyBody(BaseModel):
     value: str
 
@@ -265,6 +279,7 @@ def create_app(token: str) -> FastAPI:
             "speakers": speakers,
             "segments": [dict(row) for row in store.transcript(meeting_id)],
             "summary": store.summary(meeting_id),
+            "notes": [dict(row) for row in store.notes(meeting_id)],
             "talk_time": [dict(row) for row in store.talk_time(meeting_id)],
             "action_items": [dict(row) for row in store.action_items(meeting_id=meeting_id)],
             "me": store.me()["name"],
@@ -389,6 +404,37 @@ def create_app(token: str) -> FastAPI:
         sf.write(buffer, clip, audio.RATE, format="WAV", subtype="PCM_16")
         return Response(buffer.getvalue(), media_type="audio/wav")
 
+    # notes and bookmarks ----------------------------------------------------------
+
+    def check_note(body: NoteBody) -> str:
+        if body.kind not in ("note", "bookmark"):
+            raise HTTPException(status_code=400, detail="kind is note or bookmark")
+        text = body.text.strip()
+        if body.kind == "note" and not text:
+            raise HTTPException(status_code=400, detail="Write something first")
+        if len(text) > 2000:
+            raise HTTPException(status_code=400, detail="Keep a note under 2,000 characters")
+        return text
+
+    @app.post("/api/meetings/{meeting_id}/notes", dependencies=auth)
+    def add_note(meeting_id: int, body: NoteBody, store: Store = Depends(db)):
+        meeting_or_404(store, meeting_id)
+        text = check_note(body)
+        note_id = store.add_note(meeting_id, max(0.0, body.at or 0.0), body.kind, text)
+        return dict(store.note(note_id))
+
+    @app.patch("/api/notes/{note_id}", dependencies=auth)
+    def edit_note(note_id: int, body: NoteTextBody, store: Store = Depends(db)):
+        if store.note(note_id) is None:
+            raise HTTPException(status_code=404, detail="No such note")
+        store.update_note(note_id, body.text.strip()[:2000])
+        return dict(store.note(note_id))
+
+    @app.delete("/api/notes/{note_id}", dependencies=auth)
+    def remove_note(note_id: int, store: Store = Depends(db)):
+        store.delete_note(note_id)
+        return {"deleted": note_id}
+
     @app.post("/api/segments/{segment_id}/speaker", dependencies=auth)
     def reassign_segment(segment_id: int, body: LineSpeakerBody, store: Store = Depends(db)):
         name = (body.name or "").strip()
@@ -477,7 +523,29 @@ def create_app(token: str) -> FastAPI:
             "levels": recorder.levels(),
             "devices": {name: t.device["name"] for name, t in recorder.tracks.items()},
             "errors": recorder.errors(),
+            "paused": recorder.paused,
+            "notes": recording.get("notes", 0),
         }
+
+    @app.post("/api/record/pause", dependencies=auth)
+    def record_pause(body: PauseBody):
+        """A private pause: the recording keeps running but stores silence."""
+        recorder = recording.get("recorder")
+        if recorder is None:
+            raise HTTPException(status_code=409, detail="Not recording")
+        recorder.pause(body.paused)
+        return {"paused": recorder.paused}
+
+    @app.post("/api/record/note", dependencies=auth)
+    def record_note(body: NoteBody, store: Store = Depends(db)):
+        """A note or bookmark at this moment of the recording."""
+        recorder = recording.get("recorder")
+        if recorder is None:
+            raise HTTPException(status_code=409, detail="Not recording")
+        text = check_note(body)
+        note_id = store.add_note(recording["meeting_id"], recorder.elapsed, body.kind, text)
+        recording["notes"] = recording.get("notes", 0) + 1
+        return dict(store.note(note_id))
 
     @app.post("/api/record/start", dependencies=auth)
     def record_start(body: RecordBody, store: Store = Depends(db)):
@@ -505,7 +573,7 @@ def create_app(token: str) -> FastAPI:
             meeting_id = store.create_meeting(
                 title, started.isoformat(timespec="seconds"), folder, status="recording"
             )
-            recording.update(recorder=recorder, meeting_id=meeting_id, title=title)
+            recording.update(recorder=recorder, meeting_id=meeting_id, title=title, notes=0)
         return {"recording": True, "meeting_id": meeting_id}
 
     @app.post("/api/record/stop", dependencies=auth)

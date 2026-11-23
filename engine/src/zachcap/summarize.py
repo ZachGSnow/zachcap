@@ -171,6 +171,21 @@ def transcript_text(store: Store, meeting_id: int) -> str:
     )
 
 
+def notes_text(store: Store, meeting_id: int) -> str:
+    """The user's own notes and bookmarks, for prompts: they show what mattered to them."""
+    me = store.me()["name"]
+    lines = [
+        f"[{_clock(n['at'])}] {n['text'] or 'marked this moment as important'}"
+        for n in store.notes(meeting_id)
+    ]
+    if not lines:
+        return ""
+    return (
+        f"\n\nNotes {me} took during the meeting (they show what mattered to {me}; "
+        "make sure the summary covers them):\n" + "\n".join(lines)
+    )
+
+
 ASK_SYSTEM = """You answer questions about one meeting, for the person who recorded it \
 (shown as "{me}"). Use only the transcript below. Quote timestamps in square brackets, \
 like [12:34], next to the facts you use so they can jump to them. If the transcript \
@@ -204,7 +219,9 @@ def ask(store: Store, meeting_id: int, question: str) -> dict:
             {
                 "type": "text",
                 "text": ASK_SYSTEM.format(
-                    me=store.me()["name"], title=meeting["title"], transcript=text
+                    me=store.me()["name"],
+                    title=meeting["title"],
+                    transcript=text + notes_text(store, meeting_id),
                 )
                 + spellings(store),
                 "cache_control": {"type": "ephemeral"},
@@ -275,7 +292,7 @@ def summarize(store: Store, meeting_id: int, template: str | None = None) -> dic
             {
                 "role": "user",
                 "content": f"Meeting: {meeting['title']}\nDate: {started:%A %B %d, %Y}\n\n"
-                f"Transcript:\n{text}",
+                f"Transcript:\n{text}" + notes_text(store, meeting_id),
             }
         ],
         output_format=Summary,
@@ -316,7 +333,7 @@ def recipe(store: Store, meeting_id: int, name: str) -> dict:
     context = f"Meeting: {meeting['title']}\nDate: {started:%A %B %d, %Y}\n\n"
     if summary:
         context += f"Summary:\n{json.dumps(summary['content'], ensure_ascii=False)}\n\n"
-    context += f"Transcript:\n{text}"
+    context += f"Transcript:\n{text}" + notes_text(store, meeting_id)
     model = summary_model(store)
     client = anthropic.Anthropic(api_key=key)
     response = client.beta.messages.create(

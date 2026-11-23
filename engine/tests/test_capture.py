@@ -107,6 +107,32 @@ def test_recording_details_are_saved_from_the_start(tmp_path: Path, monkeypatch)
     assert json.loads((folder / "recording.json").read_text(encoding="utf-8"))["complete"]
 
 
+def test_a_private_pause_records_silence_and_keeps_time(tmp_path: Path, monkeypatch):
+    import numpy as np
+    import soundfile as sf
+
+    monkeypatch.setattr(capture, "pyaudio", fake_pyaudio())
+    folder = tmp_path / "meeting"
+    recorder = capture.Recorder(folder)
+    recorder.start()
+    mic = recorder.tracks["mic"]
+    loud = (np.full(1024, 8000, np.int16)).tobytes()
+
+    mic._callback(loud, 1024, None, 0)
+    drained(mic)
+    recorder.pause()
+    mic._callback(loud, 1024, None, 0)
+    drained(mic)
+    assert recorder.paused and mic.level_dbfs < -100
+    recorder.pause(False)
+    mic._callback(loud, 1024, None, 0)
+    recorder.stop()
+
+    audio, _ = sf.read(folder / "mic-000.flac", dtype="int16")
+    assert len(audio) == 3 * 1024  # the paused stretch is kept, as silence
+    assert audio[:1024].min() > 0 and not audio[1024:2048].any() and audio[2048:].min() > 0
+
+
 def test_a_disk_error_is_reported_and_the_queue_keeps_draining(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(capture, "pyaudio", fake_pyaudio())
     recorder = capture.Recorder(tmp_path / "meeting")

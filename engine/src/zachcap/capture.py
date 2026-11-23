@@ -48,6 +48,7 @@ class TrackRecorder:
         self.level_dbfs = -120.0
         self.errors: list[str] = []
         self.failed = False
+        self.paused = False
         self.chunks: list[str] = []
         self._on_first_buffer = on_first_buffer
         self._queue: queue.Queue[bytes | None] = queue.Queue()
@@ -67,6 +68,10 @@ class TrackRecorder:
         while (data := self._queue.get()) is not None:
             samples = np.frombuffer(data, dtype=np.int16).reshape(-1, self.channels)
             mono = samples.mean(axis=1).astype(np.int16)
+            if self.paused:
+                # A private pause: silence instead of sound, so both tracks keep their length
+                # and stay in sync, and nothing said meanwhile is kept.
+                mono = np.zeros_like(mono)
             self.level_dbfs = float(20 * np.log10(np.sqrt(np.mean((mono / 32768.0) ** 2)) + 1e-9))
             if first:
                 first = False
@@ -248,6 +253,15 @@ class Recorder:
 
     def errors(self) -> list[str]:
         return [error for track in self.tracks.values() for error in track.errors]
+
+    @property
+    def paused(self) -> bool:
+        return any(track.paused for track in self.tracks.values())
+
+    def pause(self, paused: bool = True) -> None:
+        """Pause (or resume) privately: both tracks record silence until resumed."""
+        for track in self.tracks.values():
+            track.paused = paused
 
     def _close(self) -> list[str]:
         """Stop every stream and writer that was started. Never raises."""

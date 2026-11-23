@@ -119,6 +119,16 @@ CREATE TABLE IF NOT EXISTS action_items (
     done_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS action_items_by_status ON action_items(status, meeting_id);
+
+CREATE TABLE IF NOT EXISTS meeting_notes (
+    id          INTEGER PRIMARY KEY,
+    meeting_id  INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    at          REAL NOT NULL,                   -- seconds into the meeting
+    kind        TEXT NOT NULL DEFAULT 'note',    -- note|bookmark
+    text        TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS meeting_notes_by_meeting ON meeting_notes(meeting_id, at);
 """
 
 # Suggestions show as "Speaker 2 (Dana?)" until confirmed.
@@ -496,6 +506,32 @@ class Store:
             "done_at = CASE WHEN ? = 'done' THEN datetime('now') ELSE NULL END WHERE id = ?",
             (status, status, item_id),
         )
+        self._commit()
+
+    # notes and bookmarks ----------------------------------------------------
+
+    def add_note(self, meeting_id: int, at: float, kind: str = "note", text: str = "") -> int:
+        cursor = self.db.execute(
+            "INSERT INTO meeting_notes (meeting_id, at, kind, text) VALUES (?, ?, ?, ?)",
+            (meeting_id, round(at, 2), kind, text),
+        )
+        self._commit()
+        return cursor.lastrowid
+
+    def notes(self, meeting_id: int) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM meeting_notes WHERE meeting_id = ? ORDER BY at, id", (meeting_id,)
+        ).fetchall()
+
+    def note(self, note_id: int) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM meeting_notes WHERE id = ?", (note_id,)).fetchone()
+
+    def update_note(self, note_id: int, text: str) -> None:
+        self.db.execute("UPDATE meeting_notes SET text = ? WHERE id = ?", (text, note_id))
+        self._commit()
+
+    def delete_note(self, note_id: int) -> None:
+        self.db.execute("DELETE FROM meeting_notes WHERE id = ?", (note_id,))
         self._commit()
 
     # overviews and stats ----------------------------------------------------
