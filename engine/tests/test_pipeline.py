@@ -1,4 +1,40 @@
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from zachcap import pipeline
 from zachcap.pipeline import merge_same_person
+from zachcap.store import Store
+from zachcap.voiceprint import Match
+
+
+def test_a_failed_reprocess_keeps_the_last_good_transcript(tmp_path: Path):
+    store = Store(tmp_path / "test.db")
+    meeting = store.create_meeting("Sync", "2026-11-22T20:00:00", tmp_path / "moved-away")
+    speaker = store.add_speaker(
+        meeting, "system", "Speaker 1", np.ones(4), 6.0, None, Match(None, 0.0, "unknown")
+    )
+    store.add_segments(meeting, [(speaker, "system", 1.0, 4.0, "Kept", 0.9)])
+    store.refresh_status(meeting)
+
+    with pytest.raises(RuntimeError, match="audio is missing"):
+        pipeline.process(store, meeting, log=lambda message: None)
+
+    assert [row["text"] for row in store.transcript(meeting)] == ["Kept"]
+    assert store.meeting(meeting)["status"] == "needs_names"
+    store.close()
+
+
+def test_a_meeting_that_never_worked_is_marked_failed(tmp_path: Path):
+    store = Store(tmp_path / "test.db")
+    meeting = store.create_meeting("Sync", "2026-11-22T20:00:00", tmp_path / "empty")
+
+    with pytest.raises(RuntimeError, match="audio is missing"):
+        pipeline.process(store, meeting, log=lambda message: None)
+
+    assert store.meeting(meeting)["status"] == "failed"
+    store.close()
 
 
 def row(speaker, start, end, text, track="system"):

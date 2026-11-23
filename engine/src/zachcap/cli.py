@@ -75,6 +75,10 @@ def cmd_record(args: argparse.Namespace, store: Store) -> None:
     folder = paths.meetings_dir() / datetime.now().strftime("%Y-%m-%d_%H%M%S")
     recorder = Recorder(folder)
     recorder.start()
+    title = args.title or f"Meeting {datetime.now():%b %d %H:%M}"
+    started = (recorder.started_at or datetime.now().astimezone()).isoformat(timespec="seconds")
+    # Saved now, so the app can recover the recording if this window is closed mid-call.
+    meeting_id = store.create_meeting(title, started, folder, status="recording")
     print("Recording mic + computer audio. Press Enter to stop.")
     stop = threading.Event()
     threading.Thread(target=lambda: (sys.stdin.readline(), stop.set()), daemon=True).start()
@@ -90,8 +94,7 @@ def cmd_record(args: argparse.Namespace, store: Store) -> None:
     except KeyboardInterrupt:
         pass
     info = recorder.stop()
-    title = args.title or f"Meeting {datetime.now():%b %d %H:%M}"
-    meeting_id = store.create_meeting(title, info["started_at"], folder, duration=info["duration"])
+    store.update_meeting(meeting_id, status="recorded", duration=info["duration"])
     print(f"\nSaved meeting {meeting_id} ({info['duration'] / 60:.1f} min) to {folder}")
     if not args.no_process:
         _process(store, meeting_id)

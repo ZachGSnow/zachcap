@@ -1,9 +1,47 @@
+import shutil
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
 from zachcap import audio
+
+RATE = 16000
+
+
+def tone(seconds: float) -> np.ndarray:
+    t = np.arange(int(seconds * RATE)) / RATE
+    return (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+
+
+def cut_off_copy(folder: Path, name: str, audio_data: np.ndarray) -> Path:
+    """A FLAC file as the recorder leaves it when ZachCap dies mid-chunk: never closed."""
+    live = folder / f"live-{name}"
+    with sf.SoundFile(live, "w", samplerate=RATE, channels=1, subtype="PCM_16") as f:
+        if audio_data.size:
+            f.write(audio_data)
+            f.flush()
+        shutil.copyfile(live, folder / name)
+    live.unlink()
+    return folder / name
+
+
+def test_a_chunk_cut_off_by_a_crash_still_loads(tmp_path: Path):
+    path = cut_off_copy(tmp_path, "mic-000.flac", tone(3.0))
+    assert sf.info(path).frames >= audio.UNKNOWN_LENGTH  # no length in the header
+
+    loaded = audio.load_mono_16k(path)
+
+    assert len(loaded) / RATE > 2.5
+
+
+def test_an_empty_last_chunk_is_skipped(tmp_path: Path):
+    sf.write(tmp_path / "mic-000.flac", tone(1.0), RATE, subtype="PCM_16")
+    cut_off_copy(tmp_path, "mic-001.flac", np.zeros(0, np.float32))
+
+    track = audio.load_track(tmp_path, "mic")
+
+    assert track is not None and abs(len(track) / RATE - 1.0) < 0.01
 
 
 def test_times_accept_seconds_and_clock_formats():
