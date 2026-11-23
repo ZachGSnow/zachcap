@@ -114,6 +114,16 @@ def test_model_setting_and_pricing_of_the_model_that_answered(meeting, monkeypat
     assert summarize.summary_model(store) == summarize.DEFAULT_MODEL
 
 
+def test_summaries_spell_the_words_to_know(meeting, monkeypatch):
+    store, meeting_id = meeting
+    store.set_setting("vocabulary", "Contoso\nProxmox: prox mocks")
+    calls = fake_claude(monkeypatch, sample_summary())
+
+    summarize.summarize(store, meeting_id)
+
+    assert "Spell these names and terms exactly as written: Contoso, Proxmox." in calls["system"]
+
+
 def test_timestamps_become_seconds():
     assert summarize.to_seconds("01:01") == 61
     assert summarize.to_seconds("[1:02:03]") == 3723

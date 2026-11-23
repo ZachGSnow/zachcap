@@ -13,7 +13,7 @@ from anthropic import beta_tool
 
 from . import apikeys
 from .store import Store
-from .summarize import MODELS, _clock, cost_usd, summary_model
+from .summarize import MODELS, _clock, cost_usd, spellings, summary_model
 
 SYSTEM = """You answer questions about the meetings {me} recorded with ZachCap, their \
 private meeting notebook. Today is {today}.
@@ -178,7 +178,8 @@ def ask_everything(store: Store, question: str, history: list[dict] | None = Non
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
         output_config={"effort": "medium"},
-        system=SYSTEM.format(me=store.me()["name"], today=f"{date.today():%A %B %d, %Y}"),
+        system=SYSTEM.format(me=store.me()["name"], today=f"{date.today():%A %B %d, %Y}")
+        + spellings(store),
         tools=make_tools(store),
         messages=messages,
     )

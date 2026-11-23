@@ -18,7 +18,7 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 - **Record any call** with one button or **Ctrl+Alt+R** from anywhere; the app lives in the tray and can start with Windows. It notices when Teams or another app starts using your microphone and offers to record.
 - **Nothing lost to a crash**: the meeting is saved from its first second. If ZachCap is quit mid-call, crashes, or Windows restarts, the audio recorded so far is recovered and processed at the next start.
 - **Import recordings** you already have (a Teams .mp4, .m4a, .mp3, .wav...), with an optional time range.
-- **Transcription on your GPU** with Whisper (`large-v3-turbo`): about 2-3 minutes per hour of audio on a 4 GB laptop GPU.
+- **Transcription on your GPU** with Whisper (`large-v3-turbo`): about 2-3 minutes per hour of audio on a 4 GB laptop GPU. **Words to know** (names, products, jargon, and what Whisper mishears them as) are spelled your way, and so are the names of people you've identified.
 - **Speaker separation and voice recognition**: a "Who's this?" card plays a short sample of each unknown voice; name them once and ZachCap recognizes them next time, including you on your own mic and people in the room with you.
 - **Speaker lanes**: a timeline of who talked when, with talk-time stats, and **solo playback** that plays one person only, from their own side of the call.
 - **Summaries with names** from Claude (Opus 5.5 by default): overview, decisions, action items marked as commitments or assignments with due dates, who said what, open questions and topics. Every item links to the moment it was said.
@@ -72,6 +72,7 @@ Everything is set in the app under **Settings**:
 | Microphone | Your voice; pick the one your meeting app uses | Windows default |
 | Computer audio from | The output device to record (speakers, headset, or a virtual cable) | Windows default |
 | Language | Whisper's language, or automatic detection | English |
+| Words to know | Terms to spell right, one per line; `Term: misheard, misheard` adds corrections | empty |
 | Claude model | Opus 5.5, Sonnet 5.5 or Fable 5.1 | Opus 5.5 |
 | API keys | Hugging Face token and Anthropic key | not set |
 | Start with Windows | Opens ZachCap in the tray when you sign in (release builds) | off |
@@ -104,7 +105,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 54 tests: storage, matching, audio, capture, crash recovery, API, summaries, Ask
+uv run pytest -q             # 58 tests: storage, matching, audio, capture, crash recovery, API, summaries, Ask
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```

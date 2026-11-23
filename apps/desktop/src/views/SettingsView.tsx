@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type Devices, type KeyStatus, type Settings } from "@/lib/engine";
 import { attempt } from "@/lib/feedback";
@@ -126,6 +127,35 @@ function KeyRow({ name, title, help, status, onSaved }: { name: string; title: s
   );
 }
 
+/** Names and jargon Whisper should spell right, with what it mishears them as. */
+function WordsToKnow({ saved, onSave }: { saved: string; onSave: (value: string) => Promise<void> }) {
+  const [value, setValue] = useState(saved);
+  useEffect(() => setValue(saved), [saved]);
+  const changed = value.trim() !== saved.trim();
+  return (
+    <div className="px-4 py-3.5">
+      <div className="text-sm font-medium">Words to know</div>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        Names, products and jargon to spell right, one per line. Add what Whisper mishears after a colon, like{" "}
+        <code className="font-mono">Proxmox: prox mocks</code>. People you've named are included automatically. Applies to
+        meetings processed from now on (or Reprocess).
+      </p>
+      <Textarea
+        aria-label="Words to know"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        placeholder={"Contoso\nProxmox: prox mocks, proxmocks\nConnectWise"}
+        className="mt-2.5 min-h-24 font-mono text-xs"
+      />
+      <div className="mt-2 flex justify-end">
+        <Button size="sm" disabled={!changed} onClick={() => void onSave(value)}>
+          Save words
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function StartWithWindows() {
   const [on, setOn] = useState<boolean>();
   useEffect(() => {
@@ -165,7 +195,9 @@ export function SettingsView() {
   const [name, setName] = useState("");
   useEffect(() => setName(settings?.me.name ?? ""), [settings?.me.name]);
 
-  const save = async (change: Partial<Record<"summary_model" | "language" | "mic_device" | "output_device", string>>) => {
+  const save = async (
+    change: Partial<Record<"summary_model" | "language" | "mic_device" | "output_device" | "vocabulary", string>>,
+  ) => {
     try {
       await api("/api/settings", { method: "PUT", json: change });
       toast.success("Saved");
@@ -245,6 +277,7 @@ export function SettingsView() {
               options={(settings?.languages ?? []).map((l) => ({ value: l.id, label: l.label }))}
             />
           </Row>
+          <WordsToKnow saved={settings?.vocabulary ?? ""} onSave={(vocabulary) => save({ vocabulary })} />
         </Section>
 
         <Section icon={<Sparkles className="size-3.5" />} title="Summaries">

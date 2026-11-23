@@ -136,6 +136,7 @@ export type Settings = {
   languages: { id: string; label: string }[];
   mic_device: string;
   output_device: string;
+  vocabulary: string;
   me: { id: number; name: string };
 };
 

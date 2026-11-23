@@ -26,9 +26,17 @@ class Transcriber:
         # 2.3 GB peak); on CPU the plain decoder is the better choice.
         self.batched = BatchedInferencePipeline(model=self.model) if self.device == "cuda" else None
 
-    def words(self, audio: np.ndarray, language: str | None = "en") -> list[Word]:
-        """Timed words for 16 kHz mono audio. Silence is skipped by Whisper's VAD."""
-        options = {"language": language, "beam_size": 5, "word_timestamps": True}
+    def words(
+        self, audio: np.ndarray, language: str | None = "en", hotwords: str | None = None
+    ) -> list[Word]:
+        """Timed words for 16 kHz mono audio. Silence is skipped by Whisper's VAD.
+        hotwords: names and terms to listen for (see vocabulary.py)."""
+        options = {
+            "language": language,
+            "beam_size": 5,
+            "word_timestamps": True,
+            "hotwords": hotwords or None,
+        }
         if self.batched is not None:
             segments, _ = self.batched.transcribe(audio, batch_size=8, **options)
         else:

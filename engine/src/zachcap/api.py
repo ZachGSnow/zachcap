@@ -87,6 +87,7 @@ class SettingsBody(BaseModel):
     language: str | None = None
     mic_device: str | None = None
     output_device: str | None = None
+    vocabulary: str | None = None
 
 
 class Worker:
@@ -534,6 +535,7 @@ def create_app(token: str) -> FastAPI:
             "languages": [{"id": k, "label": v} for k, v in LANGUAGES.items()],
             "mic_device": store.setting("mic_device", ""),
             "output_device": store.setting("output_device", ""),
+            "vocabulary": store.setting("vocabulary", ""),
             "me": dict(store.me()),
         }
 
@@ -553,6 +555,12 @@ def create_app(token: str) -> FastAPI:
             value = getattr(body, key)
             if value is not None:
                 store.set_setting(key, value)
+        if body.vocabulary is not None:
+            if len(body.vocabulary) > 4000:
+                raise HTTPException(
+                    status_code=400, detail="Keep the word list under 4,000 characters"
+                )
+            store.set_setting("vocabulary", body.vocabulary.strip())
         return get_settings(store)
 
     return app
