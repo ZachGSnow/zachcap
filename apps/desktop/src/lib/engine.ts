@@ -33,7 +33,7 @@ export type Meeting = {
 /** A ticket number found in a meeting, and where: offered to pick as its ticket. */
 export type TicketFound = {
   ticket: string;
-  where: ("title" | "notes" | "snapshots" | "transcript")[];
+  where: ("title" | "notes" | "snapshots" | "files" | "transcript")[];
   count: number;
 };
 
@@ -203,7 +203,8 @@ export type Note = {
   id: number;
   meeting_id: number;
   at: number;
-  kind: "note" | "bookmark" | "snapshot";
+  /** "file": an attached file, its name on the first line of ``text``, then its text. */
+  kind: "note" | "bookmark" | "snapshot" | "file";
   text: string;
   created_at: string;
 };

@@ -1,4 +1,4 @@
-import { Bookmark, Camera, Copy, NotebookPen, Plus, Trash2 } from "lucide-react";
+import { Bookmark, Camera, Copy, FileText, NotebookPen, Paperclip, Plus, Trash2 } from "lucide-react";
 import { useRef, useState } from "react";
 
 import {
@@ -13,7 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useReturnFocus } from "@/hooks/useReturnFocus";
-import { api, mediaUrl, type Note } from "@/lib/engine";
+import { api, isTauri, mediaUrl, type Note } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
 import { clock } from "@/lib/format";
 import { useKeys } from "@/lib/shortcuts";
@@ -91,6 +91,30 @@ function SnapshotPicture({ note }: { note: Note }) {
 
 /** Notes and bookmarks taken during the meeting (or added while listening back), and
  * snapshots of the call. Summaries and answers give them priority. */
+/** The text files ZachCap reads (the engine refuses others with the reason). */
+const TEXT_FILES = ["txt", "log", "md", "csv", "tsv", "json", "xml", "ini", "cfg", "conf", "config", "yaml", "yml", "toml", "ps1", "psm1", "bat", "cmd", "sh", "py", "reg", "html", "htm", "eml", "err", "out"];
+
+/** An attached file: its name and size, and its text to read. */
+function FileNote({ note }: { note: Note }) {
+  const [open, setOpen] = useState(false);
+  const [name, ...rest] = note.text.split("\n");
+  const text = rest.join("\n");
+  const lines = rest.length;
+  return (
+    <div className="min-w-0 flex-1 text-sm">
+      <button onClick={() => setOpen(!open)} className="text-left font-medium hover:underline" aria-expanded={open}>
+        {name}
+      </button>
+      <span className="ml-2 text-xs text-muted-foreground">
+        {lines} line{lines === 1 ? "" : "s"} {"\u00b7"} its text goes with the meeting to summaries and Ask
+      </span>
+      {open && (
+        <pre className="mt-2 max-h-72 overflow-auto rounded-md bg-muted p-2 font-mono text-xs whitespace-pre-wrap">{text}</pre>
+      )}
+    </div>
+  );
+}
+
 export function NotesPanel({
   meetingId,
   notes,
@@ -125,6 +149,18 @@ export function NotesPanel({
     else setText((typed) => (typed ? `${value} ${typed}` : value));
   };
 
+  const attach = () =>
+    attempt("Couldn't attach the file", async () => {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({
+        title: "Attach a text file: a log, an exported email, a config",
+        filters: [{ name: "Text files", extensions: TEXT_FILES }],
+      });
+      if (typeof picked !== "string") return;
+      await api(`/api/meetings/${meetingId}/attach`, { method: "POST", json: { path: picked } });
+      onChanged();
+    });
+
   const remove = async (note: Note) => {
     await attempt("Couldn't delete the note", () => api(`/api/notes/${note.id}`, { method: "DELETE" }));
     onChanged();
@@ -149,6 +185,12 @@ export function NotesPanel({
           <Plus className="size-3.5" />
           Add
         </Button>
+        {isTauri() && (
+          <Button type="button" size="sm" variant="outline" className="h-9" onClick={() => void attach()}>
+            <Paperclip className="size-3.5" />
+            Attach a file
+          </Button>
+        )}
       </form>
 
       {notes.length === 0 ? (
@@ -166,21 +208,29 @@ export function NotesPanel({
         <div className="mt-4 divide-y overflow-hidden rounded-xl border">
           {notes.map((note) => (
             <div key={note.id} className="group flex items-start gap-3 px-3 py-2.5">
-              <button
-                onClick={() => onSeek(note.at)}
-                className="mt-0.5 shrink-0 font-mono text-xs tabular-nums text-muted-foreground hover:text-foreground hover:underline"
-                title="Play from here"
-              >
-                {clock(note.at)}
-              </button>
-              {note.kind === "bookmark" ? (
+              {note.kind === "file" ? (
+                <span className="mt-0.5 w-10 shrink-0 font-mono text-xs text-muted-foreground">file</span>
+              ) : (
+                <button
+                  onClick={() => onSeek(note.at)}
+                  className="mt-0.5 shrink-0 font-mono text-xs tabular-nums text-muted-foreground hover:text-foreground hover:underline"
+                  title="Play from here"
+                >
+                  {clock(note.at)}
+                </button>
+              )}
+              {note.kind === "file" ? (
+                <FileText className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+              ) : note.kind === "bookmark" ? (
                 <Bookmark className="mt-0.5 size-3.5 shrink-0 fill-amber-400 text-amber-500" />
               ) : note.kind === "snapshot" ? (
                 <Camera className="mt-0.5 size-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
               ) : (
                 <NotebookPen className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
               )}
-              {note.kind === "snapshot" ? (
+              {note.kind === "file" ? (
+                <FileNote note={note} />
+              ) : note.kind === "snapshot" ? (
                 <SnapshotNote
                   note={note}
                   onOpen={(from) => {

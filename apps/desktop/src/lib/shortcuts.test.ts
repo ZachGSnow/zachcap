@@ -41,9 +41,9 @@ describe("keysFromEvent", () => {
   });
 
   it("refuses Ctrl+Alt keys that type a character on this keyboard (AltGr)", () => {
-    const euro = keysFromEvent(press(69, "€", { ctrl: true, alt: true }));
+    const euro = keysFromEvent(press(69, "\u20ac", { ctrl: true, alt: true }));
     expect(euro).toHaveProperty("problem");
-    expect((euro as { problem: string }).problem).toContain("€");
+    expect((euro as { problem: string }).problem).toContain("\u20ac");
   });
 });
 

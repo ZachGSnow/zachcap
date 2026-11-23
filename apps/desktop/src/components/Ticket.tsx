@@ -7,7 +7,10 @@ import { attempt } from "@/lib/feedback";
 
 function found(suggestion: TicketFound): string {
   const where = suggestion.where.map(
-    (place) => ({ title: "in the title", notes: "in your notes", snapshots: "in a snapshot", transcript: "said" })[place],
+    (place) =>
+      ({ title: "in the title", notes: "in your notes", snapshots: "in a snapshot", files: "in an attached file", transcript: "said" })[
+        place
+      ],
   );
   const times = suggestion.count > 1 ? ` (${suggestion.count} times)` : "";
   return `${where.join(", ")}${times}`;
