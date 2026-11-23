@@ -40,7 +40,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { SoundCheck } from "@/components/SoundCheck";
 import { usePoll } from "@/hooks/usePoll";
 import { useReturnFocus } from "@/hooks/useReturnFocus";
-import { api, isTauri, type Devices, type KeyStatus, type PromptLibrary, type Settings } from "@/lib/engine";
+import {
+  api,
+  isTauri,
+  type Devices,
+  type KeyStatus,
+  type PromptLibrary,
+  type RecentDictation,
+  type Settings,
+} from "@/lib/engine";
 import { attempt, copyText, reason } from "@/lib/feedback";
 import {
   DEFAULT_KEYS,
@@ -263,6 +271,59 @@ function Row({ label, help, children }: { label: string; help?: string; children
         {help && <p className="mt-0.5 text-xs text-muted-foreground">{help}</p>}
       </div>
       <div className="flex shrink-0 items-center gap-2 sm:w-80">{children}</div>
+    </div>
+  );
+}
+
+const DELIVERED: Record<RecentDictation["delivered"], string> = { typed: "typed", copied: "copied", kept: "not typed" };
+
+/** The last few dictations, in case one went somewhere else: copy one again. The engine keeps
+ * them in memory only, so they're gone when ZachCap quits or dictation is turned off. */
+function RecentDictations() {
+  const { data: recent, refresh } = usePoll(() => api<RecentDictation[]>("/api/dictate/recent"), 5000);
+  if (!recent?.length) return null;
+  const forget = () =>
+    attempt("Couldn't forget them", async () => {
+      await api("/api/dictate/recent", { method: "DELETE" });
+      await refresh();
+    });
+  return (
+    <div className="px-4 py-3.5">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium">Recent dictations</div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Newest first, in case one went somewhere else. Kept only until ZachCap closes.
+          </p>
+        </div>
+        <Button size="sm" variant="ghost" onClick={() => void forget()}>
+          Forget them
+        </Button>
+      </div>
+      <ul className="mt-2 divide-y rounded-lg border">
+        {recent.map((entry, index) => (
+          <li key={`${entry.at}-${index}`} className="flex items-center gap-3 px-3 py-1.5 text-sm">
+            <span className="min-w-0 flex-1 truncate" title={entry.text}>
+              {entry.text}
+            </span>
+            <span className="shrink-0 text-xs text-muted-foreground">
+              {new Date(entry.at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+              {" \u00b7 "}
+              {DELIVERED[entry.delivered]}
+            </span>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-7 shrink-0"
+              aria-label="Copy this dictation"
+              title="Copy"
+              onClick={() => void copyText(entry.text, "Copied")}
+            >
+              <Copy className="size-3.5" />
+            </Button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -752,6 +813,7 @@ export function SettingsView() {
               <Textarea aria-label="Try dictation here" placeholder={`Hold ${keysNow.dictate} and speak`} className="min-h-16 text-sm" />
             </Row>
           )}
+          {settings?.dictation && <RecentDictations />}
         </Section>
 
         <Section icon={<Keyboard className="size-3.5" />} title="Shortcuts">

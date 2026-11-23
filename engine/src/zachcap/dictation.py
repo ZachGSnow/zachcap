@@ -19,8 +19,10 @@ import sys
 import threading
 import time
 import unicodedata
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,6 +32,7 @@ RATE = 16_000
 MAX_SECONDS = 120  # a hold longer than this is cut off: dictation is for notes, not meetings
 GRACE_SECONDS = 60  # no key-up this long after the cut-off: it was lost, so the mic is closed
 MAX_AT_ONCE = 2  # a quick second dictation may start while the first is still being finished
+RECENT = 10  # dictations kept in memory (never on disk) in case one went astray
 ENGLISH_MODEL = "small.en"
 ANY_LANGUAGE_MODEL = "small"
 SETTING = "dictation"
@@ -450,6 +453,9 @@ class Dictation:
         # Told True when the first hold starts and False when the last one ends, so a
         # recording under way can leave the dictation out of the meeting.
         self.on_listening = None
+        # The last few dictations, newest first, for Settings: in memory only, so they're
+        # gone when ZachCap quits (or dictation is turned off).
+        self.recent: deque[dict] = deque(maxlen=RECENT)
 
     @property
     def listening(self) -> bool:
@@ -547,7 +553,7 @@ class Dictation:
             while self.holding and time.monotonic() < deadline:
                 time.sleep(0.05)
             typed, why = type_into(window, text + " ")
-        return {
+        result = {
             "text": text,
             "seconds": round(audio.size / RATE, 1),
             "took": round(time.perf_counter() - began, 2),
@@ -555,6 +561,16 @@ class Dictation:
             "copied": bool(why) and copy_to_clipboard(text),
             "why": why,
         }
+        if text:
+            delivered = "typed" if typed and not why else "copied" if result["copied"] else "kept"
+            self.recent.appendleft(
+                {
+                    "text": text,
+                    "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "delivered": delivered,
+                }
+            )
+        return result
 
     def cancel(self, number: int | None = None) -> None:
         """Stops listening and drops what was heard: one dictation, or all of them."""

@@ -26,7 +26,7 @@ import numpy as np
 import soundfile as sf
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from . import (
@@ -1099,6 +1099,17 @@ def create_app(token: str) -> FastAPI:
         dictator.cancel(body.id if body else None)
         return {"listening": dictator.listening}
 
+    @app.get("/api/dictate/recent", dependencies=auth)
+    def dictate_recent():
+        """The last few dictations, newest first, in case one went astray: kept in memory
+        only, never on disk."""
+        return JSONResponse(list(dictator.recent), headers=NO_STORE)
+
+    @app.delete("/api/dictate/recent", dependencies=auth)
+    def forget_dictations():
+        dictator.recent.clear()
+        return {"forgotten": True}
+
     @app.get("/api/call", dependencies=auth)
     def call():
         """Apps using the microphone right now, so the app can offer to record."""
@@ -1260,6 +1271,7 @@ def create_app(token: str) -> FastAPI:
                 dictator.transcriber.warm_up(language_of(store))
             else:  # turned off mid-dictation: the keys' release won't come
                 dictator.cancel()
+                dictator.recent.clear()
         if body.export_work_log is not None:
             store.set_setting("export_work_log", "1" if body.export_work_log else "0")
             if body.export_work_log:  # today's and this week's, right away
