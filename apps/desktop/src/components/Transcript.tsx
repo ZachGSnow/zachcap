@@ -1,5 +1,5 @@
 import { Check, Play, Search, UserRoundSearch } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -167,7 +167,52 @@ export function NamePrompt({
 /** Where a line can move: a voice of this meeting (named or not), or a known person. */
 type LineTarget = { label: string; speakerId?: number; name?: string };
 
-export function Transcript({
+/** One transcript line. Memoized: during playback only the line that becomes current
+ * re-renders, which keeps two-hour meetings (thousands of lines) smooth. */
+const TranscriptRow = memo(function TranscriptRow({
+  segment,
+  color,
+  current,
+  onSeek,
+  onPickSpeaker,
+}: {
+  segment: Segment;
+  color: SpeakerColor;
+  current: boolean;
+  onSeek: (seconds: number) => void;
+  onPickSpeaker: (segment: Segment, anchor: HTMLElement) => void;
+}) {
+  const unsure = segment.speaker_status === "suggested" || segment.speaker_status === "unknown";
+  return (
+    <div
+      data-current={current || undefined}
+      className={cn(
+        "group grid grid-cols-[3.5rem_10rem_1fr] items-start gap-3 rounded-lg px-2 py-1.5 transition-colors",
+        current ? "bg-muted" : "hover:bg-muted/40",
+      )}
+    >
+      <button
+        onClick={() => onSeek(segment.start)}
+        className="select-none pt-0.5 text-left font-mono text-xs tabular-nums text-muted-foreground hover:text-foreground"
+        title="Play from here"
+      >
+        {clock(segment.start)}
+      </button>
+      <button
+        onClick={(event) => onPickSpeaker(segment, event.currentTarget)}
+        className="flex min-w-0 select-none items-start gap-2 rounded-md pt-0.5 text-left hover:underline"
+        title="Change who said this"
+        aria-haspopup="menu"
+      >
+        <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", color.dot)} />
+        <span className={cn("truncate text-sm font-medium", unsure && "text-muted-foreground")}>{segment.speaker}</span>
+      </button>
+      <p className="text-sm leading-relaxed">{segment.text}</p>
+    </div>
+  );
+});
+
+export const Transcript = memo(function Transcript({
   segments,
   speakers,
   people,
@@ -190,7 +235,9 @@ export function Transcript({
 }) {
   const [filter, setFilter] = useState("");
   const [moving, setMoving] = useState<Segment | null>(null);
-  const currentRow = useRef<HTMLDivElement>(null);
+  // One menu for every line, opened next to the name that was clicked.
+  const [menu, setMenu] = useState<{ segment: Segment; x: number; y: number } | null>(null);
+  const list = useRef<HTMLDivElement>(null);
 
   const shown = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -202,8 +249,15 @@ export function Transcript({
   }, [segments, filter, solo]);
 
   useEffect(() => {
-    if (playing) currentRow.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (!playing) return;
+    list.current?.querySelector("[data-current]")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [currentId, playing]);
+
+  const pickSpeaker = useCallback((segment: Segment, anchor: HTMLElement) => {
+    const box = anchor.getBoundingClientRect();
+    const parent = list.current?.getBoundingClientRect();
+    setMenu({ segment, x: box.left - (parent?.left ?? 0), y: box.bottom - (parent?.top ?? 0) });
+  }, []);
 
   const reassign = async (segment: Segment, target: LineTarget) => {
     try {
@@ -249,72 +303,56 @@ export function Transcript({
           {segments.length === 0 ? "No speech in this recording yet." : "Nothing matches."}
         </p>
       )}
-      <div className="space-y-0.5">
-        {shown.map((segment) => {
-          const color = colorOf(segment.speaker);
-          const current = currentId === segment.id && playing;
-          const unsure = segment.speaker_status === "suggested" || segment.speaker_status === "unknown";
-          return (
-            <div
-              key={segment.id}
-              ref={current ? currentRow : undefined}
-              className={cn(
-                "group grid grid-cols-[3.5rem_10rem_1fr] items-start gap-3 rounded-lg px-2 py-1.5 transition-colors",
-                current ? "bg-muted" : "hover:bg-muted/40",
-              )}
-            >
-              <button
-                onClick={() => onSeek(segment.start)}
-                className="select-none pt-0.5 text-left font-mono text-xs tabular-nums text-muted-foreground hover:text-foreground"
-                title="Play from here"
-              >
-                {clock(segment.start)}
-              </button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    className="flex min-w-0 select-none items-start gap-2 rounded-md pt-0.5 text-left hover:underline"
-                    title="Change who said this"
-                  >
-                    <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", color.dot)} />
-                    <span className={cn("truncate text-sm font-medium", unsure && "text-muted-foreground")}>
-                      {segment.speaker}
-                    </span>
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-56">
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">Who said this?</DropdownMenuLabel>
-                  {voices
-                    .filter((voice) => voice.speakerId !== segment.meeting_speaker_id && voice.label !== segment.speaker)
-                    .map((voice) => (
-                      <DropdownMenuItem key={`voice-${voice.speakerId}`} onSelect={() => void reassign(segment, voice)}>
-                        <span className={cn("size-2 rounded-full", colorOf(voice.label).dot)} />
-                        {voice.label}
-                      </DropdownMenuItem>
-                    ))}
-                  {others.length > 0 && (
-                    <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuLabel className="text-xs text-muted-foreground">Someone you know</DropdownMenuLabel>
-                      {others.slice(0, 8).map((person) => (
-                        <DropdownMenuItem key={`person-${person.name}`} onSelect={() => void reassign(segment, person)}>
-                          <span className={cn("size-2 rounded-full", colorOf(person.label).dot)} />
-                          {person.label}
-                        </DropdownMenuItem>
-                      ))}
-                    </>
-                  )}
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onSelect={() => setMoving(segment)}>
-                    <UserRoundSearch className="size-4" />
-                    Someone else...
+      <div ref={list} className="relative space-y-0.5">
+        {shown.map((segment) => (
+          <TranscriptRow
+            key={segment.id}
+            segment={segment}
+            color={colorOf(segment.speaker)}
+            current={currentId === segment.id && playing}
+            onSeek={onSeek}
+            onPickSpeaker={pickSpeaker}
+          />
+        ))}
+        <DropdownMenu open={menu !== null} onOpenChange={(open) => !open && setMenu(null)}>
+          <DropdownMenuTrigger asChild>
+            <span
+              aria-hidden
+              className="pointer-events-none absolute size-0"
+              style={{ left: menu?.x ?? 0, top: menu?.y ?? 0 }}
+            />
+          </DropdownMenuTrigger>
+          {menu && (
+            <DropdownMenuContent align="start" className="w-56">
+              <DropdownMenuLabel className="text-xs text-muted-foreground">Who said this?</DropdownMenuLabel>
+              {voices
+                .filter((voice) => voice.speakerId !== menu.segment.meeting_speaker_id && voice.label !== menu.segment.speaker)
+                .map((voice) => (
+                  <DropdownMenuItem key={`voice-${voice.speakerId}`} onSelect={() => void reassign(menu.segment, voice)}>
+                    <span className={cn("size-2 rounded-full", colorOf(voice.label).dot)} />
+                    {voice.label}
                   </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <p className="text-sm leading-relaxed">{segment.text}</p>
-            </div>
-          );
-        })}
+                ))}
+              {others.length > 0 && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">Someone you know</DropdownMenuLabel>
+                  {others.slice(0, 8).map((person) => (
+                    <DropdownMenuItem key={`person-${person.name}`} onSelect={() => void reassign(menu.segment, person)}>
+                      <span className={cn("size-2 rounded-full", colorOf(person.label).dot)} />
+                      {person.label}
+                    </DropdownMenuItem>
+                  ))}
+                </>
+              )}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => setMoving(menu.segment)}>
+                <UserRoundSearch className="size-4" />
+                Someone else...
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          )}
+        </DropdownMenu>
       </div>
       <NamePrompt
         open={moving !== null}
@@ -329,4 +367,4 @@ export function Transcript({
       />
     </div>
   );
-}
+});

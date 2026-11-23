@@ -1,5 +1,5 @@
 import { ArrowUp, Loader2, MessageCircleQuestion } from "lucide-react";
-import { useState } from "react";
+import { memo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -80,7 +80,8 @@ function Answer({ text, onSeek }: { text: string; onSeek: (seconds: number) => v
   );
 }
 
-export function AskPanel({ meetingId, onSeek }: { meetingId: number; onSeek: (seconds: number) => void }) {
+// Memoized: the panel stays mounted on the meeting page, which re-renders as audio plays.
+export const AskPanel = memo(function AskPanel({ meetingId, onSeek }: { meetingId: number; onSeek: (seconds: number) => void }) {
   const [question, setQuestion] = useState("");
   const [history, setHistory] = useState<Exchange[]>([]);
   const [busy, setBusy] = useState(false);
@@ -169,4 +170,4 @@ export function AskPanel({ meetingId, onSeek }: { meetingId: number; onSeek: (se
       </form>
     </div>
   );
-}
+});
