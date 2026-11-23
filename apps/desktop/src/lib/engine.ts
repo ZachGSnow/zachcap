@@ -44,6 +44,8 @@ export type Segment = {
   text: string;
   speaker: string;
   speaker_status: SpeakerStatus | null;
+  /** 1 once you fixed the line's words. */
+  edited?: number;
 };
 
 export type ActionKind = "commitment" | "action";

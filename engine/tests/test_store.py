@@ -271,3 +271,38 @@ def test_voices_learned_from_deleted_meetings_are_forgotten(tmp_path: Path):
     assert store.delete_orphan_voice_samples() == 1
     assert store.voice_library("test-model") == {}
     store.close()
+
+
+def test_a_fixed_line_is_marked_and_found_by_its_new_words(tmp_path: Path):
+    store = Store(tmp_path / "test.db")
+    meeting, _ = make_meeting(store, tmp_path)
+    line = store.transcript(meeting)[0]
+    assert line["edited"] == 0
+
+    store.edit_segment(line["id"], "First line about ConnectWise")
+
+    fixed = store.transcript(meeting)[0]
+    assert (fixed["text"], fixed["edited"]) == ("First line about ConnectWise", 1)
+    assert store.search("ConnectWise") and not store.search('"First line" NOT ConnectWise')
+    store.close()
+
+
+def test_an_older_database_gets_the_edited_column(tmp_path: Path):
+    import sqlite3
+
+    old = sqlite3.connect(tmp_path / "old.db")
+    old.execute(
+        "CREATE TABLE segments (id INTEGER PRIMARY KEY, meeting_id INTEGER NOT NULL, "
+        "meeting_speaker_id INTEGER, track TEXT NOT NULL, start REAL NOT NULL, "
+        "end REAL NOT NULL, text TEXT NOT NULL, confidence REAL)"
+    )
+    old.execute(
+        "INSERT INTO segments (meeting_id, track, start, end, text) VALUES (1, 'mic', 0, 1, 'hi')"
+    )
+    old.commit()
+    old.close()
+
+    store = Store(tmp_path / "old.db")
+
+    assert store.segment(1)["edited"] == 0
+    store.close()

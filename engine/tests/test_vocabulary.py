@@ -56,3 +56,58 @@ def test_a_full_word_list_on_a_long_meeting_is_quick():
     # locked for writing meanwhile.
     assert time.perf_counter() - started < 2.0
     assert fixed[0].endswith("part, T17 too.")
+
+
+def test_a_fixed_line_offers_the_entry_that_would_fix_the_mishearing():
+    offer = vocabulary.suggest
+    assert offer(
+        "we moved to cooper netties last week.", "we moved to Kubernetes last week.", ""
+    ) == {
+        "term": "Kubernetes",
+        "misheard": "cooper netties",
+    }
+    assert offer("upgrade them to win 11", "upgrade them to Win11", "Win11") == {
+        "term": "Win11",
+        "misheard": "win 11",  # "Win11" alone only fixes the case, not the space
+    }
+    # A name or distinctive term written in the wrong case.
+    assert offer("the proxmox host", "the Proxmox host", "") == {
+        "term": "Proxmox",
+        "misheard": None,
+    }
+    assert offer("the m365 tenant", "the M365 tenant", "") == {"term": "M365", "misheard": None}
+
+
+def test_other_edits_offer_nothing():
+    offer = vocabulary.suggest
+    assert offer("call Dana tomorrow", "call Dana on Friday", "") is None  # what was said
+    assert offer("we use teams", "we use Zoom", "") is None
+    assert offer("will you mark it", "Will you mark it", "") is None  # starts a sentence
+    assert offer("ticket 4512 is open", "ticket 4521 is open", "") is None
+    assert offer("a b c d e", "x y z w v", "") is None  # too much changed
+    assert offer("use connect wise", "use ConnectWise", "ConnectWise: connect wise") is None
+    assert offer("open the c drive", "open the C:Drive", "") is None  # can't go on a line
+
+
+def test_adding_an_entry_merges_into_the_terms_own_line():
+    add = vocabulary.add_correction
+    assert add("Proxmox\nConnectWise: connect wise", "ConnectWise", "connected wise") == (
+        "Proxmox\nConnectWise: connect wise, connected wise"
+    )
+    assert add("proxmox", "Proxmox", "prox mocks") == "proxmox: prox mocks"
+    assert add("Contoso", "M365", None) == "Contoso\nM365"
+    assert add("ConnectWise: connect wise", "connectwise", "Connect Wise") == (
+        "ConnectWise: connect wise"  # already there, in another case
+    )
+    for bad in (("Prox: mox", "x"), ("A, B", "x"), ("Term", "a, b")):
+        try:
+            add("", *bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad}")
+    try:
+        add("x" * 3995, "Proxmox", "prox mocks")
+    except ValueError as exc:
+        assert "full" in str(exc)
+    else:
+        raise AssertionError("accepted a list over the limit")

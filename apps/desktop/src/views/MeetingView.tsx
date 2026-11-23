@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { AskPanel } from "@/components/AskPanel";
 import { NotesPanel } from "@/components/NotesPanel";
 import { PlayerBar, type PlayerState } from "@/components/PlayerBar";
+import { RedactDialog } from "@/components/RedactDialog";
 import { SummaryPanel } from "@/components/SummaryPanel";
 import { NamePrompt, Transcript, WhoIsThis } from "@/components/Transcript";
 import { AvatarStack, ConversationStats, SpeakerLanes, TalkTimeBars } from "@/components/Visuals";
@@ -44,7 +45,16 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { usePoll } from "@/hooks/usePoll";
-import { api, isTauri, mediaUrl, type MeetingDetail, type Person, type Settings, type Speaker } from "@/lib/engine";
+import {
+  api,
+  isTauri,
+  mediaUrl,
+  type MeetingDetail,
+  type Person,
+  type Segment,
+  type Settings,
+  type Speaker,
+} from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
 import { clock, colorMap, day, minutes, when } from "@/lib/format";
 import { StatusBadge } from "@/views/MeetingsView";
@@ -103,6 +113,9 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
+  const [redacting, setRedacting] = useState<Segment | null>(null);
+  // Bumped after a redaction, so the player loads the silenced audio, not a cached copy.
+  const [audioVersion, setAudioVersion] = useState(0);
   const pendingSeek = useRef<{ time: number; play: boolean } | null>(at != null ? { time: at, play: false } : null);
 
   const meeting = data?.meeting;
@@ -137,7 +150,9 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   }, [solo, soloSegments]);
   const src =
     data && !data.meeting.audio_removed_at
-      ? mediaUrl(`/api/meetings/${id}/audio${track === "mix" ? "" : `?track=${track}`}`)
+      ? mediaUrl(
+          `/api/meetings/${id}/audio?track=${track}${audioVersion ? `&v=${audioVersion}` : ""}`,
+        )
       : undefined;
 
   // The last position and play state, kept outside React state: when the source switches
@@ -277,6 +292,38 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   const copyTranscript = () => {
     const text = (data?.segments ?? []).map((s) => `[${clock(s.start)}] ${s.speaker}: ${s.text}`).join("\n");
     void copyText(`${meeting?.title}\n\n${text}`, "Transcript copied");
+  };
+
+  const redact = async (start: number, end: number) => {
+    // Windows won't rewrite a file that is being played: let go of it first.
+    const element = audio.current;
+    if (element) {
+      element.pause();
+      element.removeAttribute("src");
+      element.load();
+    }
+    try {
+      const done = await api<{ lines_removed: number; lines_redacted: number; has_summary: boolean }>(
+        `/api/meetings/${id}/redact`,
+        { method: "POST", json: { start, end } },
+      );
+      setRedacting(null);
+      const lines = done.lines_removed + done.lines_redacted;
+      toast.success(`Redacted ${clock(start)} to ${clock(end)}`, {
+        description: `${lines} line${lines === 1 ? "" : "s"} changed.${
+          done.has_summary ? " The summary was written before: regenerate it if it mentions this." : ""
+        }`,
+        duration: 12_000,
+        action: done.has_summary ? { label: "Regenerate summary", onClick: () => void summarize() } : undefined,
+      });
+      refreshAll();
+      return true;
+    } catch (error) {
+      toast.error("Couldn't redact", { description: String(error) });
+      return false;
+    } finally {
+      setAudioVersion((version) => version + 1);
+    }
   };
 
   const remove = async () => {
@@ -552,6 +599,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 solo={solo}
                 onSeek={seek}
                 onChanged={refreshAll}
+                onRedact={setRedacting}
               />
             </TabsContent>
 
@@ -658,6 +706,15 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
           if (renaming) void nameSpeaker(renaming, name);
           setRenaming(null);
         }}
+      />
+      <RedactDialog
+        line={redacting}
+        segments={data.segments}
+        duration={duration}
+        hasSummary={data.summary !== null}
+        audioRemoved={!!meeting.audio_removed_at}
+        onCancel={() => setRedacting(null)}
+        onConfirm={redact}
       />
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent className="sm:max-w-sm">
