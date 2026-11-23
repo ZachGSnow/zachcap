@@ -19,6 +19,7 @@ import json
 import queue
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -39,7 +40,7 @@ EVERY_OUTPUT_RATE = 48_000
 # digital, so silence there is far below any voice).
 SIGNAL_DBFS = -100.0
 MIC_SPEECH_DBFS = -45.0
-CALL_SPEECH_DBFS = -60.0
+CALL_SPEECH_DBFS = -70.0  # a call played at a low Windows volume still counts
 LOOK_FOR_DEVICES = 2.0  # seconds between looks for outputs plugged in or unplugged
 RETRY_FAILED_DEVICE = 30.0
 WRITE_EVERY = 0.1
@@ -111,7 +112,13 @@ class ChunkWriter:
 
 
 class TrackRecorder:
-    """One input stream feeding a writer thread that rotates FLAC chunks."""
+    """One input stream (PortAudio) feeding a writer thread that rotates FLAC chunks.
+
+    Each buffer is placed by when it was captured, on the recording's timeline (frame 0 is
+    its start, as on the computer-audio track), so a device that drops or delays audio
+    (input overflows, standby) leaves a silent gap instead of shifting everything after it
+    out of step with the other track. On its own (no ``t0``), its first buffer is frame 0.
+    """
 
     def __init__(
         self,
@@ -121,6 +128,8 @@ class TrackRecorder:
         chunk_seconds: int,
         on_first_buffer: Callable[[], object] | None = None,
         speech_dbfs: float = MIC_SPEECH_DBFS,
+        t0: float | None = None,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.name = name
         self.device = device
@@ -134,19 +143,24 @@ class TrackRecorder:
         self.level_dbfs = -120.0
         self.errors: list[str] = []
         self.paused = False
+        self._t0 = t0
+        self._given_t0 = t0 is not None
+        self._clock = clock
+        self._mixer = Mixer(self.rate, t0, early_follows_on=True) if t0 is not None else None
         self._chunks = ChunkWriter(folder, name, self.rate, chunk_seconds, self.errors)
         self._on_first_buffer = on_first_buffer
-        self._queue: queue.Queue[bytes | None] = queue.Queue()
+        self._queue: queue.Queue[tuple[float, bytes] | None] = queue.Queue()
         self._writer = threading.Thread(target=self._write, name=f"{name}-writer", daemon=True)
         self._stream = None
+        self._broken = False
 
     def _callback(self, in_data, frame_count, time_info, status):
-        if self.first_buffer_at is None:
-            self.first_buffer_at = time.perf_counter()
+        # When its first frame was captured: the buffer just filled up.
+        captured = self._clock() - frame_count / self.rate
         # A private pause: silence instead of sound, decided as the audio arrives (audio
         # still queued when Resume is pressed was said during the pause). Both tracks keep
         # their length, so they stay in sync.
-        self._queue.put(bytes(len(in_data)) if self.paused else in_data)
+        self._queue.put((captured, bytes(len(in_data)) if self.paused else in_data))
         return (None, pyaudio.paContinue)
 
     @property
@@ -161,24 +175,55 @@ class TrackRecorder:
     def failed(self) -> bool:
         return self._chunks.failed
 
-    def _write(self) -> None:
-        first = True
-        while (data := self._queue.get()) is not None:
-            samples = np.frombuffer(data, dtype=np.int16).reshape(-1, self.channels)
-            mono = samples.mean(axis=1).astype(np.int16)
-            self.level_dbfs = float(20 * np.log10(np.sqrt(np.mean((mono / 32768.0) ** 2)) + 1e-9))
-            _note_level(self, self.level_dbfs)
-            if first:
-                first = False
+    def _receive(self, captured: float, data: bytes) -> None:
+        samples = np.frombuffer(data, dtype=np.int16).reshape(-1, self.channels)
+        mono = samples.mean(axis=1).astype(np.float32) / 32768.0
+        self.level_dbfs = float(
+            20 * np.log10(np.sqrt(np.mean(mono.astype(np.float64) ** 2)) + 1e-9)
+        )
+        _note_level(self, self.level_dbfs)
+        if self._mixer is None:  # on its own: the first buffer starts the timeline
+            self._t0 = captured
+            self._mixer = Mixer(self.rate, captured, early_follows_on=True)
+        self._mixer.add(self.name, mono, self.rate, captured, self._clock())
+
+    def _drain(self, until: int | None = None) -> None:
+        """Writes what is ready now (at the end: everything up to ``until``), a second at a
+        time. The target is fixed when it starts, so audio that keeps arriving can't keep
+        it writing. After a disk error nothing is written, and buffers keep draining, so a
+        dead disk doesn't also fill memory."""
+        if self._mixer is None:
+            return
+        target = self._mixer.horizon(self._clock()) if until is None else until
+        while True:
+            block = self._mixer.flush(target, most=self.rate)
+            if not block.size:
+                return
+            if self.first_buffer_at is None:
+                self.first_buffer_at = self._t0  # frame 0 is the start of the timeline
                 if self._on_first_buffer is not None:
                     try:
                         self._on_first_buffer()
                     except Exception as exc:
                         self.errors.append(f"Couldn't save the recording details: {exc}")
-            # After a disk error this writes nothing, and the queue keeps draining, so a
-            # dead disk doesn't also fill memory.
-            self._chunks.write(mono)
-        self._chunks.close()
+            self._chunks.write(block)
+
+    def _write(self) -> None:
+        while True:
+            try:
+                item = self._queue.get(timeout=WRITE_EVERY)
+            except queue.Empty:
+                item = ()  # nothing arrived: the silence up to now is still written
+            if item is None:
+                return
+            try:
+                if item:
+                    self._receive(*item)
+                self._drain()
+            except Exception as exc:  # never let one bad buffer end the track
+                if not self._broken:
+                    self._broken = True
+                    self.errors.append(f"Couldn't record the {self.name} audio: {exc}")
 
     def start(self, pa: pyaudio.PyAudio) -> None:
         # The stream starts delivering buffers as soon as it opens; they wait in the
@@ -194,7 +239,9 @@ class TrackRecorder:
         )
         self._writer.start()
 
-    def stop(self) -> None:
+    def stop(self, at: float | None = None) -> None:
+        """Stops the stream and writes the end. ``at``: when the recording stopped (both
+        tracks end there), else now."""
         if self._stream is not None:
             try:
                 self._stream.stop_stream()
@@ -205,6 +252,23 @@ class TrackRecorder:
         if self._writer.is_alive():
             self._queue.put(None)
             self._writer.join()
+        else:  # never started (buffers may still be queued)
+            while not self._queue.empty():
+                item = self._queue.get_nowait()
+                if item:
+                    self._receive(*item)
+        # The end: part of a recording, when it stopped (silence up to there if the device
+        # went quiet); on its own, everything received.
+        if self._mixer is not None:
+            if self._given_t0:
+                end = round(((self._clock() if at is None else at) - self._t0) * self.rate)
+            else:
+                end = self._mixer.end()
+            try:
+                self._drain(until=end)
+            except Exception as exc:
+                self.errors.append(f"Couldn't finish the {self.name} audio: {exc}")
+        self._chunks.close()
 
 
 def _loopback_api():
@@ -253,10 +317,14 @@ class AllOutputsTrack:
             folder, self.name, self.rate, chunk_seconds, self.errors, subtype="PCM_24"
         )
         self._mixer = Mixer(self.rate, t0)
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # the mixer: capture threads, the writer, stop
+        self._writing = threading.Lock()  # the files: the writer and stop never write at once
+        self._polling = threading.Lock()  # one look at the devices at a time
         self._captures: dict[str, object] = {}
         self._failed: dict[str, float] = {}  # device id -> when it last failed to open
-        self._listing_failed = False
+        self._deaths: dict[str, list[float]] = {}  # device id -> when its capture ended
+        self._listing_error: str | None = None
+        self._broken = False
         self._started = False
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -288,80 +356,122 @@ class AllOutputsTrack:
         with self._lock:
             self._mixer.add(device_id, mono, rate, stamp, self._clock(), discontinuity)
 
+    def _backing_off(self, device_id: str, now: float) -> bool:
+        """A device that refused to open, or whose capture keeps ending (three times in a
+        minute), is left alone for a while; one that ended once is reopened at once (a
+        Bluetooth headset switching to its call profile, the audio service restarting)."""
+        if now - self._failed.get(device_id, float("-inf")) < RETRY_FAILED_DEVICE:
+            return True
+        recent = [when for when in self._deaths.get(device_id, []) if now - when < 60]
+        self._deaths[device_id] = recent
+        return len(recent) >= 3 and now - recent[-1] < RETRY_FAILED_DEVICE
+
     def poll_devices(self) -> None:
-        """Captures outputs that appeared and forgets ones that went away."""
-        try:
-            devices = self._api.output_devices()
-        except Exception as exc:
-            if not self._listing_failed:
-                self._listing_failed = True
-                self.errors.append(f"Couldn't list the output devices: {exc}")
-            return
-        now = self._clock()
-        present = {device["id"]: device["name"] for device in devices}
-        for device_id, capture in list(self._captures.items()):
-            if not capture.alive:  # unplugged, or it stopped on an error
-                del self._captures[device_id]
-                if device_id in present:  # still there but broken: try again later
-                    self._failed[device_id] = now
-        for device_id, name in present.items():
-            if device_id in self._captures:
-                continue
-            if now - self._failed.get(device_id, float("-inf")) < RETRY_FAILED_DEVICE:
-                continue
-            capture = self._api.LoopbackCapture(device_id, name, self._on_packet)
+        """Captures outputs that appeared, reopens ones whose capture ended, and forgets ones
+        that went away. Nothing new is opened once the track is stopping."""
+        with self._polling:
+            if self._stop.is_set():
+                return
             try:
-                capture.start()
+                devices = self._api.output_devices()
             except Exception as exc:
-                if device_id not in self._failed:  # said once, not on every retry
-                    self.errors.append(f"Couldn't record {name}: {exc}")
-                self._failed[device_id] = now
-                continue
-            self._captures[device_id] = capture
-        names = [capture.name for capture in self._captures.values()]
-        self.device = {"name": ", ".join(names) if names else "No output device"}
+                if self._listing_error is None:
+                    self._listing_error = f"Couldn't list the output devices: {exc}"
+                    self.errors.append(self._listing_error)
+                return
+            if self._listing_error is not None:  # it works again: the warning goes
+                if self._listing_error in self.errors:
+                    self.errors.remove(self._listing_error)
+                self._listing_error = None
+            now = self._clock()
+            present = {device["id"]: device["name"] for device in devices}
+            for device_id, capture in list(self._captures.items()):
+                if not capture.alive:  # unplugged, or its stream broke
+                    del self._captures[device_id]
+                    self._deaths.setdefault(device_id, []).append(now)
+            for device_id, name in present.items():
+                if device_id in self._captures or self._backing_off(device_id, now):
+                    continue
+                capture = self._api.LoopbackCapture(device_id, name, self._on_packet)
+                try:
+                    capture.start()
+                except Exception as exc:
+                    if device_id not in self._failed:  # said once, not on every retry
+                        self.errors.append(f"Couldn't record {name}: {exc}")
+                    self._failed[device_id] = now
+                    continue
+                self._failed.pop(device_id, None)
+                if self._stop.is_set():  # stopping began while it opened
+                    capture.stop()
+                    return
+                self._captures[device_id] = capture
+            names = [capture.name for capture in self._captures.values()]
+            self.device = {"name": ", ".join(names) if names else "No output device"}
 
     def _watch(self) -> None:
         while not self._stop.wait(LOOK_FOR_DEVICES):
-            self.poll_devices()
+            try:
+                self.poll_devices()
+            except Exception:  # a bad look must never end the watching
+                traceback.print_exc()
 
     def _write(self) -> None:
         while not self._stop.wait(WRITE_EVERY):
-            self.pump()
+            try:
+                self.pump()
+            except Exception as exc:  # never let one bad write end the track
+                if not self._broken:
+                    self._broken = True
+                    self.errors.append(f"Couldn't record the computer audio: {exc}")
 
     def pump(self, until: int | None = None) -> None:
-        """Writes the mixed audio that is ready (at the end: everything up to ``until``)."""
-        with self._lock:
-            if until is None:
-                block = self._mixer.drain(self._clock())
-            else:
-                block = self._mixer.flush(until)
-        if block.size == 0:
-            return
-        power = float(np.mean(block.astype(np.float64) ** 2))
-        self.level_dbfs = float(20 * np.log10(np.sqrt(power) + 1e-9))
-        if until is None:  # the final flush says nothing about now
-            _note_level(self, self.level_dbfs)
-        if self.first_buffer_at is None:
-            self.first_buffer_at = self._t0  # frame 0 is the start of the recording
-            if self._on_first_buffer is not None:
-                try:
-                    self._on_first_buffer()
-                except Exception as exc:
-                    self.errors.append(f"Couldn't save the recording details: {exc}")
-        self._chunks.write(block)
+        """Writes the mixed audio that is ready, a second at a time (after a stall, in slices,
+        never all at once); at the end, everything up to ``until``."""
+        with self._writing:
+            self._pump(until)
 
-    def stop(self) -> None:
+    def _pump(self, until: int | None) -> None:
+        with self._lock:  # the target is fixed now: audio still arriving waits for next time
+            target = self._mixer.horizon(self._clock()) if until is None else until
+        while True:
+            with self._lock:
+                block = self._mixer.flush(target, most=self.rate)
+            if block.size == 0:
+                return
+            power = float(np.mean(block.astype(np.float64) ** 2))
+            self.level_dbfs = float(20 * np.log10(np.sqrt(power) + 1e-9))
+            if until is None:  # the final flush says nothing about now
+                _note_level(self, self.level_dbfs)
+            if self.first_buffer_at is None:
+                self.first_buffer_at = self._t0  # frame 0 is the start of the recording
+                if self._on_first_buffer is not None:
+                    try:
+                        self._on_first_buffer()
+                    except Exception as exc:
+                        self.errors.append(f"Couldn't save the recording details: {exc}")
+            self._chunks.write(block)
+
+    def stop(self, at: float | None = None) -> None:
+        """Stops every capture and writes the end: ``at``, when the recording stopped (both
+        tracks end there), else now. Never raises: the recording is saved."""
         if not self._started:
             return
-        end = round((self._clock() - self._t0) * self.rate)
+        end = round(((self._clock() if at is None else at) - self._t0) * self.rate)
         self._stop.set()
         for thread in self._threads:
             thread.join(timeout=5)
-        for capture in list(self._captures.values()):
-            capture.stop()
-        self._captures.clear()
-        self.pump(until=end)
+        with self._polling:  # a look still opening a device finishes (and stops it) first
+            captures = list(self._captures.values())
+            self._captures.clear()
+        for capture in captures:
+            try:
+                capture.stop()
+            except Exception as exc:
+                self.errors.append(f"Couldn't stop {getattr(capture, 'name', 'an output')}: {exc}")
+        try:
+            self.pump(until=end)
+        except Exception as exc:
+            self.errors.append(f"Couldn't finish the computer audio: {exc}")
         self._chunks.close()
 
 
@@ -424,6 +534,7 @@ class Recorder:
         self._keepalive = None
         self._info_lock = threading.Lock()
         self.tracks: dict[str, TrackRecorder] = {}
+        self.resumed_at: float | None = None
 
     def start(self) -> None:
         """Open both tracks. If anything fails, everything opened so far is closed again."""
@@ -455,11 +566,12 @@ class Recorder:
                 self.chunk_seconds,
                 self._save_info,
                 speech_dbfs=CALL_SPEECH_DBFS,
+                t0=self._t0,
             )
-        self.tracks = {
-            "mic": TrackRecorder("mic", mic, self.folder, self.chunk_seconds, self._save_info),
-            "system": system,
-        }
+        mic_track = TrackRecorder(
+            "mic", mic, self.folder, self.chunk_seconds, self._save_info, t0=self._t0
+        )
+        self.tracks = {"mic": mic_track, "system": system}
         for track in self.tracks.values():
             track.start(self._pa)
 
@@ -468,14 +580,17 @@ class Recorder:
         """The default: the computer's audio from every speaker and headset."""
         return not self.output_name
 
-    def _open_one_output(self, wasapi: dict) -> dict:
+    def _open_one_output(self, wasapi: dict) -> dict | None:
         """The loopback device for the chosen output (or the Windows default), with a silent
-        stream on that output, so loopback keeps delivering through silences."""
+        stream on that output, so loopback keeps delivering through silences. None when the
+        chosen device isn't plugged in: then every speaker and headset is recorded, which
+        includes wherever the call plays now."""
         assert self._pa is not None
         name = None if self.output_name == WINDOWS_DEFAULT_OUTPUT else self.output_name
-        speakers = _find_device(self._pa, wasapi, name, "output") or (
-            self._pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
-        )
+        speakers = _find_device(self._pa, wasapi, name, "output")
+        if speakers is None and name is not None:
+            return None
+        speakers = speakers or self._pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
         loopback = next(
             (
                 d
@@ -515,14 +630,20 @@ class Recorder:
 
     def pause(self, paused: bool = True) -> None:
         """Pause (or resume) privately: both tracks record silence until resumed."""
+        if self.paused and not paused:
+            self.resumed_at = time.perf_counter()  # quiet is counted from here again
         for track in self.tracks.values():
             track.paused = paused
 
-    def _close(self) -> list[str]:
-        """Stop every stream and writer that was started. Never raises."""
+    def _close(self, at: float | None = None) -> list[str]:
+        """Stop every stream and writer that was started (both tracks ending at ``at``, when
+        the recording stopped). Never raises."""
         errors = []
-        for track in self.tracks.values():
-            track.stop()
+        for name, track in self.tracks.items():
+            try:
+                track.stop(at)
+            except Exception as exc:  # the other track, the files and the audio system still close
+                errors.append(f"{name}: {exc}")
         if self._keepalive is not None:
             try:
                 self._keepalive.stop_stream()
@@ -568,7 +689,7 @@ class Recorder:
 
     def stop(self) -> dict:
         duration = self.elapsed
-        errors = self._close()
+        errors = self._close(at=self._t0 + duration)
         info = self._save_info(complete=True, duration=duration)
         if errors:
             info["errors"] = errors

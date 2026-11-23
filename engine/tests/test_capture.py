@@ -114,44 +114,49 @@ def test_a_private_pause_records_silence_and_keeps_time(tmp_path: Path, monkeypa
     import numpy as np
     import soundfile as sf
 
-    monkeypatch.setattr(capture, "pyaudio", fake_pyaudio())
-    folder = tmp_path / "meeting"
-    recorder = capture.Recorder(folder, output_name=ONE_OUTPUT)
-    recorder.start()
-    mic = recorder.tracks["mic"]
-    loud = (np.full(1024, 8000, np.int16)).tobytes()
+    fake = fake_pyaudio()
+    monkeypatch.setattr(capture, "pyaudio", fake)
+    clock = FakeClock(100.0)
+    mic = capture.TrackRecorder("mic", MIC, tmp_path, 300, t0=100.0, clock=clock)
+    mic.start(fake.PyAudio())
+    loud = np.full(1024, 8000, np.int16).tobytes()
 
-    mic._callback(loud, 1024, None, 0)
-    drained(mic)
-    recorder.pause()
-    mic._callback(loud, 1024, None, 0)
-    drained(mic)
-    assert recorder.paused and mic.level_dbfs < -100
-    recorder.pause(False)
-    mic._callback(loud, 1024, None, 0)
-    recorder.stop()
+    for paused in (False, True, False):
+        clock.now += 1024 / 16000  # one buffer's worth of time
+        mic.paused = paused
+        mic._callback(loud, 1024, None, 0)
+        drained(mic)
+        if paused:
+            assert mic.level_dbfs < -100
+    mic.stop()
 
-    audio, _ = sf.read(folder / "mic-000.flac", dtype="int16")
+    audio, _ = sf.read(tmp_path / "mic-000.flac", dtype="int16")
     assert len(audio) == 3 * 1024  # the paused stretch is kept, as silence
     assert audio[:1024].min() > 0 and not audio[1024:2048].any() and audio[2048:].min() > 0
 
 
 def test_a_disk_error_is_reported_and_the_queue_keeps_draining(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(capture, "pyaudio", fake_pyaudio())
-    recorder = capture.Recorder(tmp_path / "meeting", output_name=ONE_OUTPUT)
-    recorder.start()
+    fake = fake_pyaudio()
+    monkeypatch.setattr(capture, "pyaudio", fake)
 
     def disk_full(*args, **kwargs):
         raise OSError("No space left on device")
 
     monkeypatch.setattr(capture.sf, "SoundFile", disk_full)
-    mic = recorder.tracks["mic"]
-    feed(mic, 5)
-    drained(mic)
+    clock = FakeClock(100.0)
+    mic = capture.TrackRecorder("mic", MIC, tmp_path, 300, t0=100.0, clock=clock)
+    mic.start(fake.PyAudio())
+    for _ in range(5):
+        clock.now += 1024 / 16000
+        mic._callback(bytes(2048), 1024, None, 0)
+    clock.now += 1.0  # past the short delay before audio is written
+    deadline = time.monotonic() + 5
+    while not mic.failed and time.monotonic() < deadline:
+        time.sleep(0.02)
 
     assert mic.failed and mic._queue.qsize() == 0
-    assert any("No space left" in error for error in recorder.errors())
-    recorder.stop()
+    assert any("No space left" in error for error in mic.errors)
+    mic.stop()
 
 
 def test_audio_captured_during_a_pause_stays_silent_after_resume(tmp_path: Path, monkeypatch):
@@ -350,6 +355,9 @@ def test_the_default_records_every_output_with_the_mic(tmp_path: Path, monkeypat
 
     system = info["tracks"]["system"]
     assert system["offset"] == 0.0 and system["rate"] == 48000
+    # Both tracks end when Stop was pressed, so they line up to the last moment.
+    lengths = [sf.info(folder / f"{name}-000.flac").duration for name in ("mic", "system")]
+    assert abs(lengths[0] - lengths[1]) < 0.01
     assert system["chunks"] == ["system-000.flac"]
     assert system["device"] == "Speakers, Headset"
     assert sf.info(folder / "system-000.flac").duration >= 0.4
@@ -377,3 +385,110 @@ def test_tracks_remember_when_they_last_had_any_sound_and_speech(tmp_path: Path,
     drained(track)
     assert track.heard_at is not None
     track.stop()
+
+
+def test_a_mic_that_stalls_keeps_its_place_on_the_timeline(tmp_path: Path, monkeypatch):
+    # Before, a mic that delivered nothing for a while (standby, overflows) made everything
+    # after it early by that much, out of step with the computer-audio track.
+    import numpy as np
+    import soundfile as sf
+
+    fake = fake_pyaudio()
+    monkeypatch.setattr(capture, "pyaudio", fake)
+    clock = FakeClock(100.0)
+    mic = capture.TrackRecorder("mic", MIC, tmp_path, 300, t0=100.0, clock=clock)
+    mic.start(fake.PyAudio())
+    loud = np.full(1600, 8000, np.int16).tobytes()  # 0.1 s
+    clock.now += 0.1
+    mic._callback(loud, 1600, None, 0)  # 0.0-0.1 s
+    clock.now += 2.0  # nothing for two seconds
+    mic._callback(loud, 1600, None, 0)  # 2.0-2.1 s
+    drained(mic)
+    mic.stop()
+
+    audio, _ = sf.read(tmp_path / "mic-000.flac", dtype="int16")
+    sounding = np.flatnonzero(np.abs(audio) > 100)
+    assert abs(len(audio) - round(2.1 * 16000)) <= 1
+    assert sounding[0] < 50 and abs(sounding[-1] - round(2.1 * 16000)) < 50
+    assert not audio[round(0.15 * 16000) : round(1.95 * 16000)].any()
+
+
+def test_a_capture_that_ends_while_its_device_is_listed_is_reopened_at_once(tmp_path: Path):
+    clock, outputs = FakeClock(100.0), FakeOutputs("Headset")
+    track = capture.AllOutputsTrack(tmp_path, 300, t0=100.0, clock=clock, api=outputs)
+    track.start()
+    first = outputs.captures["headset"]
+    first.alive = False  # e.g. a Bluetooth headset switching to its call profile
+    clock.now = 102.0
+    track.poll_devices()
+    assert outputs.captures["headset"] is not first and outputs.captures["headset"].alive
+
+    for when in (104.0, 106.0):  # it keeps ending: three times in a minute
+        outputs.captures["headset"].alive = False
+        clock.now = when
+        track.poll_devices()
+    outputs.captures["headset"].alive = False
+    clock.now = 108.0
+    track.poll_devices()
+    assert "headset" not in track._captures  # left alone for a while now
+    clock.now = 140.0
+    track.poll_devices()
+    assert "headset" in track._captures
+    track.stop()
+
+
+def test_nothing_new_opens_once_stopping_began(tmp_path: Path):
+    clock, outputs = FakeClock(100.0), FakeOutputs("Speakers")
+    track = capture.AllOutputsTrack(tmp_path, 300, t0=100.0, clock=clock, api=outputs)
+    track.start()
+    track.stop()
+    outputs.devices.append({"id": "headset", "name": "Headset", "default": False})
+    track.poll_devices()
+    assert "headset" not in outputs.captures
+
+
+def test_a_listing_that_works_again_clears_its_warning(tmp_path: Path):
+    clock, outputs = FakeClock(100.0), FakeOutputs("Speakers")
+    outputs.listing_error = "Audio service restarting"
+    track = capture.AllOutputsTrack(tmp_path, 300, t0=100.0, clock=clock, api=outputs)
+    track.start()
+    assert track.errors
+    outputs.listing_error = None
+    track.poll_devices()
+    assert track.errors == [] and "speakers" in outputs.captures
+    track.stop()
+
+
+def test_a_saved_output_thats_unplugged_records_every_output(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(capture, "pyaudio", fake_pyaudio())
+    outputs = FakeOutputs("Speakers")
+    monkeypatch.setattr(capture, "_loopback_api", lambda: outputs)
+    recorder = capture.Recorder(tmp_path / "meeting", output_name="Headset (unplugged)")
+    recorder.start()
+    assert isinstance(recorder.tracks["system"], capture.AllOutputsTrack)
+    recorder.stop()
+
+
+def test_resuming_a_pause_is_remembered(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(capture, "pyaudio", fake_pyaudio())
+    recorder = capture.Recorder(tmp_path / "meeting", output_name=ONE_OUTPUT)
+    recorder.start()
+    recorder.pause()
+    assert recorder.resumed_at is None
+    recorder.pause(False)
+    assert recorder.resumed_at is not None
+    recorder.stop()
+
+
+def test_a_track_ends_when_stop_was_pressed_not_when_stopping_finished(tmp_path: Path):
+    # Stopping takes a moment (captures closing, the last writes); audio that arrives
+    # meanwhile must not make the call track longer than the mic track.
+    import soundfile as sf
+
+    clock, outputs = FakeClock(100.0), FakeOutputs("Speakers")
+    track = capture.AllOutputsTrack(tmp_path, 300, t0=100.0, clock=clock, api=outputs)
+    track.start()
+    outputs.play("speakers", tone(3.0), 48000, 100.0, clock)  # the last second after Stop
+    track.stop(at=102.0)  # Stop was pressed 2 s in
+
+    assert sf.info(tmp_path / "system-000.flac").frames == 2 * 48000

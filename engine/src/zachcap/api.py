@@ -298,15 +298,18 @@ def create_app(token: str) -> FastAPI:
             recorder = recording.pop("recorder", None)
             meeting_id = recording.pop("meeting_id", None)
             watch = recording.pop("watch", None)
-            if watch is not None:
-                watch.stop()
             if recorder is None:
+                if watch is not None:
+                    watch.stop()
                 return None
             duration = recorder.elapsed
             try:
                 duration = recorder.stop()["duration"]
             except Exception:  # the audio saved so far still counts
                 traceback.print_exc()
+            finally:
+                if watch is not None:  # kept awake until the last audio is written
+                    watch.stop()
             store = Store()
             try:
                 store.update_meeting(meeting_id, status="recorded", duration=round(duration, 3))

@@ -51,6 +51,12 @@ def _friendly(name: str) -> str:
     return tail.split("_")[0].removesuffix(".exe")
 
 
+def is_meeting_app(name: str) -> bool:
+    """A known meeting or call app (as named by apps_using_mic), not a screen recorder or
+    Windows' own Sound settings."""
+    return name in set(KNOWN.values())
+
+
 def apps_using_mic() -> list[str]:
     """Friendly names of the apps using the microphone at this moment."""
     found: list[str] = []
