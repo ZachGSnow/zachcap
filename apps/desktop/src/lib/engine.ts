@@ -223,6 +223,14 @@ export type Settings = {
   me: { id: number; name: string };
 };
 
+/** A recent dictation, kept in memory by the engine (never on disk). */
+export type RecentDictation = {
+  text: string;
+  at: string;
+  /** "typed" where the cursor was, "copied" to the clipboard instead, or "kept" (neither). */
+  delivered: "typed" | "copied" | "kept";
+};
+
 export type RecipeResult = { title: string; text: string; model: string; cost_usd: number };
 
 /** A kind of meeting (what a summary focuses on) or a one-click document. */

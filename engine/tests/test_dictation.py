@@ -227,6 +227,23 @@ def test_text_is_copied_only_when_it_could_not_be_typed(monkeypatch: pytest.Monk
     result = dictator.finish(None, "en", None)
     assert copied == ["Call back at noon."] and result["copied"] and result["why"] == "admin"
 
+    # Both are kept for Settings, newest first, in case one went astray.
+    assert [entry["delivered"] for entry in dictator.recent] == ["copied", "typed"]
+    assert dictator.recent[0]["text"] == "Call back at noon." and dictator.recent[0]["at"]
+
+
+def test_only_the_last_few_dictations_are_kept():
+    dictator = dictation.Dictation(FakeTranscriber("note"), microphone=FakeMic)
+    for _ in range(dictation.RECENT + 2):
+        dictator.start()
+        dictator.finish(None, "en", None, type_it=False)
+    assert len(dictator.recent) == dictation.RECENT
+    assert {entry["delivered"] for entry in dictator.recent} == {"kept"}
+    dictator.transcriber.said = ""
+    dictator.start()
+    dictator.finish(None, "en", None, type_it=False)  # nothing heard: nothing kept
+    assert len(dictator.recent) == dictation.RECENT
+
 
 class FakeLibrary:
     def __init__(self, calls: list, answers: dict) -> None:
@@ -339,6 +356,24 @@ def test_dictation_through_the_api(client: TestClient, monkeypatch: pytest.Monke
     client.post("/api/dictate/start", headers=AUTH)
     client.put("/api/settings", headers=AUTH, json={"dictation": False})  # off mid-dictation
     assert FakeMic.made[-1].stopped
+
+
+def test_recent_dictations_are_kept_in_memory_and_can_be_forgotten(client: TestClient):
+    client.put("/api/settings", headers=AUTH, json={"dictation": True})
+    for _ in range(2):
+        started = client.post("/api/dictate/start", headers=AUTH).json()
+        client.post("/api/dictate/stop", headers=AUTH, json={"id": started["id"]})
+
+    recent = client.get("/api/dictate/recent", headers=AUTH)
+    assert [entry["text"] for entry in recent.json()] == ["Ticket closed."] * 2
+    assert recent.headers["cache-control"] == "no-store"  # never cached by the page
+    client.delete("/api/dictate/recent", headers=AUTH)
+    assert client.get("/api/dictate/recent", headers=AUTH).json() == []
+
+    started = client.post("/api/dictate/start", headers=AUTH).json()
+    client.post("/api/dictate/stop", headers=AUTH, json={"id": started["id"]})
+    client.put("/api/settings", headers=AUTH, json={"dictation": False})  # turned off: forgotten
+    assert client.get("/api/dictate/recent", headers=AUTH).json() == []
 
 
 def test_a_dictation_during_a_recording_is_left_out_of_it(client: TestClient):
