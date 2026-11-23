@@ -351,3 +351,28 @@ Build order (each its own pull request, then a review round):
 Later: a "ticket note" dictation mode (Claude tidies what was said), client tags, topic trackers, live
 transcript and "catch me up", a Teams accessibility bridge for mute state and names (fragile),
 signed installer.
+
+## 14. Next, from a second research round (2026-11-23)
+
+Surveyed again after dictation shipped: Granola, Otter, Fireflies, Fathom, tl;dv, Jamie, Krisp,
+MacWhisper, Notion AI meeting notes, Teams Copilot recap, Zoom AI Companion, Read.ai, Wispr
+Flow, Superwhisper, Windows Voice Access and Dragon, plus call tools made for IT service desks
+(Cyft, Vight, 1Stream). Ruled out as before: bots, calendar access, cloud accounts, and pushing
+notes into a ticketing system's cloud API (the MCP server lets Claude do that with your own
+tools, which ask before saving).
+
+| # | Feature | Why | Who has it | Size |
+|---|---|---|---|---|
+| 1 | **Ticket number on each meeting**: a pattern you set (a 7-digit call number, INC-1234) is looked for in the title, notes, snapshot text and transcript. One found in your notes or the title fills the meeting's ticket; others are offered. The ticket goes into time entries, ticket notes, exports, search and the MCP server | Every time entry needs a ticket | 1Stream, Cyft, Vight | S |
+| 2 | **Voice snippets**: say a cue ("reboot note") and saved text is typed instead | The same phrases go into tickets every day | Wispr Flow, Dragon | S |
+| 3 | **Refine by asking**: one instruction rewrites a generated document in place ("client-facing, shorter") | Internal and client-facing versions of the same notes | Granola, Wispr Flow | S |
+| 4 | **Clients**: people belong to a client and meetings inherit it from the voices recognized; history, the work log, action items and Ask filter by client | Time, billing and reviews are all per client | Granola (companies), Cyft | M |
+| 5 | **Dictation cleanup on this PC**: filler words, "scratch that", spoken lists | Notes ready to use, with nothing sent anywhere | Wispr Flow; Windows fluid dictation (Copilot+ PCs only) | S |
+| 6 | **Automatic screen snapshots**: the call or remote-session window captured when it changes, read on this PC, on the timeline; off per meeting, protected windows skipped | Error dialogs reach the ticket without a key press | Granola (uploads them), Cyft | M |
+
+Build order: 1, 2 and 3, then 4; 5 and 6 after a review round.
+
+Later: topic trackers (FTS5), attaching a file's text to a meeting's notes, picking the kind of
+meeting automatically, related past calls (local embeddings), summaries on this PC (a local
+model, for incidents), auto-record rules for chosen apps with a consent record, vocabulary from
+documents, live transcript.
