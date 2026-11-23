@@ -9,7 +9,7 @@ from typing import Literal
 import anthropic
 from pydantic import BaseModel, Field
 
-from . import apikeys, vocabulary
+from . import apikeys, privacy, vocabulary
 from .store import Store
 
 # Model id -> (label, USD per million input tokens, per million output tokens).
@@ -165,9 +165,13 @@ def _clock(seconds: float) -> str:
 
 
 def transcript_text(store: Store, meeting_id: int) -> str:
-    return "\n".join(
-        f"[{_clock(row['start'])}] {row['speaker']}: {row['text']}"
-        for row in store.transcript(meeting_id)
+    """The transcript as Claude gets it (masked if the user asked for that)."""
+    return privacy.outgoing(
+        store,
+        "\n".join(
+            f"[{_clock(row['start'])}] {row['speaker']}: {row['text']}"
+            for row in store.transcript(meeting_id)
+        ),
     )
 
 
@@ -180,9 +184,10 @@ def notes_text(store: Store, meeting_id: int) -> str:
     ]
     if not lines:
         return ""
-    return (
+    return privacy.outgoing(
+        store,
         f"\n\nNotes {me} took during the meeting (they show what mattered to {me}; "
-        "make sure the summary covers them):\n" + "\n".join(lines)
+        "make sure the summary covers them):\n" + "\n".join(lines),
     )
 
 

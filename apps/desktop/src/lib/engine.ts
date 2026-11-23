@@ -15,6 +15,8 @@ export type Meeting = {
   progress: string | null;
   participants: string[];
   template?: string | null;
+  /** Set when the recording was deleted by the "keep recordings" setting. */
+  audio_removed_at?: string | null;
 };
 
 export type SpeakerStatus = "auto" | "suggested" | "confirmed" | "unknown" | "minor";
@@ -164,6 +166,8 @@ export type Settings = {
   vocabulary: string;
   summary_template: string;
   export_folder: string;
+  keep_audio_days: number;
+  mask_before_claude: boolean;
   templates: { id: string; label: string }[];
   recipes: { id: string; label: string }[];
   me: { id: number; name: string };

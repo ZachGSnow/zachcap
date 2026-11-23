@@ -16,7 +16,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from . import __version__, assistant, paths
+from . import __version__, assistant, paths, privacy
 from .store import Store
 
 INSTRUCTIONS = """Meetings recorded with ZachCap, a local meeting recorder: transcripts with \
@@ -49,7 +49,7 @@ def create_server() -> MCPServer:
     ) -> str:
         """Full-text search over every line of every meeting transcript, best matches first."""
         with library() as store:
-            return assistant.search(store, query, limit)
+            return privacy.outgoing(store, assistant.search(store, query, limit))
 
     @server.tool(annotations=READ_ONLY)
     def list_meetings(
@@ -61,7 +61,7 @@ def create_server() -> MCPServer:
     ) -> str:
         """Meetings, newest first, with date, length, who spoke and the summary's overview."""
         with library() as store:
-            return assistant.meetings_list(store, since, until, person)
+            return privacy.outgoing(store, assistant.meetings_list(store, since, until, person))
 
     @server.tool(annotations=READ_ONLY)
     def get_meeting(
@@ -69,7 +69,7 @@ def create_server() -> MCPServer:
     ) -> str:
         """One meeting in full: summary, action items, the user's notes and the transcript."""
         with library() as store:
-            return assistant.meeting_detail(store, meeting_id)
+            return privacy.outgoing(store, assistant.meeting_detail(store, meeting_id))
 
     @server.tool(annotations=READ_ONLY)
     def list_action_items(
@@ -78,7 +78,7 @@ def create_server() -> MCPServer:
     ) -> str:
         """Action items and commitments from every summarized meeting, with where they were said."""
         with library() as store:
-            return assistant.action_items_list(store, status, owner)
+            return privacy.outgoing(store, assistant.action_items_list(store, status, owner))
 
     @server.tool(annotations=READ_ONLY)
     def list_people() -> str:

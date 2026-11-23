@@ -46,7 +46,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, mediaUrl, type MeetingDetail, type Person, type Settings, type Speaker } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
-import { clock, colorMap, minutes, when } from "@/lib/format";
+import { clock, colorMap, day, minutes, when } from "@/lib/format";
 import { StatusBadge } from "@/views/MeetingsView";
 
 type Track = "mix" | "mic" | "system";
@@ -98,7 +98,10 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
     const tracks = new Set(soloSegments.map((s) => s.track));
     return tracks.size === 1 ? [...tracks][0] : "mix";
   }, [solo, soloSegments]);
-  const src = data ? mediaUrl(`/api/meetings/${id}/audio${track === "mix" ? "" : `?track=${track}`}`) : undefined;
+  const src =
+    data && !data.meeting.audio_removed_at
+      ? mediaUrl(`/api/meetings/${id}/audio${track === "mix" ? "" : `?track=${track}`}`)
+      : undefined;
 
   // The last position and play state, kept outside React state: when the source switches
   // between tracks the element resets to 0 before any effect runs.
@@ -333,7 +336,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-52">
-            <DropdownMenuItem disabled={processing} onSelect={() => void reprocess()}>
+            <DropdownMenuItem disabled={processing || !!meeting.audio_removed_at} onSelect={() => void reprocess()}>
               <RotateCw className="size-4" />
               Reprocess audio
             </DropdownMenuItem>
@@ -387,6 +390,12 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
           {meeting.status === "failed" && (
             <div className="mb-4 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
               Processing failed{progress ? `: ${progress.replace(/^failed: /, "")}` : "."}
+            </div>
+          )}
+          {meeting.audio_removed_at && (
+            <div className="mb-4 rounded-xl border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+              The recording was deleted on {day(meeting.audio_removed_at)} by your "keep recordings" setting. The
+              transcript, summary and notes are kept.
             </div>
           )}
           {failedNow && meeting.status !== "failed" && (
@@ -569,7 +578,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
           sync(element);
         }}
       />
-      {!processing && data.segments.length > 0 && (
+      {!processing && data.segments.length > 0 && !meeting.audio_removed_at && (
         <PlayerBar audio={audio} state={player} solo={solo} trackLabel={TRACK_LABEL[track]} onClearSolo={() => setSolo(null)} />
       )}
 

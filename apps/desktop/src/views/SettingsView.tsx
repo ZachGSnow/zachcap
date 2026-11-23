@@ -40,6 +40,26 @@ const KEYS = [
   },
 ] as const;
 
+type SettingsChange = Partial<{
+  summary_model: string;
+  language: string;
+  mic_device: string;
+  output_device: string;
+  vocabulary: string;
+  summary_template: string;
+  export_folder: string;
+  keep_audio_days: number;
+  mask_before_claude: boolean;
+}>;
+
+const KEEP_AUDIO = [
+  { value: "0", label: "Forever" },
+  { value: "7", label: "7 days" },
+  { value: "30", label: "30 days" },
+  { value: "90", label: "90 days" },
+  { value: "365", label: "1 year" },
+];
+
 /** Rough tokens for an hour-long meeting summary, for the cost hint. */
 const HOUR_INPUT_TOKENS = 15_000;
 const HOUR_OUTPUT_TOKENS = 1_500;
@@ -209,14 +229,7 @@ export function SettingsView() {
   const [name, setName] = useState("");
   useEffect(() => setName(settings?.me.name ?? ""), [settings?.me.name]);
 
-  const save = async (
-    change: Partial<
-      Record<
-        "summary_model" | "language" | "mic_device" | "output_device" | "vocabulary" | "summary_template" | "export_folder",
-        string
-      >
-    >,
-  ) => {
+  const save = async (change: SettingsChange) => {
     try {
       await api("/api/settings", { method: "PUT", json: change });
       toast.success("Saved");
@@ -421,6 +434,28 @@ export function SettingsView() {
                 Turn off
               </Button>
             )}
+          </Row>
+          <Row
+            label="Keep recordings"
+            help="After this, a meeting's audio is deleted; its transcript, summary, notes and the voices it taught stay. It can't be played or reprocessed after."
+          >
+            <Select
+              label="Keep recordings"
+              value={String(settings?.keep_audio_days ?? 0)}
+              onChange={(value) => void save({ keep_audio_days: Number(value) })}
+              options={KEEP_AUDIO}
+            />
+          </Row>
+          <Row
+            label="Mask contact details for Claude"
+            help="Emails, phone numbers and card numbers are replaced with [email], [phone] and [card number] in everything sent to Claude, including through the MCP server."
+          >
+            <Switch
+              className="ml-auto"
+              aria-label="Mask contact details for Claude"
+              checked={settings?.mask_before_claude ?? false}
+              onCheckedChange={(mask) => void save({ mask_before_claude: mask })}
+            />
           </Row>
           <div className="px-4 py-3.5 text-xs leading-relaxed text-muted-foreground">
             Audio and voiceprints never leave this computer. Summaries send transcript text to Anthropic with your API

@@ -264,3 +264,18 @@ def test_settings_show_how_to_add_zachcap_to_claude(client: TestClient, tmp_path
         '"zachcap"' in config["claude_desktop"]
         and str(tmp_path).replace("\\", "\\\\") in config["claude_desktop"]
     )
+
+
+def test_privacy_settings_and_a_meeting_without_its_recording(client: TestClient, tmp_path: Path):
+    kept = client.put("/api/settings", headers=AUTH, json={"keep_audio_days": 30}).json()
+    assert kept["keep_audio_days"] == 30
+    assert client.put("/api/settings", headers=AUTH, json={"keep_audio_days": 3}).status_code == 400
+    masked = client.put("/api/settings", headers=AUTH, json={"mask_before_claude": True}).json()
+    assert masked["mask_before_claude"] is True
+
+    store = Store()
+    meeting_id = store.create_meeting("Old", "2026-01-01T09:00:00", tmp_path / "gone")
+    store.update_meeting(meeting_id, status="ready", audio_removed_at="2026-02-01T00:00:00")
+    store.close()
+    refused = client.post(f"/api/meetings/{meeting_id}/process", headers=AUTH)
+    assert refused.status_code == 400 and "recording was deleted" in refused.json()["detail"]
