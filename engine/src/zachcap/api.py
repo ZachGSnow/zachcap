@@ -34,12 +34,15 @@ from . import (
     audio,
     digest,
     export,
+    imports,
     insights,
+    mentions,
     paths,
     pipeline,
     privacy,
     prompts,
     redact,
+    watchfolder,
 )
 from . import vocabulary as words
 from .store import Store
@@ -161,6 +164,9 @@ class SettingsBody(BaseModel):
     mask_before_claude: bool | None = None
     stop_when_call_ends: bool | None = None
     export_work_log: bool | None = None  # keep a daily and weekly work log in the export folder
+    also_answer_to: str | None = None  # other names you answer to, comma-separated
+    watch_folder: str | None = None  # "" turns the watch folder off
+    watch_existing: bool = False  # with watch_folder: import the files already there too
 
 
 KEEP_AUDIO_CHOICES = (0, 7, 30, 90, 365)
@@ -307,6 +313,7 @@ def create_app(token: str) -> FastAPI:
         return meeting_id
 
     app.state.finish_recording = finish_recording
+    app.state.submit = worker.submit
 
     def authorized(request: Request) -> None:
         supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
@@ -373,11 +380,13 @@ def create_app(token: str) -> FastAPI:
     @app.get("/api/meetings", dependencies=auth)
     def list_meetings(store: Store = Depends(db)):
         participants = store.participants()
+        mentioned = mentions.counts(store)
         return [
             {
                 **dict(m),
                 "progress": worker.progress.get(m["id"]),
                 "participants": participants.get(m["id"], []),
+                "mentions": mentioned.get(m["id"], 0),
             }
             for m in store.meetings()
         ]
@@ -398,6 +407,8 @@ def create_app(token: str) -> FastAPI:
             "talk_time": [dict(row) for row in store.talk_time(meeting_id)],
             "action_items": [dict(row) for row in store.action_items(meeting_id=meeting_id)],
             "me": store.me()["name"],
+            # Other people's lines that say your name.
+            "mentions": mentions.find(store, meeting_id),
         }
 
     @app.patch("/api/meetings/{meeting_id}", dependencies=auth)
@@ -761,21 +772,22 @@ def create_app(token: str) -> FastAPI:
         source = Path(body.path)
         if not source.is_file():
             raise HTTPException(status_code=400, detail="That file doesn't exist")
-        folder = paths.meetings_dir() / f"{datetime.now():%Y-%m-%d_%H%M%S}-import"
-        folder.mkdir(parents=True)
         try:
-            seconds = audio.import_media(source, folder / "system.flac", body.start, body.end)
+            meeting_id, _ = imports.import_recording(
+                store, source, body.title, body.start, body.end
+            )
         except Exception as exc:
-            shutil.rmtree(folder, ignore_errors=True)
             raise HTTPException(status_code=400, detail=f"Couldn't read the audio: {exc}") from exc
-        meeting_id = store.create_meeting(
-            body.title or source.stem,
-            audio.recorded_at(source).isoformat(timespec="seconds"),
-            folder,
-            duration=round(seconds, 3),
-        )
         worker.submit(meeting_id)
         return {"meeting_id": meeting_id}
+
+    @app.get("/api/watch-folder/files", dependencies=auth)
+    def watch_folder_files(path: str):
+        """How many recordings a folder holds now (to ask whether to import them too)."""
+        folder = Path(path)
+        if not folder.is_dir():
+            raise HTTPException(status_code=400, detail="That folder doesn't exist")
+        return {"count": len(watchfolder.media_files(folder))}
 
     # action items ---------------------------------------------------------------
 
@@ -1007,6 +1019,12 @@ def create_app(token: str) -> FastAPI:
         prompt_change(lambda: prompts.delete(store, prompt_id))
         return {"deleted": prompt_id}
 
+    def watch_failures(store: Store) -> list[dict]:
+        folder = store.setting(watchfolder.SETTING)
+        if not folder:
+            return []
+        return watchfolder.failures(store, Path(folder))
+
     @app.get("/api/settings", dependencies=auth)
     def get_settings(store: Store = Depends(db)):
         from .summarize import MODELS, PRICES, meeting_template, summary_model
@@ -1025,6 +1043,10 @@ def create_app(token: str) -> FastAPI:
             # The usual kind, as a summary would use it (a deleted one reads as general).
             "summary_template": meeting_template(store, {"template": None}),
             "export_folder": store.setting("export_folder", ""),
+            "watch_folder": store.setting(watchfolder.SETTING, ""),
+            # Files there that couldn't be imported, newest first, with the reason.
+            "watch_folder_failed": watch_failures(store),
+            "also_answer_to": store.setting(mentions.ALSO_ANSWER_TO, ""),
             "keep_audio_days": int(store.setting("keep_audio_days", "0") or 0),
             "mask_before_claude": store.setting("mask_before_claude") == "1",
             # Offer to stop (with a countdown) when the call ends or after a long silence.
@@ -1071,6 +1093,23 @@ def create_app(token: str) -> FastAPI:
             if folder:  # bring the folder up to date with what's already here
                 for meeting in store.meetings():
                     export.auto_export(store, meeting["id"])
+        if body.watch_folder is not None:
+            folder = body.watch_folder.strip()
+            if folder and not Path(folder).is_dir():
+                raise HTTPException(status_code=400, detail="That folder doesn't exist")
+            if folder:
+                # Only new recordings by default; or give the ones there now a go as well.
+                if body.watch_existing:
+                    watchfolder.retry_existing(store, Path(folder))
+                else:
+                    watchfolder.skip_existing(store, Path(folder))
+            store.set_setting(watchfolder.SETTING, folder)
+        if body.also_answer_to is not None:
+            if len(body.also_answer_to) > 400:
+                raise HTTPException(status_code=400, detail="Keep the names under 400 characters")
+            store.set_setting(
+                mentions.ALSO_ANSWER_TO, ", ".join(mentions.aliases(body.also_answer_to))
+            )
         if body.summary_model is not None:
             if body.summary_model not in MODELS:
                 raise HTTPException(status_code=400, detail="Unknown summary model")
@@ -1161,4 +1200,11 @@ def serve(port: int, token: str) -> None:
             name="zachcap-watchdog",
             daemon=True,
         ).start()
+    # Recordings saved in the watch folder import themselves (off until a folder is chosen).
+    # Started here rather than in create_app, so tests never leave one running.
+    threading.Thread(
+        target=watchfolder.FolderWatch(app.state.submit).run_forever,
+        name="zachcap-watch-folder",
+        daemon=True,
+    ).start()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

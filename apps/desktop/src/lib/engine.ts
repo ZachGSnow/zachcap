@@ -14,6 +14,8 @@ export type Meeting = {
   status: MeetingStatus;
   progress: string | null;
   participants: string[];
+  /** Lines by others that say your name. */
+  mentions?: number;
   template?: string | null;
   /** Set when the recording was deleted by the "keep recordings" setting. */
   audio_removed_at?: string | null;
@@ -85,6 +87,9 @@ export type ActionItem = {
 
 export type TalkTime = { speaker: string; person_id: number | null; seconds: number; turns: number };
 
+/** A line by someone else that says your name (or a name you answer to). */
+export type Mention = { segment_id: number; at: number; speaker: string; snippet: string; names: string[] };
+
 export type MeetingDetail = {
   meeting: Meeting;
   speakers: Speaker[];
@@ -95,6 +100,7 @@ export type MeetingDetail = {
   talk_time: TalkTime[];
   action_items: ActionItem[];
   me: string;
+  mentions: Mention[];
 };
 
 export type Person = {
@@ -176,6 +182,12 @@ export type Settings = {
   vocabulary: string;
   summary_template: string;
   export_folder: string;
+  /** Recordings saved here import themselves; "" when off. */
+  watch_folder: string;
+  /** Files there that couldn't be imported, newest first. */
+  watch_folder_failed: { name: string; error: string }[];
+  /** Other names you answer to, comma-separated (for "said your name"). */
+  also_answer_to: string;
   keep_audio_days: number;
   mask_before_claude: boolean;
   /** Count down and stop when the call ends, or after ten quiet minutes. */

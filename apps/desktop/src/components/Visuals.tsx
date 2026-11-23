@@ -1,12 +1,13 @@
-import { Bookmark, Camera, Headphones } from "lucide-react";
+import { AtSign, Bookmark, Camera, Headphones } from "lucide-react";
 import { memo, useMemo, type ReactNode } from "react";
 
-import type { Insights, Note, Segment, TalkTime } from "@/lib/engine";
+import type { Insights, Mention, Note, Segment, TalkTime } from "@/lib/engine";
 import { clock, initials, minutes, type SpeakerColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const NO_SEGMENTS: Segment[] = [];
 const NO_NOTES: Note[] = [];
+const NO_MENTIONS: Mention[] = [];
 
 export function PersonAvatar({
   name,
@@ -92,6 +93,7 @@ export function SpeakerLanes({
   time,
   solo,
   notes = NO_NOTES,
+  mentions = NO_MENTIONS,
   onSeek,
   onSolo,
 }: {
@@ -102,6 +104,8 @@ export function SpeakerLanes({
   time: number;
   solo: string | null;
   notes?: Note[];
+  /** Where someone said your name: markers on their own row. */
+  mentions?: Mention[];
   onSeek: (seconds: number) => void;
   onSolo: (name: string | null) => void;
 }) {
@@ -152,6 +156,28 @@ export function SpeakerLanes({
                       )}
                     />
                   )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {mentions.length > 0 && (
+          <div className="flex items-center gap-3">
+            <div className="flex w-40 shrink-0 items-center gap-2 px-1.5 text-xs text-muted-foreground">
+              <AtSign className="size-3" />
+              Said your name
+            </div>
+            <div className="relative h-4 flex-1">
+              {mentions.map((mention) => (
+                <button
+                  key={mention.segment_id}
+                  onClick={() => onSeek(mention.at)}
+                  title={`${clock(mention.at)} ${mention.speaker} said your name: ${mention.snippet}`}
+                  aria-label={`${mention.speaker} said your name at ${clock(mention.at)}`}
+                  className="absolute top-0 -translate-x-1/2 rounded-full text-sky-600 hover:text-sky-500 dark:text-sky-400"
+                  style={{ left: `${(mention.at / length) * 100}%` }}
+                >
+                  <AtSign className="size-3.5" strokeWidth={2.5} />
                 </button>
               ))}
             </div>

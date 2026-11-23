@@ -1,4 +1,4 @@
-import { Check, EyeOff, MoreHorizontal, Pencil, Play, Search, UserRoundSearch } from "lucide-react";
+import { AtSign, Check, EyeOff, MoreHorizontal, Pencil, Play, Search, UserRoundSearch } from "lucide-react";
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { api, mediaUrl, type Person, type Segment, type Speaker } from "@/lib/engine";
+import { api, mediaUrl, type Mention, type Person, type Segment, type Speaker } from "@/lib/engine";
 import { attempt } from "@/lib/feedback";
 import { clock, minutes, type SpeakerColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -258,6 +258,7 @@ const TranscriptRow = memo(function TranscriptRow({
   color,
   current,
   editing,
+  names,
   onSeek,
   onPickSpeaker,
   onLineMenu,
@@ -269,6 +270,8 @@ const TranscriptRow = memo(function TranscriptRow({
   color: SpeakerColor;
   current: boolean;
   editing: boolean;
+  /** Your names said in this line, to mark. */
+  names?: string[];
   onSeek: (seconds: number) => void;
   onPickSpeaker: (segment: Segment, anchor: HTMLElement) => void;
   onLineMenu: (segment: Segment, anchor: HTMLElement) => void;
@@ -310,7 +313,7 @@ const TranscriptRow = memo(function TranscriptRow({
           className={cn("text-sm leading-relaxed", redacted && "italic text-muted-foreground")}
           onDoubleClick={() => onEdit(segment)}
         >
-          {redacted ? "Redacted" : segment.text}
+          {redacted ? "Redacted" : names ? <Marked text={segment.text} names={names} /> : segment.text}
           {segment.edited ? (
             <span className="ml-1.5 align-baseline text-[10px] text-muted-foreground" title="You fixed these words">
               edited
@@ -331,6 +334,26 @@ const TranscriptRow = memo(function TranscriptRow({
   );
 });
 
+/** A line with your names marked, wherever they were said in it. */
+function Marked({ text, names }: { text: string; names: string[] }) {
+  const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"));
+  // Whole words only, as the engine matched them (not "Alex" inside "Alexander").
+  const parts = text.split(new RegExp(`(?<!\\w)(${escaped.join("|")})(?!\\w)`, "gi"));
+  return (
+    <>
+      {parts.map((part, index) =>
+        index % 2 ? (
+          <mark key={index} className="rounded bg-sky-500/15 px-0.5 text-foreground">
+            {part}
+          </mark>
+        ) : (
+          part
+        ),
+      )}
+    </>
+  );
+}
+
 /** Where the shared menu is open: for a line's speaker, or for the line itself. */
 type MenuAt = { segment: Segment; x: number; y: number; kind: "speaker" | "line" };
 const LINE_MENU_WIDTH = 224; // w-56
@@ -344,6 +367,7 @@ export const Transcript = memo(function Transcript({
   playing,
   focusAt,
   solo,
+  mentions,
   onSeek,
   onChanged,
   onRedact,
@@ -357,6 +381,8 @@ export const Transcript = memo(function Transcript({
   /** A cited moment to show when the page opens: that line is scrolled to and marked. */
   focusAt?: number;
   solo: string | null;
+  /** Lines by others that say your name: marked, and a filter to show only them. */
+  mentions?: Mention[];
   onSeek: (seconds: number) => void;
   onChanged: () => void;
   /** Opens the redaction dialog for the moment this line was said. */
@@ -375,14 +401,17 @@ export const Transcript = memo(function Transcript({
   const menuLabel = useId();
   const list = useRef<HTMLDivElement>(null);
 
+  const [onlyMentions, setOnlyMentions] = useState(false);
+  const mentioned = useMemo(() => new Map((mentions ?? []).map((m) => [m.segment_id, m.names])), [mentions]);
   const shown = useMemo(() => {
     const needle = filter.trim().toLowerCase();
     return segments.filter(
       (s) =>
         (!needle || s.text.toLowerCase().includes(needle) || s.speaker.toLowerCase().includes(needle)) &&
-        (!solo || s.speaker === solo),
+        (!solo || s.speaker === solo) &&
+        (!onlyMentions || mentioned.has(s.id)),
     );
-  }, [segments, filter, solo]);
+  }, [segments, filter, solo, onlyMentions, mentioned]);
 
   useEffect(() => {
     if (!playing) return;
@@ -475,14 +504,29 @@ export const Transcript = memo(function Transcript({
 
   return (
     <div>
-      <div className="relative mb-3">
-        <Search className="pointer-events-none absolute top-2.5 left-2.5 size-4 text-muted-foreground" />
-        <Input
-          placeholder="Filter the transcript"
-          value={filter}
-          onChange={(event) => setFilter(event.target.value)}
-          className="h-9 pl-8"
-        />
+      <div className="mb-3 flex items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute top-2.5 left-2.5 size-4 text-muted-foreground" />
+          <Input
+            placeholder="Filter the transcript"
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            className="h-9 pl-8"
+          />
+        </div>
+        {mentioned.size > 0 && (
+          <Button
+            size="sm"
+            variant={onlyMentions ? "default" : "outline"}
+            className="h-9 shrink-0"
+            aria-pressed={onlyMentions}
+            title={onlyMentions ? "Show every line" : "Show only the lines where someone said your name"}
+            onClick={() => setOnlyMentions(!onlyMentions)}
+          >
+            <AtSign className="size-3.5" />
+            Said your name ({mentioned.size})
+          </Button>
+        )}
       </div>
       {shown.length === 0 && (
         <p className="py-6 text-center text-sm text-muted-foreground">
@@ -497,6 +541,7 @@ export const Transcript = memo(function Transcript({
             color={colorOf(segment.speaker)}
             current={(currentId === segment.id && playing) || segment.id === focusId}
             editing={segment.id === editingId}
+            names={mentioned.get(segment.id)}
             onSeek={onSeek}
             onPickSpeaker={pickSpeaker}
             onLineMenu={lineMenu}

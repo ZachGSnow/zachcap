@@ -107,18 +107,12 @@ def cmd_import(args: argparse.Namespace, store: Store) -> None:
             raise SystemExit(f"{source} has no mic or system audio")
         folder, title = source, args.title or source.name
         started = datetime.fromtimestamp(source.stat().st_mtime).astimezone()
+        meeting_id = store.create_meeting(title, started.isoformat(timespec="seconds"), folder)
     else:
-        from . import audio
+        from .imports import import_recording
 
-        # A finished recording (for example a Teams .mp4) is one mixed track: everyone,
-        # you included, goes on the "system" track and is told apart by voice.
-        folder = paths.meetings_dir() / f"{datetime.now():%Y-%m-%d_%H%M%S}-import"
-        folder.mkdir(parents=True)
-        seconds = audio.import_media(source, folder / "system.flac", args.start, args.end)
-        title = args.title or source.stem
-        started = audio.recorded_at(source)
+        meeting_id, seconds = import_recording(store, source, args.title, args.start, args.end)
         print(f"Extracted {seconds / 60:.1f} min of audio from {source.name}")
-    meeting_id = store.create_meeting(title, started.isoformat(timespec="seconds"), folder)
     print(f"Imported meeting {meeting_id} from {source}")
     if not args.no_process:
         _process(store, meeting_id)

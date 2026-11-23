@@ -607,3 +607,68 @@ def test_the_work_log_through_the_api(client: TestClient, tmp_path: Path):
     assert Path(saved["path"]).name == "Work log 2026-11-23.md"
     on = client.put("/api/settings", headers=AUTH, json={"export_work_log": True}).json()
     assert on["export_work_log"] is True
+
+
+def test_where_your_name_was_said(client: TestClient, tmp_path: Path):
+    store = Store()
+    store.rename_person(store.me()["id"], "Alex Rivera")
+    meeting_id = store.create_meeting("Sync", "2026-11-20T09:00:00", tmp_path / "audio")
+    dana = store.add_speaker(
+        meeting_id, "system", "Dana", None, 5.0, None, Match(store.person_id("Dana"), 0.9, "auto")
+    )
+    store.add_segments(
+        meeting_id,
+        [
+            (dana, "system", 1.0, 4.0, "Alex, can you take this one?", 0.9),
+            (dana, "system", 5.0, 8.0, "Nobody in particular.", 0.9),
+        ],
+    )
+    store.update_meeting(meeting_id, status="ready")
+    store.close()
+
+    detail = client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()
+    assert [(m["speaker"], m["at"], m["names"]) for m in detail["mentions"]] == [
+        ("Dana", 1.0, ["Alex"])
+    ]
+    assert client.get("/api/meetings", headers=AUTH).json()[0]["mentions"] == 1
+
+    saved = client.put("/api/settings", headers=AUTH, json={"also_answer_to": " AR ,, you, A "})
+    assert saved.json()["also_answer_to"] == "AR"
+    too_long = client.put("/api/settings", headers=AUTH, json={"also_answer_to": "x" * 401})
+    assert too_long.status_code == 400
+
+
+def test_the_watch_folder_settings(client: TestClient, tmp_path: Path):
+    import numpy as np
+    import soundfile as sf
+
+    from zachcap import watchfolder
+
+    folder = tmp_path / "exports"
+    folder.mkdir()
+    sf.write(folder / "old.wav", np.zeros(1600, np.float32), 16000)
+    (folder / "broken.mp3").write_bytes(b"nope")
+    assert client.get("/api/settings", headers=AUTH).json()["watch_folder"] == ""
+    missing = client.put("/api/settings", headers=AUTH, json={"watch_folder": str(tmp_path / "x")})
+    assert missing.status_code == 400
+    files = client.get("/api/watch-folder/files", headers=AUTH, params={"path": str(folder)})
+    assert files.json() == {"count": 2}
+
+    # On, for new recordings only: what's there now is never imported.
+    on = client.put("/api/settings", headers=AUTH, json={"watch_folder": str(folder)}).json()
+    assert on["watch_folder"] == str(folder) and on["watch_folder_failed"] == []
+    store = Store()
+    watch = watchfolder.FolderWatch(lambda _: None, clock=lambda: time.time() + 120)
+    watch.check(store)
+    assert watch.check(store) == []
+
+    # Again, with "import the ones there too": the broken one is reported, once.
+    client.put(
+        "/api/settings", headers=AUTH, json={"watch_folder": str(folder), "watch_existing": True}
+    )
+    assert len(watch.check(store)) == 1
+    store.close()
+    failed = client.get("/api/settings", headers=AUTH).json()["watch_folder_failed"]
+    assert [f["name"] for f in failed] == ["broken.mp3"] and failed[0]["error"]
+    off = client.put("/api/settings", headers=AUTH, json={"watch_folder": ""}).json()
+    assert off["watch_folder"] == "" and off["watch_folder_failed"] == []
