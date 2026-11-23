@@ -9,7 +9,7 @@ from typing import Literal
 import anthropic
 from pydantic import BaseModel, Field
 
-from . import apikeys, privacy, prompts, vocabulary
+from . import apikeys, clients, privacy, prompts, vocabulary
 from .prompts import DEFAULT_TEMPLATE, RECIPES, TEMPLATES  # noqa: F401 (re-exported)
 from .store import Store
 
@@ -359,6 +359,9 @@ def recipe(
     started = datetime.fromisoformat(meeting["started_at"])
     summary = store.summary(meeting_id)
     context = f"Meeting: {meeting['title']}\nDate: {started:%A %B %d, %Y}\n"
+    client = clients.of_meeting(store, meeting)["client"]
+    if client:
+        context += f"Client: {client}\n"
     if meeting["ticket"]:
         context += f"Ticket: {meeting['ticket']}\n"
     context += "\n"

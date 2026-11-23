@@ -35,7 +35,8 @@ function timeEntries(log: WorkLog): string {
   return log.days
     .flatMap((day) =>
       day.meetings.map((m) =>
-        [log.period === "week" ? day.day : null, m.time, `${m.hours} h`, m.ticket ? `Ticket ${m.ticket}` : null, m.note ? `${m.title}: ${m.note}` : m.title]
+        [log.period === "week" ? day.day : null, m.time, `${m.hours} h`, m.client && !log.client ? m.client : null,
+          m.ticket ? `Ticket ${m.ticket}` : null, m.note ? `${m.title}: ${m.note}` : m.title]
           .filter(Boolean)
           .join("  "),
       ),
@@ -75,12 +76,15 @@ function ItemRow({ item, meeting, onToggle }: { item: WorkLogItem; meeting?: str
 export function WorkLogView({ onOpen }: { onOpen: (meetingId: number) => void }) {
   const [period, setPeriod] = useState<Period>(() => (localStorage.getItem(PERIOD_KEY) === "week" ? "week" : "day"));
   const [day, setDay] = useState(() => isoDay(new Date()));
+  // One client's meetings only (offered once a client has been named).
+  const [client, setClient] = useState("");
   useEffect(() => localStorage.setItem(PERIOD_KEY, period), [period]);
   const { data: log, error, refresh } = usePoll(
-    () => api<WorkLog>(`/api/worklog?period=${period}&day=${day}`),
+    () => api<WorkLog>(`/api/worklog?period=${period}&day=${day}${client ? `&client=${encodeURIComponent(client)}` : ""}`),
     0,
-    `${period}-${day}`,
+    `${period}-${day}-${client}`,
   );
+  const { data: known = [] } = usePoll(() => api<string[]>("/api/clients"), 0);
   const { data: settings } = usePoll(() => api<Settings>("/api/settings"), 0);
   const today = isoDay(new Date());
   const showsToday = log ? log.start <= today && today <= log.end : true;
@@ -150,6 +154,21 @@ export function WorkLogView({ onOpen }: { onOpen: (meetingId: number) => void })
               {period === "week" ? "This week" : "Today"}
             </Button>
           )}
+          {known.length > 0 && (
+            <select
+              aria-label="Client"
+              value={client}
+              onChange={(event) => setClient(event.target.value)}
+              className="h-8 rounded-md border bg-transparent px-2 text-sm"
+            >
+              <option value="">Every client</option>
+              {known.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          )}
           <span className="ml-1 font-medium">{log?.title.replace(/^Work log: /, "") ?? ""}</span>
           <div className="ml-auto flex gap-2">
             {log && log.totals.meetings > 0 && (
@@ -208,6 +227,11 @@ export function WorkLogView({ onOpen }: { onOpen: (meetingId: number) => void })
                         <td className="w-28 py-2 pl-4 font-mono text-xs tabular-nums text-muted-foreground">{m.time}</td>
                         <td className="w-14 py-2 font-mono text-xs tabular-nums">{m.hours} h</td>
                         <td className="py-2 pr-4 [overflow-wrap:anywhere]">
+                          {m.client && !log.client && (
+                            <span className="mr-1.5 text-xs text-muted-foreground" title="The client it was for">
+                              {m.client}
+                            </span>
+                          )}
                           {m.ticket && (
                             <span className="mr-1.5 font-mono text-xs text-muted-foreground" title="The ticket it was about">
                               {m.ticket}

@@ -56,12 +56,17 @@ def _time_range(started: datetime, seconds: float | None) -> str:
     return f"{started:%H:%M}-{started + timedelta(seconds=seconds):%H:%M}"
 
 
-def build(store: Store, period: str, day: date) -> dict:
-    """The work log for the day or week containing ``day``."""
+def build(store: Store, period: str, day: date, client: str | None = None) -> dict:
+    """The work log for the day or week containing ``day`` (only ``client``'s meetings, if
+    given)."""
+    from . import clients
+
     start, end = period_range(period, day)
     me = store.me()["name"]
     # Only the period's meetings are read: the log is rebuilt on every change to one of them.
     meetings = store.meetings_between(start.isoformat(), end.isoformat())
+    client_of = clients.of_meetings(store, meetings)
+    meetings = [m for m in meetings if clients.matches(client_of[m["id"]], client)]
     participants = store.participants([m["id"] for m in meetings])
     days: dict[str, list[dict]] = {}
     your_items: list[dict] = []
@@ -94,6 +99,7 @@ def build(store: Store, period: str, day: date) -> dict:
                 "items": items,
                 "status": meeting["status"],
                 "ticket": meeting["ticket"],
+                "client": client_of[meeting["id"]]["client"],
             }
         )
     every = [m for listed in days.values() for m in listed]
@@ -101,7 +107,8 @@ def build(store: Store, period: str, day: date) -> dict:
         "period": period,
         "start": start.isoformat(),
         "end": end.isoformat(),
-        "title": _title(period, start),
+        "title": _title(period, start) + (f" for {client}" if client else ""),
+        "client": client,
         "me": me,
         "totals": {
             "meetings": len(every),
@@ -156,18 +163,33 @@ def markdown(log: dict, cite: bool = False) -> str:
     lines += [f"{count}, {_duration(totals['seconds'])}, {totals['hours']:g} h to bill.", ""]
 
     week = log["period"] == "week"
-    # A Ticket column once any meeting has one (most logs without tickets stay as they were).
-    ticketed = any(m.get("ticket") for day in log["days"] for m in day["meetings"])
-    columns = ["Time", "Hours", *(["Ticket"] if ticketed else []), "Meeting", "Note"]
+    # Client and Ticket columns once any meeting has one (a log without stays as it was);
+    # a log for one client doesn't repeat it on every line.
+    every = [m for day in log["days"] for m in day["meetings"]]
+    ticketed = any(m.get("ticket") for m in every)
+    for_clients = not log.get("client") and any(m.get("client") for m in every)
+    columns = [
+        "Time",
+        "Hours",
+        *(["Client"] if for_clients else []),
+        *(["Ticket"] if ticketed else []),
+        "Meeting",
+        "Note",
+    ]
     if week:
         columns.insert(0, "Day")
     lines += ["## Time entries", ""]
     lines += ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
     for day in log["days"]:
         for m in day["meetings"]:
-            row = [m["time"], f"{m['hours']:g}", _cell(m["title"]), _cell(m["note"])]
-            if ticketed:
-                row.insert(2, _cell(m.get("ticket") or ""))
+            row = [
+                m["time"],
+                f"{m['hours']:g}",
+                *([_cell(m.get("client") or "")] if for_clients else []),
+                *([_cell(m.get("ticket") or "")] if ticketed else []),
+                _cell(m["title"]),
+                _cell(m["note"]),
+            ]
             if week:
                 row.insert(0, f"{date.fromisoformat(day['day']):%a %d}")
             lines.append("| " + " | ".join(row) + " |")
@@ -177,8 +199,12 @@ def markdown(log: dict, cite: bool = False) -> str:
         if week:
             lines += ["", f"### {day['label']}"]
         for m in day["meetings"]:
-            ticket = f" (ticket {m['ticket']})" if m.get("ticket") else ""
-            heading = f"{'####' if week else '###'} {m['time']} {m['title']}{ticket}"
+            about = [
+                *([m["client"]] if m.get("client") and not log.get("client") else []),
+                *([f"ticket {m['ticket']}"] if m.get("ticket") else []),
+            ]
+            more = f" ({', '.join(about)})" if about else ""
+            heading = f"{'####' if week else '###'} {m['time']} {m['title']}{more}"
             lines += ["", heading + (f" [M{m['id']}]" if cite else ""), ""]
             if m["people"]:
                 lines += [f"With {', '.join(m['people'])}.", ""]

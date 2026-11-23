@@ -14,6 +14,7 @@ import threading
 from datetime import date, datetime
 from pathlib import Path
 
+from . import clients
 from .store import Store
 
 FORMATS = {"md": "Markdown", "txt": "Text", "srt": "Subtitles (SRT)", "vtt": "Subtitles (WebVTT)"}
@@ -46,11 +47,13 @@ def markdown(store: Store, meeting_id: int) -> str:
     meeting = store.meeting(meeting_id)
     started = datetime.fromisoformat(meeting["started_at"])
     people = store.participants().get(meeting_id, [])
+    client = clients.of_meeting(store, meeting)["client"]
     lines = [f"# {meeting['title']}", ""]
     lines.append(
         f"{started:%A %B %d, %Y %H:%M}"
         + (f" | {round((meeting['duration'] or 0) / 60)} min" if meeting["duration"] else "")
         + (f" | {', '.join(people)}" if people else "")
+        + (f" | Client {client}" if client else "")
         + (f" | Ticket {meeting['ticket']}" if meeting["ticket"] else "")
     )
     summary = store.summary(meeting_id)

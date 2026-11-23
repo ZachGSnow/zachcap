@@ -21,6 +21,7 @@ import { NotesPanel } from "@/components/NotesPanel";
 import { PlayerBar, type PlayerState } from "@/components/PlayerBar";
 import { RedactDialog } from "@/components/RedactDialog";
 import { SummaryPanel } from "@/components/SummaryPanel";
+import { ClientField } from "@/components/Client";
 import { TicketControl } from "@/components/Ticket";
 import { NamePrompt, REDACTED, Transcript, WhoIsThis } from "@/components/Transcript";
 import { AvatarStack, ConversationStats, SpeakerLanes, TalkTimeBars } from "@/components/Visuals";
@@ -485,6 +486,21 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
               {named.length ? ` \u00b7 ${named.length} speaker${named.length === 1 ? "" : "s"}` : ""}
             </span>
             {participants.length > 0 && <AvatarStack names={participants} colorOf={colorOf} max={5} />}
+            <ClientField
+              value={meeting.client ?? null}
+              inferred={meeting.client_inferred}
+              known={data.clients_known ?? []}
+              hint={
+                meeting.client_inferred
+                  ? "The client the people in this meeting work for: click to set another"
+                  : "The client this meeting was for: click to change it (empty goes back to its people's)"
+              }
+              onSave={(client) =>
+                void attempt("Couldn't save the client", () =>
+                  api(`/api/meetings/${meeting.id}`, { method: "PATCH", json: { client } }),
+                ).then((saved) => saved && void refresh())
+              }
+            />
             <TicketControl
               meetingId={meeting.id}
               ticket={meeting.ticket ?? null}

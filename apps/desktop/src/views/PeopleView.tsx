@@ -2,6 +2,7 @@ import { AudioWaveform, MoreHorizontal, Pencil, Sparkles, Trash2, UserX, Users }
 import { useState } from "react";
 import { toast } from "sonner";
 
+import { ClientField } from "@/components/Client";
 import { NamePrompt } from "@/components/Transcript";
 import { PersonAvatar } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +29,7 @@ import { day, minutes, personColor } from "@/lib/format";
 
 export function PeopleView({ onBrief }: { onBrief: (name: string) => void }) {
   const { data: people, refresh } = usePoll(() => api<Person[]>("/api/people"), 0);
+  const { data: known = [], refresh: refreshKnown } = usePoll(() => api<string[]>("/api/clients"), 0);
   const [renaming, setRenaming] = useState<Person | null>(null);
   const [removing, setRemoving] = useState<Person | null>(null);
   const top = Math.max(...(people ?? []).map((p) => p.talk_seconds), 1);
@@ -79,6 +81,21 @@ export function PeopleView({ onBrief }: { onBrief: (name: string) => void }) {
                       {person.meetings} meeting{person.meetings === 1 ? "" : "s"}
                       {person.last_seen ? ` \u00b7 last ${day(person.last_seen)}` : ""}
                     </div>
+                    {!isMe && (
+                      <div className="-ml-1.5 mt-1 text-muted-foreground">
+                        <ClientField
+                          value={person.org}
+                          known={known}
+                          hint="The client they work for: their meetings are that client's"
+                          onSave={(client) =>
+                            void act(client ? `${person.name} works for ${client}` : `${person.name} has no client now`, async () => {
+                              await api(`/api/people/${person.id}/client`, { method: "PUT", json: { client } });
+                              await refreshKnown();
+                            })
+                          }
+                        />
+                      </div>
+                    )}
                   </div>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>

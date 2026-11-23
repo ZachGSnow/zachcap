@@ -1,6 +1,7 @@
 import {
   AtSign,
   AudioLines,
+  Building2,
   CalendarDays,
   ChevronRight,
   Circle,
@@ -11,6 +12,7 @@ import {
   Ticket,
   Users,
 } from "lucide-react";
+import { useState } from "react";
 
 import { toggleAction } from "@/components/SummaryPanel";
 import { AvatarStack, StatCard } from "@/components/Visuals";
@@ -173,6 +175,12 @@ export function MeetingsView({
   const { data: settings } = usePoll(() => api<Settings>("/api/settings"), 0);
   const me = settings?.me.name ?? "You";
   const shortcutKeys = useKeys();
+  // Narrow the list to one client's meetings (offered once any meeting has a client).
+  const [client, setClient] = useState("");
+  const clientNames = [...new Set((meetings ?? []).map((m) => m.client).filter((c): c is string => !!c))].sort((a, b) =>
+    a.localeCompare(b),
+  );
+  const shown = client ? meetings?.filter((m) => m.client?.toLowerCase() === client.toLowerCase()) : meetings;
 
   return (
     <ScrollArea className="min-h-0 flex-1">
@@ -251,8 +259,27 @@ export function MeetingsView({
           </div>
         )}
 
+        {clientNames.length > 0 && (
+          <div className="mt-8 flex items-center gap-2 text-sm">
+            <Building2 className="size-3.5 text-muted-foreground" />
+            <select
+              aria-label="Client"
+              value={client}
+              onChange={(event) => setClient(event.target.value)}
+              className="h-8 rounded-md border bg-transparent px-2 text-sm"
+            >
+              <option value="">Every client</option>
+              {clientNames.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         {GROUPS.map((group) => {
-          const items = meetings?.filter((m) => dayGroup(m.started_at) === group) ?? [];
+          const items = shown?.filter((m) => dayGroup(m.started_at) === group) ?? [];
           if (!items.length) return null;
           return (
             <section key={group} className="mt-8">
@@ -278,6 +305,7 @@ export function MeetingsView({
                         )}
                       </div>
                       <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                        {meeting.client ? `${meeting.client} \u00b7 ` : ""}
                         {when(meeting.started_at)}
                         {meeting.duration ? ` \u00b7 ${minutes(meeting.duration)}` : ""}
                         {meeting.participants.length

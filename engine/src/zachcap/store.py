@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS meetings (
     template    TEXT,                               -- the kind of meeting, for summaries
     audio_removed_at TEXT,                          -- set when old audio was deleted
     ticket      TEXT,                               -- the service ticket it was about
+    client      TEXT,                               -- set on it; else from its people
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -42,7 +43,7 @@ CREATE TABLE IF NOT EXISTS people (
     id          INTEGER PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
     is_me       INTEGER NOT NULL DEFAULT 0,
-    org         TEXT,
+    org         TEXT,                               -- the client they work for
     notes       TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -233,7 +234,7 @@ class Store:
     def _migrate(self) -> None:
         """Columns added after a database was created (CREATE TABLE IF NOT EXISTS skips them)."""
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(meetings)")}
-        for column in ("template", "audio_removed_at", "ticket"):
+        for column in ("template", "audio_removed_at", "ticket", "client"):
             if column not in columns:
                 self.db.execute(f"ALTER TABLE meetings ADD COLUMN {column} TEXT")
                 self.db.commit()
@@ -549,6 +550,9 @@ class Store:
             "GROUP BY p.id ORDER BY p.is_me DESC, p.name"
         ).fetchall()
 
+    def person(self, person_id: int) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
+
     def person_id(self, name: str, create: bool = True) -> int | None:
         row = self.db.execute("SELECT id FROM people WHERE name = ?", (name,)).fetchone()
         if row:
@@ -768,6 +772,39 @@ class Store:
         ):
             result.setdefault(row["meeting_id"], []).append(row["name"])
         return result
+
+    def meeting_clients(self, meeting_ids: list[int]) -> dict[int, list[str]]:
+        """The clients of the people named in each meeting (not you), most talkative first."""
+        if not meeting_ids:
+            return {}
+        result: dict[int, list[str]] = {}
+        for row in self.db.execute(
+            "SELECT s.meeting_id, p.org, SUM(s.end - s.start) AS seconds FROM segments s "
+            "JOIN meeting_speakers ms ON ms.id = s.meeting_speaker_id "
+            "JOIN people p ON p.id = ms.person_id "
+            "WHERE ms.status IN ('auto', 'confirmed') AND p.is_me = 0 "
+            "AND COALESCE(p.org, '') != '' "
+            f"AND s.meeting_id IN ({', '.join('?' * len(meeting_ids))}) "
+            "GROUP BY s.meeting_id, p.org COLLATE NOCASE ORDER BY s.meeting_id, seconds DESC",
+            meeting_ids,
+        ):
+            result.setdefault(row["meeting_id"], []).append(row["org"])
+        return result
+
+    def client_names(self) -> list[str]:
+        """Every client named on a person or a meeting, alphabetically (one spelling each)."""
+        rows = self.db.execute(
+            "SELECT org AS name FROM people WHERE COALESCE(org, '') != '' "
+            "UNION SELECT client FROM meetings WHERE COALESCE(client, '') != ''"
+        ).fetchall()
+        names: dict[str, str] = {}
+        for row in rows:
+            names.setdefault(row["name"].lower(), row["name"])
+        return sorted(names.values(), key=str.lower)
+
+    def set_client(self, person_id: int, client: str | None) -> None:
+        self.db.execute("UPDATE people SET org = ? WHERE id = ?", (client or None, person_id))
+        self._commit()
 
     def talk_time(self, meeting_id: int) -> list[sqlite3.Row]:
         return self.db.execute(
