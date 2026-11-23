@@ -22,8 +22,8 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 - **Transcription on your GPU** with Whisper (`large-v3-turbo`): about 2-3 minutes per hour of audio on a 4 GB laptop GPU. **Words to know** (names, products, jargon, and what Whisper mishears them as) are spelled your way, and so are the names of people you've identified.
 - **Speaker separation and voice recognition**: a "Who's this?" card plays a short sample of each unknown voice; name them once and ZachCap recognizes them next time, including you on your own mic and people in the room with you.
 - **Speaker lanes**: a timeline of who talked when, with talk-time stats, and **solo playback** that plays one person only, from their own side of the call. Listening back can **skip silences**, with video-player keys (Space or K, J and L, arrows). **Conversation stats** show each person's pace, longest stretch, questions asked, and how often they talked over the other side.
-- **Summaries with names** from Claude (Opus 5.5 by default): overview, decisions, action items marked as commitments or assignments with due dates, who said what, open questions and topics. Every item links to the moment it was said. Pick the **kind of meeting** (1:1, standup, customer call, project status, incident or troubleshooting, interview) to set what the summary focuses on.
-- **Write from a meeting** in one click: a follow-up email, a status update, or notes for a service ticket, ready to copy.
+- **Summaries with names** from Claude (Opus 5.5 by default): overview, decisions, action items marked as commitments or assignments with due dates, who said what, open questions and topics. Every item links to the moment it was said. Pick the **kind of meeting** (1:1, standup, customer call, project status, incident or troubleshooting, interview) to set what the summary focuses on; **edit them or add your own** in Settings (a vendor call, a client's quarterly review).
+- **Write from a meeting** in one click: a follow-up email, a status update, or notes for a service ticket, ready to copy. Edit these or add your own documents (a client's ticket format, a time entry).
 - **Action item tracker** across all meetings, with Open/Done, "Mine", and commitments vs assigned tasks.
 - **Ask across all your meetings**: "What did I commit to this week?", "What's still open with Dana?". Claude searches your transcripts, summaries and action items with read-only tools and links every fact to the moment it was said. **Brief me** on a person prepares you for your next meeting with them. Each meeting also has its own Ask tab.
 - **History and search**: every meeting, searchable by anything anyone said.
@@ -79,6 +79,7 @@ Everything is set in the app under **Settings**:
 | Words to know | Terms to spell right, one per line; `Term: misheard, misheard` adds corrections | empty |
 | Claude model | Opus 5.5, Sonnet 5.5 or Fable 5.1 | Opus 5.5 |
 | Usual kind of meeting | What summaries focus on unless a meeting says otherwise | General |
+| Kinds of meeting, one-click documents | Edit the built-in ones (and reset them), or add your own with your own instructions | As shipped |
 | API keys | Hugging Face token and Anthropic key | not set |
 | Start with Windows | Opens ZachCap in the tray when you sign in (release builds) | off |
 | Theme | Light, dark, or the same as Windows | Same as Windows |
@@ -113,7 +114,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 110 tests: storage, matching, audio, capture and mixing, crash recovery, API, summaries, Ask
+uv run pytest -q             # 122 tests: storage, matching, audio, capture and mixing, crash recovery, API, summaries and templates, Ask
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```

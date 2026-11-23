@@ -131,6 +131,17 @@ CREATE TABLE IF NOT EXISTS meeting_notes (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS meeting_notes_by_meeting ON meeting_notes(meeting_id, at);
+
+-- The user's kinds of meeting and one-click documents (see prompts.py). A built-in has a row
+-- only once edited, holding just what was changed (NULL: the built-in's own text).
+CREATE TABLE IF NOT EXISTS prompts (
+    id            TEXT PRIMARY KEY,                -- a built-in's id ("customer") or custom-<hex>
+    kind          TEXT NOT NULL,                   -- template|recipe
+    label         TEXT,
+    instructions  TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT
+);
 """
 
 # Suggestions show as "Speaker 2 (Dana?)" until confirmed.
@@ -203,6 +214,40 @@ class Store:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+        self._commit()
+
+    def delete_setting(self, key: str) -> None:
+        self.db.execute("DELETE FROM settings WHERE key = ?", (key,))
+        self._commit()
+
+    # prompts (kinds of meeting, one-click documents) --------------------------
+
+    def prompt_rows(self, kind: str) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM prompts WHERE kind = ? ORDER BY created_at, rowid", (kind,)
+        ).fetchall()
+
+    def prompt_row(self, prompt_id: str) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM prompts WHERE id = ?", (prompt_id,)).fetchone()
+
+    def save_prompt(
+        self, prompt_id: str, kind: str, label: str | None, instructions: str | None
+    ) -> None:
+        self.db.execute(
+            "INSERT INTO prompts (id, kind, label, instructions) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET label = excluded.label, "
+            "instructions = excluded.instructions, updated_at = datetime('now')",
+            (prompt_id, kind, label, instructions),
+        )
+        self._commit()
+
+    def delete_prompt(self, prompt_id: str) -> None:
+        self.db.execute("DELETE FROM prompts WHERE id = ?", (prompt_id,))
+        self._commit()
+
+    def forget_template(self, template: str) -> None:
+        """Meetings summarized as a deleted kind of meeting go back to the usual kind."""
+        self.db.execute("UPDATE meetings SET template = NULL WHERE template = ?", (template,))
         self._commit()
 
     # meetings ---------------------------------------------------------------

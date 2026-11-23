@@ -376,3 +376,43 @@ def test_a_quiet_call_plays_back_as_loud_as_the_mic(tmp_path: Path):
     played, _ = sf.read(_playback_file(tmp_path), dtype="float32")
     you, them = np.abs(played[: 16000 * 2]).max(), np.abs(played[16000 * 2 :]).max()
     assert them > 0.25 and 0.5 < them / you < 2  # it was 20 times quieter
+
+
+def test_your_own_kinds_and_documents_through_the_api(client: TestClient):
+    library = client.get("/api/prompts", headers=AUTH).json()
+    assert [e["id"] for e in library["recipes"]] == ["email", "status", "ticket"]
+    assert library["limits"] == {"label": 40, "instructions": 2000}
+
+    made = client.post(
+        "/api/prompts",
+        headers=AUTH,
+        json={"kind": "template", "label": "Vendor call", "instructions": "Quotes, lead times."},
+    )
+    assert made.status_code == 200
+    mine = made.json()["id"]
+    settings = client.put("/api/settings", headers=AUTH, json={"summary_template": mine}).json()
+    assert settings["summary_template"] == mine
+    assert {"id": mine, "label": "Vendor call"} in settings["templates"]
+
+    renamed = client.patch(f"/api/prompts/{mine}", headers=AUTH, json={"label": "Supplier call"})
+    assert renamed.json()["label"] == "Supplier call"
+    duplicate = client.post(
+        "/api/prompts",
+        headers=AUTH,
+        json={"kind": "template", "label": "supplier CALL", "instructions": "Again."},
+    )
+    assert duplicate.status_code == 400 and "already" in duplicate.json()["detail"]
+
+    edited = client.patch(
+        "/api/prompts/ticket", headers=AUTH, json={"instructions": "Short ticket style."}
+    )
+    assert edited.json()["edited"] is True
+    reset = client.post("/api/prompts/ticket/reset", headers=AUTH)
+    assert reset.json()["edited"] is False
+    assert client.delete("/api/prompts/ticket", headers=AUTH).status_code == 400
+    assert client.patch("/api/prompts/custom-gone", headers=AUTH, json={}).status_code == 404
+
+    assert client.delete(f"/api/prompts/{mine}", headers=AUTH).json() == {"deleted": mine}
+    after = client.get("/api/settings", headers=AUTH).json()
+    assert after["summary_template"] == "general"
+    assert mine not in [t["id"] for t in after["templates"]]

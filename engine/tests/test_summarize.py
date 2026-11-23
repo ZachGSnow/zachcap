@@ -248,3 +248,56 @@ def test_a_document_cut_off_at_the_limit_says_so(meeting, monkeypatch):
     assert calls["max_tokens"] == summarize.MAX_TOKENS == 16_000
     assert written["text"].startswith("Subject: Cutover")
     assert written["text"].endswith(summarize.CUT_OFF)
+
+
+def test_your_own_kind_of_meeting_sets_the_focus(meeting, monkeypatch):
+    from zachcap import prompts
+
+    store, meeting_id = meeting
+    calls = fake_claude(monkeypatch, sample_summary())
+    mine = prompts.add(store, "template", "Vendor call", "Focus on quotes and lead times.")
+    prompts.update(store, "customer", instructions="Focus on the customer's SLA.")
+
+    summarize.summarize(store, meeting_id, template=mine["id"])
+
+    assert calls["system"].count("Focus on quotes and lead times.") == 1
+    assert store.meeting(meeting_id)["template"] == mine["id"]
+    summarize.summarize(store, meeting_id, template="customer")
+    assert "Focus on the customer's SLA." in calls["system"]
+    assert "call with a customer or client" not in calls["system"]
+
+
+def test_a_deleted_kind_falls_back_to_the_usual_one(meeting, monkeypatch):
+    from zachcap import prompts
+
+    store, meeting_id = meeting
+    calls = fake_claude(monkeypatch, sample_summary())
+    mine = prompts.add(store, "template", "Vendor call", "Focus on quotes and lead times.")
+    summarize.summarize(store, meeting_id, template=mine["id"])
+    store.set_setting("summary_template", "incident")
+
+    prompts.delete(store, mine["id"])
+    summarize.summarize(store, meeting_id)  # Regenerate
+
+    assert "Focus on quotes" not in calls["system"]
+    assert "incident or troubleshooting call" in calls["system"]
+    assert store.meeting(meeting_id)["template"] == "incident"
+
+
+def test_your_own_document_with_braces_in_it(meeting, monkeypatch):
+    from zachcap import prompts
+
+    store, meeting_id = meeting
+    calls = fake_claude(monkeypatch, sample_summary())
+    mine = prompts.add(
+        store,
+        "recipe",
+        "Time entry",
+        'Write a time entry for {me} as JSON like {"minutes": 30, "note": "..."}.',
+    )
+
+    written = summarize.recipe(store, meeting_id, mine["id"])
+
+    assert written["title"] == "Time entry"
+    ask = calls["messages"][0]["content"][1]["text"]
+    assert ask == 'Write a time entry for You as JSON like {"minutes": 30, "note": "..."}.'

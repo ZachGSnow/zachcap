@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from . import __version__, apikeys, audio, export, insights, paths, pipeline, privacy
+from . import __version__, apikeys, audio, export, insights, paths, pipeline, privacy, prompts
 from .store import Store
 
 ALLOWED_ORIGINS = ["http://tauri.localhost", "tauri://localhost", "http://localhost:1420"]
@@ -60,6 +60,17 @@ class SummaryBody(BaseModel):
 
 class RecipeBody(BaseModel):
     recipe: str
+
+
+class PromptBody(BaseModel):
+    kind: str  # template (a kind of meeting) or recipe (a one-click document)
+    label: str
+    instructions: str = ""
+
+
+class PromptChangeBody(BaseModel):
+    label: str | None = None
+    instructions: str | None = None
 
 
 class Turn(BaseModel):
@@ -753,16 +764,49 @@ def create_app(token: str) -> FastAPI:
         apikeys.store(name, body.value.strip())
         return {name: apikeys.source(name)}
 
+    @app.get("/api/prompts", dependencies=auth)
+    def get_prompts(store: Store = Depends(db)):
+        """Kinds of meeting and one-click documents, built-in and the user's own, with their
+        instructions."""
+        return {
+            "templates": prompts.library(store, "template"),
+            "recipes": prompts.library(store, "recipe"),
+            "limits": {"label": prompts.LABEL_MAX, "instructions": prompts.INSTRUCTIONS_MAX},
+        }
+
+    def prompt_change(change: Callable[[], dict | None]) -> dict | None:
+        try:
+            return change()
+        except prompts.UnknownPrompt as exc:
+            raise HTTPException(
+                status_code=404, detail="No such kind of meeting or document"
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/prompts", dependencies=auth)
+    def add_prompt(body: PromptBody, store: Store = Depends(db)):
+        return prompt_change(lambda: prompts.add(store, body.kind, body.label, body.instructions))
+
+    @app.patch("/api/prompts/{prompt_id}", dependencies=auth)
+    def change_prompt(prompt_id: str, body: PromptChangeBody, store: Store = Depends(db)):
+        return prompt_change(
+            lambda: prompts.update(store, prompt_id, body.label, body.instructions)
+        )
+
+    @app.post("/api/prompts/{prompt_id}/reset", dependencies=auth)
+    def reset_prompt(prompt_id: str, store: Store = Depends(db)):
+        """A built-in kind or document back to how ZachCap ships it."""
+        return prompt_change(lambda: prompts.reset(store, prompt_id))
+
+    @app.delete("/api/prompts/{prompt_id}", dependencies=auth)
+    def delete_prompt(prompt_id: str, store: Store = Depends(db)):
+        prompt_change(lambda: prompts.delete(store, prompt_id))
+        return {"deleted": prompt_id}
+
     @app.get("/api/settings", dependencies=auth)
     def get_settings(store: Store = Depends(db)):
-        from .summarize import (
-            DEFAULT_TEMPLATE,
-            MODELS,
-            PRICES,
-            RECIPES,
-            TEMPLATES,
-            summary_model,
-        )
+        from .summarize import MODELS, PRICES, meeting_template, summary_model
 
         return {
             "summary_model": summary_model(store),
@@ -775,12 +819,13 @@ def create_app(token: str) -> FastAPI:
                 }
                 for model, label in MODELS.items()
             ],
-            "summary_template": store.setting("summary_template", DEFAULT_TEMPLATE),
+            # The usual kind, as a summary would use it (a deleted one reads as general).
+            "summary_template": meeting_template(store, {"template": None}),
             "export_folder": store.setting("export_folder", ""),
             "keep_audio_days": int(store.setting("keep_audio_days", "0") or 0),
             "mask_before_claude": store.setting("mask_before_claude") == "1",
-            "templates": [{"id": key, "label": label} for key, (label, _) in TEMPLATES.items()],
-            "recipes": [{"id": key, "label": label} for key, (label, _) in RECIPES.items()],
+            "templates": prompts.choices(store, "template"),
+            "recipes": prompts.choices(store, "recipe"),
             "language": store.setting("language", "en"),
             "languages": [{"id": k, "label": v} for k, v in LANGUAGES.items()],
             "mic_device": store.setting("mic_device", ""),
@@ -791,11 +836,11 @@ def create_app(token: str) -> FastAPI:
 
     @app.put("/api/settings", dependencies=auth)
     def put_settings(body: SettingsBody, store: Store = Depends(db)):
-        from .summarize import MODELS, TEMPLATES
+        from .summarize import MODELS
 
         if body.summary_template is not None:
-            if body.summary_template not in TEMPLATES:
-                raise HTTPException(status_code=400, detail="Unknown summary style")
+            if prompts.get(store, "template", body.summary_template) is None:
+                raise HTTPException(status_code=400, detail="Unknown kind of meeting")
             store.set_setting("summary_template", body.summary_template)
         if body.keep_audio_days is not None:
             if body.keep_audio_days not in KEEP_AUDIO_CHOICES:
