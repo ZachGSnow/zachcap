@@ -388,6 +388,14 @@ function ShortcutRow({
           </span>
         </p>
       )}
+      {found === "failed" && (
+        <div className="flex items-start gap-2 px-4 py-2.5 text-xs text-amber-700 dark:text-amber-300">
+          <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1">
+            Windows didn't let ZachCap read these keys. Turn dictation off and on again, or restart ZachCap.
+          </span>
+        </div>
+      )}
       {(found === "taken" || found === "invalid") && (
         <div className="flex items-start gap-2 px-4 py-2.5 text-xs text-amber-700 dark:text-amber-300">
           <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
@@ -584,8 +592,18 @@ export function SettingsView() {
 
   const keysNow = useKeys();
   const [shortcutStatus, setShortcutStatus] = useState<ShortcutStatus[]>([]);
+  // Looked at again when settings change (dictation on or off) and every 15 s, so a recording
+  // starting or another app taking keys shows up while Settings is open.
   useEffect(() => {
-    if (isTauri()) void invoke<ShortcutStatus[]>("shortcut_status").then(setShortcutStatus, () => undefined);
+    if (!isTauri()) return;
+    const look = () => void invoke<ShortcutStatus[]>("shortcut_status").then(setShortcutStatus, () => undefined);
+    look();
+    const every = window.setInterval(look, 15_000);
+    window.addEventListener(SETTINGS_CHANGED, look);
+    return () => {
+      window.clearInterval(every);
+      window.removeEventListener(SETTINGS_CHANGED, look);
+    };
   }, []);
   const pickKeys = useCallback(
     async (action: ShortcutAction, keys: string) => {
@@ -593,6 +611,7 @@ export function SettingsView() {
         const saved = await api<Settings>("/api/settings", { method: "PUT", json: { shortcuts: { [action]: keys } } });
         setKeys(saved.shortcuts);
         if (isTauri()) setShortcutStatus(await invoke<ShortcutStatus[]>("set_shortcuts", { keys: saved.shortcuts }));
+        window.dispatchEvent(new Event(SETTINGS_CHANGED)); // the rest of the page catches up now
         toast.success(keys ? `Now ${showKeys(saved.shortcuts[action])}` : `Back to ${showKeys(DEFAULT_KEYS[action])}`);
         await refresh();
       } catch (error) {

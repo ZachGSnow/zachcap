@@ -80,11 +80,11 @@ def test_a_snapshot_is_a_note_with_its_picture_and_text(client: TestClient, monk
 def test_a_snapshot_says_your_keys(client: TestClient, monkeypatch):
     take = fake_take("")
     monkeypatch.setattr(snapshot, "take", take)
-    client.put("/api/settings", headers=AUTH, json={"shortcuts": {"snapshot": "Ctrl+Shift+F9"}})
+    client.put("/api/settings", headers=AUTH, json={"shortcuts": {"snapshot": "Ctrl+Alt+F9"}})
     client.post("/api/record/start", headers=AUTH, json={})
 
     assert client.post("/api/record/snapshot", headers=AUTH).status_code == 200
-    assert take.keys == "Ctrl+Shift+F9"  # what it says to press when there's no right window
+    assert take.keys == "Ctrl+Alt+F9"  # what it says to press when there's no right window
 
 
 def test_a_failed_snapshot_leaves_no_note(client: TestClient, monkeypatch):

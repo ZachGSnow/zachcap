@@ -36,6 +36,9 @@ export function GlobalKeys() {
   return null;
 }
 
+/** The button waiting for keys now, if any: only one waits at a time. */
+let stopWaiting: (() => void) | null = null;
+
 /** A shortcut's keys, as a button: click it and press new keys (Esc to cancel). ZachCap lets
  * go of its own shortcuts meanwhile, so pressing one of them reaches this page. */
 export function KeysButton({ label, keys, onPick }: { label: string; keys: string; onPick: (keys: string) => void }) {
@@ -47,10 +50,13 @@ export function KeysButton({ label, keys, onPick }: { label: string; keys: strin
   useEffect(() => {
     if (!listening) return;
     setProblem(null);
+    const stop = () => setListening(false);
+    stopWaiting?.(); // another button was waiting: it stops
+    stopWaiting = stop;
     if (isTauri()) void invoke("pause_shortcuts", { paused: true }).catch(() => undefined);
     const onKey = (event: KeyboardEvent) => {
       event.preventDefault();
-      event.stopPropagation();
+      event.stopImmediatePropagation();
       if (event.key === "Escape" && !event.ctrlKey && !event.altKey && !event.metaKey) {
         setListening(false);
         return;
@@ -64,10 +70,10 @@ export function KeysButton({ label, keys, onPick }: { label: string; keys: strin
       setListening(false);
       pick.current(result.keys);
     };
-    const stop = () => setListening(false);
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("blur", stop);
     return () => {
+      if (stopWaiting === stop) stopWaiting = null;
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("blur", stop);
       // Picked keys are passed on by the save; otherwise ZachCap takes its own back.
