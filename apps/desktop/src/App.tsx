@@ -4,6 +4,7 @@ import { AudioLines, FileUp, Loader2, RotateCw, TriangleAlert } from "lucide-rea
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { CallWatcher, RecordingBar, RecordingProvider } from "@/components/Recording";
 import { Sidebar, type View } from "@/components/Sidebar";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ import { usePoll } from "@/hooks/usePoll";
 import { api, connect, isTauri, waitForEngine, type Meeting, type Stats } from "@/lib/engine";
 import { notify } from "@/lib/feedback";
 import { ActionsView } from "@/views/ActionsView";
+import { AskView, type LibraryExchange } from "@/views/AskView";
 import { MeetingView } from "@/views/MeetingView";
 import { MeetingsView } from "@/views/MeetingsView";
 import { PeopleView } from "@/views/PeopleView";
@@ -28,6 +30,9 @@ import { SearchView } from "@/views/SearchView";
 import { SettingsView } from "@/views/SettingsView";
 
 const MEDIA = ["mp4", "m4a", "mp3", "wav", "flac", "ogg", "webm", "mkv", "aac", "wma", "mov"];
+
+const briefQuestion = (name: string) =>
+  `Brief me on ${name} before my next meeting with them: what we talked about recently, what's still open between us, and anything either of us promised.`;
 
 function Startup({ error, onRetry }: { error?: string; onRetry?: () => void }) {
   return (
@@ -163,6 +168,8 @@ function Shell() {
   const [importPath, setImportPath] = useState<string | null>(null);
   const { data: stats, error: engineError } = usePoll(() => api<Stats>("/api/stats"), 5000);
   const [engineStopped, setEngineStopped] = useState<string | null>(null);
+  // Kept here, so the conversation is still there after looking at a meeting it cited.
+  const [askHistory, setAskHistory] = useState<LibraryExchange[]>([]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -227,16 +234,29 @@ function Shell() {
           {engineStopped && <EngineStopped message={engineStopped} onRestarted={() => setEngineStopped(null)} />}
           <RecordingBar />
           <CallWatcher />
-          {view.name === "meetings" && (
-            <MeetingsView onOpen={openMeeting} onSettings={() => setView({ name: "settings" })} onImport={() => void chooseFile()} />
-          )}
-          {view.name === "meeting" && (
-            <MeetingView key={`${view.id}-${view.at ?? ""}`} id={view.id} at={view.at} onBack={() => setView({ name: "meetings" })} />
-          )}
-          {view.name === "actions" && <ActionsView onOpen={openMeeting} />}
-          {view.name === "people" && <PeopleView />}
-          {view.name === "search" && <SearchView onOpen={openMeeting} />}
-          {view.name === "settings" && <SettingsView />}
+          <ErrorBoundary key={JSON.stringify(view)} onReset={() => setView({ name: "meetings" })}>
+            {view.name === "meetings" && (
+              <MeetingsView onOpen={openMeeting} onSettings={() => setView({ name: "settings" })} onImport={() => void chooseFile()} />
+            )}
+            {view.name === "meeting" && (
+              <MeetingView key={`${view.id}-${view.at ?? ""}`} id={view.id} at={view.at} onBack={() => setView({ name: "meetings" })} />
+            )}
+            {view.name === "ask" && (
+              <AskView
+                key={view.nonce ?? 0}
+                history={askHistory}
+                setHistory={setAskHistory}
+                initialQuestion={view.question}
+                onOpen={openMeeting}
+              />
+            )}
+            {view.name === "actions" && <ActionsView onOpen={openMeeting} />}
+            {view.name === "people" && (
+              <PeopleView onBrief={(name) => setView({ name: "ask", question: briefQuestion(name), nonce: Date.now() })} />
+            )}
+            {view.name === "search" && <SearchView onOpen={openMeeting} />}
+            {view.name === "settings" && <SettingsView />}
+          </ErrorBoundary>
         </main>
       </div>
       <ImportDialog path={importPath} onClose={() => setImportPath(null)} onImported={onSaved} />

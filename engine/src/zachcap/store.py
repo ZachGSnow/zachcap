@@ -324,6 +324,18 @@ class Store:
             (query, limit),
         ).fetchall()
 
+    def search_lines(self, query: str, limit: int = 25) -> list[sqlite3.Row]:
+        """Whole transcript lines matching a full-text query, best matches first."""
+        return self.db.execute(
+            f"SELECT s.meeting_id, m.title, m.started_at, s.start, {SPEAKER_NAME} AS speaker, "
+            "s.text FROM segments_fts f JOIN segments s ON s.id = f.rowid "
+            "JOIN meetings m ON m.id = s.meeting_id "
+            "LEFT JOIN meeting_speakers ms ON ms.id = s.meeting_speaker_id "
+            "LEFT JOIN people p ON p.id = ms.person_id "
+            "WHERE segments_fts MATCH ? AND m.status != 'recording' ORDER BY rank LIMIT ?",
+            (query, limit),
+        ).fetchall()
+
     # people and voiceprints -------------------------------------------------
 
     def me(self) -> sqlite3.Row:

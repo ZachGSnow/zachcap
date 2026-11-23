@@ -1,4 +1,4 @@
-import { AudioWaveform, MoreHorizontal, Pencil, Trash2, UserX, Users } from "lucide-react";
+import { AudioWaveform, MoreHorizontal, Pencil, Sparkles, Trash2, UserX, Users } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -26,7 +26,7 @@ import { usePoll } from "@/hooks/usePoll";
 import { api, type Person } from "@/lib/engine";
 import { day, minutes, personColor } from "@/lib/format";
 
-export function PeopleView() {
+export function PeopleView({ onBrief }: { onBrief: (name: string) => void }) {
   const { data: people, refresh } = usePoll(() => api<Person[]>("/api/people"), 0);
   const [renaming, setRenaming] = useState<Person | null>(null);
   const [removing, setRemoving] = useState<Person | null>(null);
@@ -87,6 +87,15 @@ export function PeopleView() {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-48">
+                      {!isMe && person.meetings > 0 && (
+                        <>
+                          <DropdownMenuItem onSelect={() => onBrief(person.name)}>
+                            <Sparkles className="size-4" />
+                            Brief me
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                        </>
+                      )}
                       <DropdownMenuItem onSelect={() => setRenaming(person)}>
                         <Pencil className="size-4" />
                         Rename
