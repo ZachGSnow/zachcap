@@ -111,3 +111,22 @@ def test_adding_an_entry_merges_into_the_terms_own_line():
         assert "full" in str(exc)
     else:
         raise AssertionError("accepted a list over the limit")
+
+
+def test_a_fixed_password_is_never_offered_as_a_word_to_know():
+    # Rewording a password said aloud must not put it into every prompt sent to Claude.
+    assert vocabulary.suggest("set it to hunter too", "set it to hunter2", "") is None
+    assert vocabulary.suggest("the code is blue fish 42", "the code is BlueFish42", "") is None
+    assert (
+        vocabulary.suggest("the password is connect wise", "the password is ConnectWise", "")
+        is None
+    )
+    assert vocabulary.suggest("[redacted]", "reacted", "") is None
+    # A capital that starts a sentence, or a lone letter, isn't a term either.
+    assert vocabulary.suggest("It works. then we ship.", "It works. Then we ship.", "") is None
+    assert vocabulary.suggest("so i said yes", "so I said yes", "") is None
+    # Names and products still are.
+    assert vocabulary.suggest("we use connect wise", "we use ConnectWise", "") == {
+        "term": "ConnectWise",
+        "misheard": "connect wise",
+    }

@@ -123,3 +123,9 @@ def test_an_older_database_gets_the_prompts_table(tmp_path: Path):
 
     assert prompts.add(store, "recipe", "Works", "Write it.")["label"] == "Works"
     store.close()
+
+
+def test_only_the_general_kind_may_have_no_instructions(store: Store):
+    with pytest.raises(ValueError, match="what it should do"):
+        prompts.update(store, "standup", instructions="   ")
+    assert prompts.update(store, "general", instructions="")["instructions"] == ""

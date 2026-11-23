@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
+from .store import REDACTED
+
 # Whisper's prompt holds about 224 tokens; a long hotword list also makes it invent words.
 HOTWORD_CHARS = 500
 PROMPT = "Names and terms in this meeting: {}."
@@ -102,6 +104,9 @@ def suggest(before: str, after: str, text: str | None) -> dict | None:
     wise" for "ConnectWise"), the Words to know entry that would fix it in future meetings:
     {"term", "misheard"}, with misheard None when only the capitalization changed. None for
     other edits (rewording, a different fact) and for what the list already has."""
+    if REDACTED in before or SECRET_WORDS.search(before) or SECRET_WORDS.search(after):
+        # A password or code said aloud must never become a term sent with every prompt.
+        return None
     old, new = before.split(), after.split()
     matcher = SequenceMatcher(
         None, [_bare(w).lower() for w in old], [_bare(w).lower() for w in new], autojunk=False
@@ -116,8 +121,16 @@ def suggest(before: str, after: str, text: str | None) -> dict | None:
         if len(pairs) != 1:
             return None
         index, _, term = pairs[0]
-        proper = index > 0 and term[:1].isupper()
-        if not usable(term) or term in vocabulary.terms or not (distinctive(term) or proper):
+        # A capital after a full stop starts a sentence; it doesn't make a name.
+        starts_sentence = index == 0 or old[index - 1].endswith((".", "!", "?", ":"))
+        proper = not starts_sentence and term[:1].isupper()
+        if (
+            not usable(term)
+            or len(term) < 2
+            or secretish(term)
+            or term in vocabulary.terms
+            or not (distinctive(term) or proper)
+        ):
             return None
         return {"term": term, "misheard": None}
     if len(changed) != 1 or changed[0][0] != "replace":
@@ -127,7 +140,12 @@ def suggest(before: str, after: str, text: str | None) -> dict | None:
         return None
     heard = " ".join(filter(None, (_bare(w) for w in old[i1:i2])))
     term = " ".join(filter(None, (_bare(w) for w in new[j1:j2])))
-    if not usable(term) or not usable(heard) or vocabulary.corrections.get(heard.lower()) == term:
+    if (
+        not usable(term)
+        or not usable(heard)
+        or secretish(term)
+        or vocabulary.corrections.get(heard.lower()) == term
+    ):
         return None
     # Misheard words look alike once spaces and case go: "prox mocks" and "Proxmox".
     # "tomorrow" and "on Friday" don't: that edit changed what was said.
@@ -135,6 +153,23 @@ def suggest(before: str, after: str, text: str | None) -> dict | None:
     if SequenceMatcher(None, squeeze(heard), squeeze(term)).ratio() < 0.4:
         return None
     return {"term": term, "misheard": heard}
+
+
+SECRET_WORDS = re.compile(
+    r"\b(?:pass(?:word|code|phrase)?s?|pins?|codes?|keys?|secrets?|tokens?|mfa|otp|2fa|"
+    r"one[- ]time)\b",
+    re.IGNORECASE,
+)
+
+
+def secretish(term: str) -> bool:
+    """Looks like a password rather than a name: one word of six or more characters that
+    mixes letters with digits or symbols ("hunter2", "BlueFish42", "P@ssw0rd")."""
+    if " " in term or len(term) < 6:
+        return False
+    has_letter = any(c.isalpha() for c in term)
+    has_other = any(c.isdigit() or not c.isalnum() for c in term)
+    return has_letter and has_other
 
 
 def usable(term: str) -> bool:

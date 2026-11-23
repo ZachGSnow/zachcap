@@ -16,11 +16,14 @@ from pathlib import Path
 
 import soundfile as sf
 
-from . import audio, pipeline
+from . import audio, pipeline, snapshot
 from .store import REDACTED, Store
 
 TRACKS = ("mic", "system")
 PLAYBACK = ("playback.flac", "playback-mic.flac", "playback-system.flac")
+# Whisper's line times can cut a last syllable short: the audio is silenced a little wider
+# than the lines it removes.
+AUDIO_PAD = 0.15
 
 
 def _patiently(action: Callable[[], object], tries: int = 15, wait: float = 0.2) -> None:
@@ -78,13 +81,22 @@ def silence(folder: Path, start: float, end: float) -> int:
             offsets = {name: float(track.get("offset", 0.0)) for name, track in tracks.items()}
         except ValueError:  # cut off while being written: the tracks start together
             offsets = {}
+    for stale in folder.glob("*.redacting"):  # left by an earlier redaction that crashed
+        stale.unlink(missing_ok=True)
     changed = 0
     for name in TRACKS:
         chunks = sorted(folder.glob(f"{name}-[0-9][0-9][0-9].flac"))
         if chunks:
             begin = offsets.get(name, 0.0)
-            for chunk in chunks:
-                seconds = _length(chunk)
+            for index, chunk in enumerate(chunks):
+                try:
+                    seconds = _length(chunk)
+                except Exception:
+                    # The chunk a crash left empty, just after it was started: no audio in
+                    # it (the player and processing skip it the same way).
+                    if index == len(chunks) - 1:
+                        continue
+                    raise
                 if start < begin + seconds and end > begin:
                     changed += _rewrite(chunk, start - begin, end - begin)
                 begin += seconds
@@ -129,20 +141,37 @@ def _move_samples(store: Store, meeting_id: int, start: float, end: float) -> in
 def redact(
     store: Store, meeting_id: int, start: float, end: float, with_audio: bool = True
 ) -> dict:
-    """Redact start..end (seconds) of a meeting: audio first (if it still exists), then the
-    text, so a failure part way can simply be run again. The caller holds the player's
-    locks and has refused meetings being recorded or processed."""
+    """Redact start..end (seconds) of a meeting. Audio first (if it still exists): a file
+    open in another program raises PermissionError before anything changed. Any other audio
+    failure still lets the text go, and is reported, so running it again finishes the job.
+    Then the lines, everything made from them (the summary and action items, which may
+    repeat the words; notes and snapshots taken during the stretch), the speakers' samples,
+    and the database's deleted pages. The caller holds the player's locks and has refused
+    meetings being recorded, processed or summarized."""
     folder = Path(store.meeting(meeting_id)["folder"])
-    files = 0
+    files, audio_error = 0, None
     if with_audio and folder.is_dir():
         drop_playback(folder)
-        files = silence(folder, start, end)
+        try:
+            files = silence(folder, max(0.0, start - AUDIO_PAD), end + AUDIO_PAD)
+        except PermissionError:
+            raise
+        except Exception as exc:  # a damaged file: the words still leave the text
+            audio_error = str(exc) or type(exc).__name__
     removed, replaced = store.redact_lines(meeting_id, start, end)
+    derived = store.forget_derived(meeting_id, start, end)
+    for note_id in derived["snapshots"]:
+        snapshot.image_path(folder, note_id).unlink(missing_ok=True)
     moved = _move_samples(store, meeting_id, start, end)
-    store.scrub_deleted_text()
+    scrubbed = store.scrub_deleted_text()
     return {
         "audio_files": files,
+        "audio_error": audio_error,
         "lines_removed": removed,
         "lines_redacted": replaced,
         "samples_moved": moved,
+        "summary_removed": derived["summary"],
+        "items_removed": derived["items"],
+        "notes_removed": len(derived["notes"]),
+        "scrubbed": scrubbed,
     }

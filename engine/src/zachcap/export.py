@@ -121,6 +121,14 @@ def file_name(store: Store, meeting_id: int, fmt: str, with_id: bool = False) ->
 _writing = threading.Lock()  # exports run on request threads and in the background
 
 
+def _own_copies(folder: Path, meeting_id: int) -> list[Path]:
+    """The files ZachCap wrote for a meeting: named exactly as file_name() makes them
+    ("2026-11-20 0900 Title (M12).md", same capitals). A file of the user's own that only
+    happens to end in "(M12).md" is never touched (Windows matches names ignoring case)."""
+    own = re.compile(rf"\d{{4}}-\d{{2}}-\d{{2}} \d{{4}} .+ \(M{meeting_id}\)\.md")
+    return [path for path in folder.glob(f"* (M{meeting_id}).md") if own.fullmatch(path.name)]
+
+
 def _export_folder(store: Store) -> Path | None:
     folder = store.setting("export_folder")
     return Path(folder) if folder and Path(folder).is_dir() else None
@@ -151,7 +159,7 @@ def auto_export(store: Store, meeting_id: int) -> Path | None:
     with _writing:
         if not _write_whole(target, markdown(store, meeting_id)):
             return None
-        for old in folder.glob(f"* (M{meeting_id}).md"):  # the copy under an earlier title
+        for old in _own_copies(folder, meeting_id):  # the copy under an earlier title
             if old != target:
                 with contextlib.suppress(OSError):  # open in another app: it goes next time
                     old.unlink(missing_ok=True)
@@ -166,7 +174,7 @@ def forget(store: Store, meeting_id: int, day: date) -> None:
     if folder is None:
         return
     with _writing:
-        for old in folder.glob(f"* (M{meeting_id}).md"):
+        for old in _own_copies(folder, meeting_id):
             with contextlib.suppress(OSError):
                 old.unlink(missing_ok=True)
     refresh_work_logs(store, day)

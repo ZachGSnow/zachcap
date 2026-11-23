@@ -32,11 +32,21 @@ def billable_hours(seconds: float | None) -> float:
     return math.ceil(minutes / BILLING_MINUTES) * BILLING_MINUTES / 60
 
 
+ABBREVIATIONS = {"dr", "mr", "mrs", "ms", "st", "vs", "etc", "e.g", "i.e", "approx", "no", "jr"}
+
+
 def first_sentence(text: str, limit: int = NOTE_LENGTH) -> str:
-    """The overview's first sentence, for a one-line time entry."""
+    """The overview's first sentence, for a one-line time entry ("Met Dr. Lee about the
+    rollout." is one sentence, and so is one with an initial, "J. Smith")."""
     text = " ".join(text.split())
-    match = re.match(r"(.+?[.!?])(\s|$)", text)
-    sentence = match.group(1) if match else text
+    sentence = text
+    for end in re.finditer(r"[.!?](?=\s|$)", text):
+        words = text[: end.start()].split()
+        word = words[-1].lower() if words else ""
+        if end.group() == "." and (word in ABBREVIATIONS or len(word) == 1):
+            continue
+        sentence = text[: end.end()]
+        break
     return sentence if len(sentence) <= limit else sentence[: limit - 3].rstrip(" ,;:") + "..."
 
 
@@ -50,15 +60,9 @@ def build(store: Store, period: str, day: date) -> dict:
     """The work log for the day or week containing ``day``."""
     start, end = period_range(period, day)
     me = store.me()["name"]
-    participants = store.participants()
-    meetings = sorted(
-        (
-            m
-            for m in store.meetings()
-            if start.isoformat() <= m["started_at"][:10] <= end.isoformat()
-        ),
-        key=lambda m: m["started_at"],
-    )
+    # Only the period's meetings are read: the log is rebuilt on every change to one of them.
+    meetings = store.meetings_between(start.isoformat(), end.isoformat())
+    participants = store.participants([m["id"] for m in meetings])
     days: dict[str, list[dict]] = {}
     your_items: list[dict] = []
     waiting_on: list[dict] = []

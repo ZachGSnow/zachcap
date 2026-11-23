@@ -697,3 +697,108 @@ def test_a_sound_check_reports_both_sides_and_keeps_nothing(client: TestClient, 
     client.post("/api/record/start", headers=AUTH, json={})
     assert client.post("/api/soundcheck", headers=AUTH).status_code == 409  # not mid-meeting
     client.post("/api/record/stop", headers=AUTH)
+
+
+def raw_library_bytes(home: Path) -> bytes:
+    """The database files as they sit on disk (the main file and its write-ahead log)."""
+    return b"".join(p.read_bytes() for p in home.glob("zachcap.db*") if p.is_file())
+
+
+def test_redacting_also_removes_what_was_made_from_the_words(client: TestClient, tmp_path):
+    from PIL import Image
+
+    from zachcap import snapshot
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    client.put("/api/settings", headers=AUTH, json={"export_folder": str(vault)})
+    folder = tmp_path / "call"
+    meeting_id, _ = a_support_call(folder)
+    store = Store()
+    content = {"title": "Support", "overview": "Dana read out zebra99 for the admin account."}
+    store.save_summary(meeting_id, "claude-opus-5-5", content, 1, 1, 0.0)
+    store.replace_action_items(meeting_id, [{"owner": "Dana", "task": "Rotate zebra99 tonight"}])
+    store.add_note(meeting_id, 3.0, "note", "admin password zebra99")
+    shot = store.add_note(meeting_id, 3.5, "snapshot", "Password: zebra99")
+    kept = store.add_note(meeting_id, 5.5, "note", "Thanked Dana")
+    store.close()
+    picture = snapshot.image_path(folder, shot)
+    picture.parent.mkdir(parents=True)
+    Image.new("RGB", (8, 8)).save(picture)
+
+    redacted = client.post(
+        f"/api/meetings/{meeting_id}/redact", headers=AUTH, json={"start": 1.9, "end": 4.1}
+    ).json()
+
+    assert redacted["summary_removed"] and redacted["items_removed"] == 1
+    assert redacted["notes_removed"] == 2 and redacted["scrubbed"]
+    meeting = client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()
+    assert meeting["summary"] is None and meeting["action_items"] == []
+    assert [n["id"] for n in meeting["notes"]] == [kept]
+    assert not picture.exists()
+    assert "zebra99" not in next(vault.glob("*.md")).read_text(encoding="utf-8")
+    assert b"zebra99" not in raw_library_bytes(tmp_path)  # not even in freed pages
+
+
+def test_an_empty_chunk_left_by_a_crash_doesnt_stop_a_redaction(client: TestClient, tmp_path):
+    folder = tmp_path / "call"
+    meeting_id, _ = a_support_call(folder)
+    (folder / "mic-001.flac").write_bytes(b"")  # started just before the engine died
+
+    redacted = client.post(
+        f"/api/meetings/{meeting_id}/redact", headers=AUTH, json={"start": 2.0, "end": 4.0}
+    )
+
+    assert redacted.status_code == 200 and redacted.json()["audio_error"] is None
+    assert client.get("/api/search?q=zebra99", headers=AUTH).json() == []
+
+
+def test_a_summary_being_written_and_a_redaction_dont_overlap(
+    client: TestClient, tmp_path, monkeypatch
+):
+    import threading
+
+    from zachcap import summarize
+
+    meeting_id, _ = a_support_call(tmp_path / "call")
+    writing, release = threading.Event(), threading.Event()
+
+    def slow_summary(store, meeting, template=None):
+        writing.set()
+        release.wait(10)
+
+    monkeypatch.setattr(summarize, "summarize", slow_summary)
+    summary = threading.Thread(
+        target=lambda: client.post(f"/api/meetings/{meeting_id}/summary", headers=AUTH, json={})
+    )
+    summary.start()
+    assert writing.wait(5)
+    refused = client.post(
+        f"/api/meetings/{meeting_id}/redact", headers=AUTH, json={"start": 2.0, "end": 4.0}
+    )
+    assert refused.status_code == 409 and "summary" in refused.json()["detail"]
+    assert client.post(f"/api/meetings/{meeting_id}/process", headers=AUTH).status_code == 409
+    release.set()
+    summary.join(10)
+    done = client.post(
+        f"/api/meetings/{meeting_id}/redact", headers=AUTH, json={"start": 2.0, "end": 4.0}
+    )
+    assert done.status_code == 200
+
+
+def test_recordings_and_samples_arent_kept_in_the_apps_cache(client: TestClient, tmp_path):
+    meeting_id, _ = a_support_call(tmp_path / "call")
+    speaker = client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()["speakers"][0]
+    audio_url = f"/api/meetings/{meeting_id}/audio?token=test-token"
+    sample_url = f"/api/meetings/{meeting_id}/speakers/{speaker['id']}/sample?token=test-token"
+    for url in (audio_url, sample_url):
+        assert client.get(url).headers["cache-control"] == "no-store"
+
+
+def test_a_deleted_meetings_words_leave_the_database_files(client: TestClient, tmp_path):
+    meeting_id, _ = a_support_call(tmp_path / "call")
+    assert b"zebra99" in raw_library_bytes(tmp_path)
+
+    client.delete(f"/api/meetings/{meeting_id}", headers=AUTH)
+
+    assert b"zebra99" not in raw_library_bytes(tmp_path)
