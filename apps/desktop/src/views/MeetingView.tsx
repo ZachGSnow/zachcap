@@ -638,7 +638,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
               <AskPanel meetingId={id} onSeek={seek} />
             </TabsContent>
 
-            <TabsContent value="summary">
+            <TabsContent value="summary" forceMount className="data-[state=inactive]:hidden">
               <SummaryPanel
                 meetingId={id}
                 title={meeting.title}

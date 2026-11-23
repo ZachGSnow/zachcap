@@ -72,7 +72,7 @@ export function SearchView({ onOpen }: { onOpen: (meetingId: number, at?: number
         </div>
         {hits && (
           <p className="mt-4 text-xs text-muted-foreground">
-            {hits.length === 0 ? "No matches." : `${hits.length}${hits.length === 50 ? "+" : ""} match${hits.length === 1 ? "" : "es"}`}
+            {hits.length === 0 ? "No matches." : `${hits.length}${hits.length >= 50 ? "+" : ""} match${hits.length === 1 ? "" : "es"}`}
           </p>
         )}
         <div className="mt-2 space-y-2">

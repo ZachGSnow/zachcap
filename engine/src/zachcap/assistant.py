@@ -128,11 +128,12 @@ def meetings_list(
     for m in meetings:
         day = _day(m["started_at"])
         names = participants.get(m["id"], [])
+        its_ticket = store.column(m, "ticket")  # absent in a library not yet opened to write
         if (since and day < since) or (until and day > until):
             continue
         if person and not any(person.lower() in n.lower() for n in names):
             continue
-        if ticket and (m["ticket"] or "") != ticket.strip().upper():
+        if ticket and (its_ticket or "") != ticket.strip().upper():
             continue
         if not clients.matches(client_of[m["id"]], client):
             continue
@@ -144,7 +145,7 @@ def meetings_list(
         minutes = round((m["duration"] or 0) / 60)
         found = client_of[m["id"]]["client"]
         about = (f" client {found};" if found else "") + (
-            f" ticket {m['ticket']};" if m["ticket"] else ""
+            f" ticket {its_ticket};" if its_ticket else ""
         )
         lines.append(
             f'M{m["id"]} {day} "{m["title"]}" {minutes} min;{about} '
@@ -166,8 +167,8 @@ def meeting_detail(store: Store, meeting_id: int, start_at: str | None = None) -
         return f"There is no meeting M{meeting_id}."
     begin = to_seconds(start_at) if start_at else None
     parts = [f'M{meeting_id} "{meeting["title"]}" on {_day(meeting["started_at"])}']
-    if meeting["ticket"]:
-        parts[0] += f", ticket {meeting['ticket']}"
+    if store.column(meeting, "ticket"):
+        parts[0] += f", ticket {store.column(meeting, 'ticket')}"
     summary = store.summary(meeting_id)
     if summary and begin is None:  # the first part has it; later parts only go on
         parts.append("Summary: " + json.dumps(summary["content"], ensure_ascii=False))

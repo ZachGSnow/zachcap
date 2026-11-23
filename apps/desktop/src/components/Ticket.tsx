@@ -1,5 +1,5 @@
 import { Ticket } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { Input } from "@/components/ui/input";
 import { api, type TicketFound } from "@/lib/engine";
@@ -28,9 +28,15 @@ export function TicketControl({
 }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
+  const button = useRef<HTMLButtonElement>(null);
+  // Back to the button after the box closes from the keyboard, not lost to the page.
+  const close = () => {
+    setEditing(false);
+    requestAnimationFrame(() => button.current?.focus());
+  };
 
   const save = async (next: string) => {
-    setEditing(false);
+    close();
     if (next.trim() === (ticket ?? "")) return;
     const saved = await attempt("Couldn't save the ticket", () =>
       api(`/api/meetings/${meetingId}`, { method: "PATCH", json: { ticket: next.trim() } }),
@@ -49,11 +55,12 @@ export function TicketControl({
         value={value}
         placeholder="Ticket number"
         aria-label="Ticket number"
+        maxLength={40}
         onChange={(event) => setValue(event.target.value)}
         onBlur={() => void save(value)}
         onKeyDown={(event) => {
           if (event.key === "Enter") void save(value);
-          if (event.key === "Escape") setEditing(false);
+          if (event.key === "Escape") close();
         }}
         className="h-6 w-36 font-mono text-xs"
       />
@@ -62,6 +69,7 @@ export function TicketControl({
   if (ticket) {
     return (
       <button
+        ref={button}
         onClick={edit}
         title="The ticket this meeting was about: click to change it (empty takes it off)"
         className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-xs text-foreground transition-colors hover:bg-muted"
@@ -84,7 +92,7 @@ export function TicketControl({
           {suggestion.ticket}?
         </button>
       ))}
-      <button onClick={edit} className="text-xs transition-colors hover:text-foreground">
+      <button ref={button} onClick={edit} className="text-xs transition-colors hover:text-foreground">
         {suggestions.length ? "Another ticket" : "Add a ticket"}
       </button>
     </span>

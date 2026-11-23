@@ -288,6 +288,26 @@ def test_text_is_copied_only_when_it_could_not_be_typed(monkeypatch: pytest.Monk
     assert dictator.recent[0]["text"] == "Call back at noon." and dictator.recent[0]["at"]
 
 
+def test_a_dictation_being_transcribed_when_forgotten_isnt_kept():
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(FakeTranscriber):
+        def text(self, audio, language, hotwords):
+            started.set()
+            release.wait(5)
+            return "Secret note."
+
+    dictator = dictation.Dictation(Slow(""), microphone=FakeMic)
+    dictator.start()
+    finishing = threading.Thread(target=dictator.finish, args=(None, "en", None, None, False))
+    finishing.start()
+    started.wait(5)
+    dictator.forget_recent()  # "Forget them", or dictation turned off, mid-transcription
+    release.set()
+    finishing.join(5)
+    assert list(dictator.recent) == []
+
+
 def test_only_the_last_few_dictations_are_kept():
     dictator = dictation.Dictation(FakeTranscriber("note"), microphone=FakeMic)
     for _ in range(dictation.RECENT + 2):
@@ -431,7 +451,9 @@ def test_snippets_through_the_api(client: TestClient, monkeypatch: pytest.Monkey
     assert done["text"] == "Closed; the user confirmed."  # "Ticket closed." was said
 
 
-def test_recent_dictations_are_kept_in_memory_and_can_be_forgotten(client: TestClient):
+def test_recent_dictations_are_kept_in_memory_and_can_be_forgotten(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
     client.put("/api/settings", headers=AUTH, json={"dictation": True})
     for _ in range(2):
         started = client.post("/api/dictate/start", headers=AUTH).json()
@@ -440,6 +462,12 @@ def test_recent_dictations_are_kept_in_memory_and_can_be_forgotten(client: TestC
     recent = client.get("/api/dictate/recent", headers=AUTH)
     assert [entry["text"] for entry in recent.json()] == ["Ticket closed."] * 2
     assert recent.headers["cache-control"] == "no-store"  # never cached by the page
+    copied: list = []
+    monkeypatch.setattr(dictation, "copy_to_clipboard", lambda text: copied.append(text) or True)
+    entry = recent.json()[0]["id"]
+    assert client.post(f"/api/dictate/recent/{entry}/copy", headers=AUTH).json() == {"copied": True}
+    assert copied == ["Ticket closed."]  # the engine's copy: out of clipboard history
+    assert client.post("/api/dictate/recent/999/copy", headers=AUTH).status_code == 404
     client.delete("/api/dictate/recent", headers=AUTH)
     assert client.get("/api/dictate/recent", headers=AUTH).json() == []
 

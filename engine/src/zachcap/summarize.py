@@ -367,6 +367,8 @@ def recipe(
     context += "\n"
     if summary:
         context += f"Summary:\n{json.dumps(summary['content'], ensure_ascii=False)}\n\n"
+    # The title, client, ticket and summary are masked too (the transcript and notes are).
+    context = privacy.outgoing(store, context)
     context += f"Transcript:\n{text}" + notes_text(store, meeting_id)
     model = summary_model(store)
     messages = [
@@ -382,11 +384,14 @@ def recipe(
     ]
     if change is not None:  # the document as it stands, then what to change
         messages += [
-            {"role": "assistant", "content": previous.strip()},
+            # Masked like everything else sent: an edit may have added a phone number.
+            {"role": "assistant", "content": privacy.outgoing(store, previous.strip())},
             {
                 "role": "user",
-                "content": f"Rewrite it: {change}\n\nStill use only facts from the meeting. "
-                "Answer with the whole new version and nothing else.",
+                "content": privacy.outgoing(store, f"Rewrite it: {change}")
+                + "\n\nThe version above includes edits made by hand: keep what they added. "
+                "Otherwise use only facts from the meeting. Answer with the whole new version "
+                "and nothing else.",
             },
         ]
     client = anthropic.Anthropic(api_key=key)

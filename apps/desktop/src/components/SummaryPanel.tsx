@@ -1,5 +1,5 @@
 import { Check, Copy, FileText, Loader2, Mail, Megaphone, MessageSquareQuote, RotateCw, Sparkles, Ticket } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 import { PersonAvatar } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
@@ -145,8 +145,16 @@ function KindPicker({ templates, value, onChange }: { templates: Choice[]; value
   );
 }
 
-/** One "write from this meeting" request; results from an older run are ignored. */
-type RecipeRun = { id: number; recipe: Choice; result?: RecipeResult; error?: string };
+/** One "write from this meeting" request; results from an older run are ignored. ``text``
+ * is the document as edited by hand; ``refining`` while a change is being written. */
+type RecipeRun = {
+  id: number;
+  recipe: Choice;
+  result?: RecipeResult;
+  error?: string;
+  text?: string;
+  refining?: boolean;
+};
 
 /** A document Claude wrote from the meeting, ready to copy. */
 function RecipeDialog({
@@ -154,6 +162,7 @@ function RecipeDialog({
   run,
   onClose,
   onRewrite,
+  onEdit,
   onRefine,
   onCloseAutoFocus,
 }: {
@@ -161,17 +170,17 @@ function RecipeDialog({
   run: RecipeRun | null;
   onClose: () => void;
   onRewrite: (recipe: Choice) => void;
+  /** The document edited by hand: kept with its run, so it survives closing and reopening. */
+  onEdit: (recipe: Choice, text: string) => void;
   /** Rewrite the document as it stands (edits included) the way asked. */
   onRefine: (recipe: Choice, previous: string, change: string) => void;
   onCloseAutoFocus: (event: Event) => void;
 }) {
   const writing = run !== null && !run.result && !run.error;
-  // The document can be edited before copying, and a change asked of the edited version.
-  const [text, setText] = useState("");
+  const text = run?.text ?? run?.result?.text ?? "";
   const [change, setChange] = useState("");
-  useEffect(() => setText(run?.result?.text ?? ""), [run?.result]);
   const refine = () => {
-    if (!run || !change.trim() || !text.trim()) return;
+    if (!run || run.refining || !change.trim() || !text.trim()) return;
     onRefine(run.recipe, text, change.trim());
     setChange("");
   };
@@ -182,14 +191,18 @@ function RecipeDialog({
           <DialogTitle>{run?.recipe.label}</DialogTitle>
           <DialogDescription>Written by Claude from this meeting. Read it over before you send it.</DialogDescription>
         </DialogHeader>
-        {run?.error ? (
-          <p className="text-sm text-destructive">{run.error}</p>
-        ) : run?.result ? (
+        {run?.error && (
+          <p className="text-sm text-destructive">
+            {run.result ? `Couldn't rewrite it: ${run.error}` : run.error}
+          </p>
+        )}
+        {run?.result ? (
           <>
             <Textarea
               aria-label="The document"
               value={text}
-              onChange={(event) => setText(event.target.value)}
+              readOnly={run.refining}
+              onChange={(event) => onEdit(run.recipe, event.target.value)}
               className="min-h-72 text-sm leading-relaxed"
             />
             <div className="flex items-center gap-2">
@@ -198,23 +211,26 @@ function RecipeDialog({
                 placeholder="Change it: shorter, for the client, add next steps..."
                 value={change}
                 maxLength={500}
+                disabled={run.refining}
                 onChange={(event) => setChange(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") refine();
                 }}
                 className="h-8 text-sm"
               />
-              <Button size="sm" variant="outline" disabled={!change.trim()} onClick={refine}>
-                <Sparkles className="size-3.5" />
-                Rewrite
+              <Button size="sm" variant="outline" disabled={run.refining || !change.trim()} onClick={refine}>
+                {run.refining ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+                {run.refining ? "Rewriting..." : "Rewrite"}
               </Button>
             </div>
           </>
         ) : (
-          <p className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" />
-            Writing...
-          </p>
+          !run?.error && (
+            <p className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              Writing...
+            </p>
+          )
         )}
         <DialogFooter className="items-center">
           {run?.result && (
@@ -225,7 +241,7 @@ function RecipeDialog({
           <Button variant="outline" onClick={onClose}>
             Close
           </Button>
-          <Button variant="outline" disabled={writing} onClick={() => run && onRewrite(run.recipe)}>
+          <Button variant="outline" disabled={writing || run?.refining} onClick={() => run && onRewrite(run.recipe)}>
             <RotateCw className="size-4" />
             Write again
           </Button>
@@ -292,20 +308,26 @@ export function SummaryPanel({
     const id = nextRun.current++;
     const settle = (patch: Partial<RecipeRun>) =>
       setRuns((all) => (all[recipe.id]?.id === id ? { ...all, [recipe.id]: { ...all[recipe.id], ...patch } } : all));
-    setRuns((all) => ({ ...all, [recipe.id]: { id, recipe } }));
+    // A change keeps the document as it stands until the new one arrives (and if it fails).
+    setRuns((all) => ({
+      ...all,
+      [recipe.id]: refine ? { ...all[recipe.id], id, recipe, refining: true, error: undefined } : { id, recipe },
+    }));
     setShown(recipe.id);
     setDialogOpen(true);
     try {
-      settle({
-        result: await api<RecipeResult>(`/api/meetings/${meetingId}/recipe`, {
-          method: "POST",
-          json: { recipe: recipe.id, ...refine },
-        }),
+      const result = await api<RecipeResult>(`/api/meetings/${meetingId}/recipe`, {
+        method: "POST",
+        json: { recipe: recipe.id, ...refine },
       });
+      settle({ result, text: result.text, refining: false, error: undefined });
     } catch (error) {
-      settle({ error: String(error) });
+      settle({ error: String(error), refining: false });
     }
   };
+
+  const edit = (recipe: Choice, text: string) =>
+    setRuns((all) => (all[recipe.id] ? { ...all, [recipe.id]: { ...all[recipe.id], text } } : all));
 
   const returnFocus = useReturnFocus();
 
@@ -396,6 +418,7 @@ export function SummaryPanel({
         run={shown ? (runs[shown] ?? null) : null}
         onClose={() => setDialogOpen(false)}
         onRewrite={(recipe) => void write(recipe)}
+        onEdit={edit}
         onRefine={(recipe, previous, change) => void write(recipe, { previous, change })}
         onCloseAutoFocus={returnFocus.onCloseAutoFocus}
       />

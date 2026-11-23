@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS meetings (
     audio_removed_at TEXT,                          -- set when old audio was deleted
     ticket      TEXT,                               -- the service ticket it was about
     client      TEXT,                               -- set on it; else from its people
+    ticket_source TEXT,                             -- 'auto' (filled in), 'user' (yours)
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -234,7 +235,7 @@ class Store:
     def _migrate(self) -> None:
         """Columns added after a database was created (CREATE TABLE IF NOT EXISTS skips them)."""
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(meetings)")}
-        for column in ("template", "audio_removed_at", "ticket", "client"):
+        for column in ("template", "audio_removed_at", "ticket", "client", "ticket_source"):
             if column not in columns:
                 self.db.execute(f"ALTER TABLE meetings ADD COLUMN {column} TEXT")
                 self.db.commit()
@@ -389,6 +390,32 @@ class Store:
         self.set_setting(LAST_MEETING_ID, str(meeting_id))
         self._commit()
         return meeting_id
+
+    @staticmethod
+    def column(row: sqlite3.Row, name: str):
+        """A column that newer versions added: None in a library this version hasn't opened
+        for writing yet (the read-only MCP server doesn't add columns)."""
+        return row[name] if name in row.keys() else None
+
+    def fill_ticket(self, meeting_id: int, ticket: str) -> bool:
+        """Fills in a ticket found in the meeting, only while it has none and you haven't set
+        or taken one off. Returns whether it did."""
+        written = self.db.execute(
+            "UPDATE meetings SET ticket = ?, ticket_source = 'auto' "
+            "WHERE id = ? AND ticket IS NULL AND ticket_source IS NULL",
+            (ticket, meeting_id),
+        ).rowcount
+        self._commit()
+        return bool(written)
+
+    def drop_auto_ticket(self, meeting_id: int) -> None:
+        """Takes off a ticket that was filled in on its own (never one you set)."""
+        self.db.execute(
+            "UPDATE meetings SET ticket = NULL, ticket_source = NULL "
+            "WHERE id = ? AND ticket_source = 'auto'",
+            (meeting_id,),
+        )
+        self._commit()
 
     def update_meeting(self, meeting_id: int, **fields) -> None:
         columns = ", ".join(f"{name} = ?" for name in fields)
