@@ -33,14 +33,27 @@ def fake_claude(monkeypatch, result: summarize.Summary, model: str = "claude-opu
         usage=SimpleNamespace(input_tokens=1000, output_tokens=200),
     )
 
+    written = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="Subject: Cutover\n\nThanks, all.")],
+        stop_reason="end_turn",
+        model=model,
+        usage=SimpleNamespace(input_tokens=1000, output_tokens=100),
+    )
+
     class Client:
         def __init__(self, api_key):
             calls["api_key"] = api_key
-            self.beta = SimpleNamespace(messages=SimpleNamespace(parse=self.parse))
+            self.beta = SimpleNamespace(
+                messages=SimpleNamespace(parse=self.parse, create=self.create)
+            )
 
         def parse(self, **kwargs):
             calls.update(kwargs)
             return response
+
+        def create(self, **kwargs):
+            calls.update(kwargs)
+            return written
 
     monkeypatch.setattr(summarize.anthropic, "Anthropic", Client)
     monkeypatch.setattr(summarize.apikeys, "get", lambda name: "test-key")
@@ -122,6 +135,38 @@ def test_summaries_spell_the_words_to_know(meeting, monkeypatch):
     summarize.summarize(store, meeting_id)
 
     assert "Spell these names and terms exactly as written: Contoso, Proxmox." in calls["system"]
+
+
+def test_the_kind_of_meeting_sets_the_focus_and_is_remembered(meeting, monkeypatch):
+    store, meeting_id = meeting
+    calls = fake_claude(monkeypatch, sample_summary())
+
+    summarize.summarize(store, meeting_id, template="customer")
+
+    assert "call with a customer or client" in calls["system"]
+    assert store.summary(meeting_id)["content"]["template"] == "customer"
+    calls.clear()
+    summarize.summarize(store, meeting_id)  # Regenerate keeps the meeting's kind
+    assert "call with a customer or client" in calls["system"]
+    store.set_setting("summary_template", "standup")
+    assert summarize.meeting_template(store, store.meeting(meeting_id)) == "customer"
+
+
+def test_a_recipe_writes_a_document_from_the_meeting(meeting, monkeypatch):
+    store, meeting_id = meeting
+    calls = fake_claude(monkeypatch, sample_summary())
+    summarize.summarize(store, meeting_id)
+
+    written = summarize.recipe(store, meeting_id, "email")
+
+    assert written["title"] == "Follow-up email" and written["text"].startswith("Subject:")
+    context, ask = calls["messages"][0]["content"]
+    assert context["cache_control"] == {"type": "ephemeral"}
+    assert "Summary:" in context["text"] and "Dana: I'll send the change notice" in context["text"]
+    assert ask["text"].startswith("Write the follow-up email You would send")
+    assert written["cost_usd"] == pytest.approx((1000 * 4 + 100 * 20) / 1_000_000)
+    with pytest.raises(RuntimeError, match="Unknown recipe"):
+        summarize.recipe(store, meeting_id, "poem")
 
 
 def test_timestamps_become_seconds():

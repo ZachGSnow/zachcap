@@ -1,10 +1,19 @@
-import { Check, Copy, Loader2, MessageSquareQuote, RotateCw, Sparkles } from "lucide-react";
-import type { ReactNode } from "react";
+import { Check, Copy, Loader2, Mail, Megaphone, MessageSquareQuote, RotateCw, Sparkles, Ticket } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { PersonAvatar } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { api, type ActionItem, type Summary } from "@/lib/engine";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
+import { api, type ActionItem, type RecipeResult, type Summary } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
 import { clock, toSeconds, type SpeakerColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -111,31 +120,122 @@ export async function toggleAction(item: ActionItem) {
   );
 }
 
+type Choice = { id: string; label: string };
+const RECIPE_ICON: Record<string, typeof Mail> = { email: Mail, status: Megaphone, ticket: Ticket };
+
+/** The kind of meeting a summary is written for; it decides what the summary focuses on. */
+function KindPicker({ templates, value, onChange }: { templates: Choice[]; value: string; onChange: (id: string) => void }) {
+  if (!templates.length) return null;
+  return (
+    <select
+      aria-label="Kind of meeting"
+      title="Kind of meeting: decides what the summary focuses on"
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className="h-8 rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+    >
+      {templates.map((t) => (
+        <option key={t.id} value={t.id}>
+          {t.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** A document Claude wrote from the meeting, ready to copy. */
+function RecipeDialog({
+  run,
+  onClose,
+}: {
+  run: { label: string; result?: RecipeResult; error?: string } | null;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={run !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{run?.label}</DialogTitle>
+          <DialogDescription>Written by Claude from this meeting. Read it over before you send it.</DialogDescription>
+        </DialogHeader>
+        {run?.error ? (
+          <p className="text-sm text-destructive">{run.error}</p>
+        ) : run?.result ? (
+          <Textarea readOnly value={run.result.text} className="min-h-72 text-sm leading-relaxed" />
+        ) : (
+          <p className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+            Writing...
+          </p>
+        )}
+        <DialogFooter className="items-center">
+          {run?.result && (
+            <span className="mr-auto text-xs text-muted-foreground">
+              {modelLabel(run.result.model)} {"\u00b7"} ${run.result.cost_usd.toFixed(3)}
+            </span>
+          )}
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
+          <Button disabled={!run?.result} onClick={() => run?.result && void copyText(run.result.text, "Copied")}>
+            <Copy className="size-4" />
+            Copy
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function SummaryPanel({
+  meetingId,
   title,
   summary,
   items,
   me,
   colorOf,
+  templates,
+  recipes,
+  template,
   summarizing,
   onSummarize,
   onSeek,
   onChanged,
 }: {
+  meetingId: number;
   title: string;
   summary: Summary | null;
   items: ActionItem[];
   me: string;
   colorOf: (name: string) => SpeakerColor;
+  templates: Choice[];
+  recipes: Choice[];
+  /** The kind of meeting this one was summarized as, or the default. */
+  template: string;
   /** Owned by the meeting page, so its header button and this panel can't both start one. */
   summarizing: boolean;
-  onSummarize: () => void;
+  onSummarize: (template?: string) => void;
   onSeek: (seconds: number) => void;
   onChanged: () => void;
 }) {
+  const [kind, setKind] = useState(template);
+  useEffect(() => setKind(template), [template]);
+  const [run, setRun] = useState<{ label: string; result?: RecipeResult; error?: string } | null>(null);
+
   const toggle = async (item: ActionItem) => {
     await toggleAction(item);
     onChanged();
+  };
+
+  // Started from the click (not an effect), so it runs exactly once.
+  const write = async (recipe: Choice) => {
+    setRun({ label: recipe.label });
+    try {
+      const result = await api<RecipeResult>(`/api/meetings/${meetingId}/recipe`, { method: "POST", json: { recipe: recipe.id } });
+      setRun((current) => (current?.label === recipe.label ? { label: recipe.label, result } : current));
+    } catch (error) {
+      setRun((current) => (current?.label === recipe.label ? { label: recipe.label, error: String(error) } : current));
+    }
   };
 
   if (!summary) {
@@ -147,12 +247,15 @@ export function SummaryPanel({
         <p className="mt-4 font-medium">Summarize this meeting</p>
         <p className="mt-1 max-w-sm text-sm text-muted-foreground">
           Claude reads the named transcript (text only, never audio) and pulls out decisions, action items,
-          commitments and who said what.
+          commitments and who said what. Pick the kind of meeting to set the focus.
         </p>
-        <Button className="mt-5" disabled={summarizing} onClick={onSummarize}>
-          {summarizing ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-          {summarizing ? "Summarizing..." : "Summarize with Claude"}
-        </Button>
+        <div className="mt-5 flex items-center gap-2">
+          <KindPicker templates={templates} value={kind} onChange={setKind} />
+          <Button disabled={summarizing} onClick={() => onSummarize(kind)}>
+            {summarizing ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+            {summarizing ? "Summarizing..." : "Summarize with Claude"}
+          </Button>
+        </div>
       </div>
     );
   }
@@ -162,7 +265,7 @@ export function SummaryPanel({
 
   return (
     <div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Badge variant="secondary">{modelLabel(summary.model)}</Badge>
         <span className="text-xs text-muted-foreground">
           {((summary.input_tokens + summary.output_tokens) / 1000).toFixed(1)}k tokens {"\u00b7"} $
@@ -177,12 +280,29 @@ export function SummaryPanel({
             <Copy className="size-3.5" />
             Copy
           </Button>
-          <Button size="sm" variant="outline" disabled={summarizing} onClick={onSummarize}>
+          <KindPicker templates={templates} value={kind} onChange={setKind} />
+          <Button size="sm" variant="outline" disabled={summarizing} onClick={() => onSummarize(kind)}>
             {summarizing ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
             Regenerate
           </Button>
         </div>
       </div>
+
+      {recipes.length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground">Write from this meeting:</span>
+          {recipes.map((recipe) => {
+            const Icon = RECIPE_ICON[recipe.id] ?? Sparkles;
+            return (
+              <Button key={recipe.id} size="sm" variant="ghost" className="h-7 border" onClick={() => void write(recipe)}>
+                <Icon className="size-3.5" />
+                {recipe.label}
+              </Button>
+            );
+          })}
+        </div>
+      )}
+      <RecipeDialog run={run} onClose={() => setRun(null)} />
 
       <p className="mt-5 text-[15px] leading-relaxed">{c.overview}</p>
 

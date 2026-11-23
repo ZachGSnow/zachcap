@@ -14,6 +14,7 @@ export type Meeting = {
   status: MeetingStatus;
   progress: string | null;
   participants: string[];
+  template?: string | null;
 };
 
 export type SpeakerStatus = "auto" | "suggested" | "confirmed" | "unknown" | "minor";
@@ -53,6 +54,7 @@ export type SummaryContent = {
   who_said_what?: { speaker: string; points: string[] }[];
   open_questions: string[];
   topics: { title: string; start: string }[];
+  template?: string;
 };
 
 export type Summary = {
@@ -137,8 +139,13 @@ export type Settings = {
   mic_device: string;
   output_device: string;
   vocabulary: string;
+  summary_template: string;
+  templates: { id: string; label: string }[];
+  recipes: { id: string; label: string }[];
   me: { id: number; name: string };
 };
+
+export type RecipeResult = { title: string; text: string; model: string; cost_usd: number };
 
 export type Devices = {
   inputs: { name: string; default: boolean }[];

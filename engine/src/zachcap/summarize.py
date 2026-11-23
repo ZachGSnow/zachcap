@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Literal
 
@@ -32,6 +33,70 @@ Be specific and plain: concrete decisions, owners and dates exactly as stated. C
 offhand promises ("I'll send it over", "I can bring the cable") as commitments too. \
 Don't invent anything that isn't in the transcript. Leave a list empty when there is \
 nothing for it."""
+
+# Kinds of meeting. The summary keeps the same fields, so the action item tracker works
+# for all of them, but its focus follows what matters in that kind of meeting.
+TEMPLATES = {
+    "general": ("General", ""),
+    "one_on_one": (
+        "1:1",
+        "This is a one-on-one. Focus on the other person's updates and concerns, feedback in "
+        "both directions, workload and growth, and what each of you will do before the next one.",
+    ),
+    "standup": (
+        "Standup",
+        "This is a standup. In who said what, give each person's done, next and blockers. "
+        "Keep everything short.",
+    ),
+    "customer": (
+        "Customer call",
+        "This is a call with a customer or client. Focus on their needs, problems and requests, "
+        "what was promised to them (by whom and by when), scope or pricing discussed, risks to "
+        "the relationship and next steps.",
+    ),
+    "project": (
+        "Project status",
+        "This is a project or status meeting. Focus on status by workstream, decisions, risks "
+        "and blockers, and dates with owners.",
+    ),
+    "incident": (
+        "Incident or troubleshooting",
+        "This is an incident or troubleshooting call. Cover what broke and its impact, the "
+        "timeline, what was checked or tried, the cause if found, the fix or workaround, and "
+        "follow-ups with owners.",
+    ),
+    "interview": (
+        "Interview",
+        "This is an interview. Cover the candidate's background, strengths, concerns and "
+        "answers to the key questions, and the interviewers' impressions. Don't invent ratings.",
+    ),
+}
+DEFAULT_TEMPLATE = "general"
+
+RECIPE_SYSTEM = """You write documents from a meeting for {me}, who recorded it. Use only \
+facts from the meeting, in plain text without Markdown headings, ready to paste."""
+
+# One-click documents made from a meeting.
+RECIPES = {
+    "email": (
+        "Follow-up email",
+        "Write the follow-up email {me} would send to the others after this meeting. Start "
+        "with 'Subject: ...', then a one-line thanks, a short recap of what was decided, the "
+        "action items with owners and dates, and any open questions. Write in {me}'s voice.",
+    ),
+    "status": (
+        "Status update",
+        "Write a short status update {me} could post to their team or manager about this "
+        "meeting: 3 to 6 bullet points covering what happened, decisions, risks and next "
+        "steps with owners.",
+    ),
+    "ticket": (
+        "Ticket notes",
+        "Write notes for an IT service ticket from this call, in past tense: the problem "
+        "reported, what was checked or tried, the resolution or current state, next steps "
+        "with owners, and any times promised to the customer. Keep it concise.",
+    ),
+}
 
 
 class ActionItem(BaseModel):
@@ -173,7 +238,15 @@ def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens * per_input + output_tokens * per_output) / 1_000_000
 
 
-def summarize(store: Store, meeting_id: int) -> dict:
+def meeting_template(store: Store, meeting, requested: str | None = None) -> str:
+    """The kind of meeting to summarize as: asked for, else this meeting's, else the default."""
+    for template in (requested, meeting["template"], store.setting("summary_template")):
+        if template in TEMPLATES:
+            return template
+    return DEFAULT_TEMPLATE
+
+
+def summarize(store: Store, meeting_id: int, template: str | None = None) -> dict:
     key = apikeys.get("anthropic")
     if not key:
         raise RuntimeError("Add your Anthropic API key in Settings to create summaries.")
@@ -182,6 +255,8 @@ def summarize(store: Store, meeting_id: int) -> dict:
     if not text:
         raise RuntimeError("This meeting has no transcript yet.")
 
+    template = meeting_template(store, meeting, template)
+    focus = TEMPLATES[template][1]
     started = datetime.fromisoformat(meeting["started_at"])
     model = summary_model(store)
     client = anthropic.Anthropic(api_key=key)
@@ -193,7 +268,9 @@ def summarize(store: Store, meeting_id: int) -> dict:
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
         output_config={"effort": "medium"},
-        system=SYSTEM.format(me=store.me()["name"]) + spellings(store),
+        system=SYSTEM.format(me=store.me()["name"])
+        + (f"\n\n{focus}" if focus else "")
+        + spellings(store),
         messages=[
             {
                 "role": "user",
@@ -210,7 +287,8 @@ def summarize(store: Store, meeting_id: int) -> dict:
     # A server-side fallback can answer with another model; price what actually ran.
     served_by = response.model if response.model in MODELS else model
     cost = cost_usd(served_by, usage.input_tokens, usage.output_tokens)
-    result = response.parsed_output.model_dump()
+    result = {**response.parsed_output.model_dump(), "template": template}
+    store.update_meeting(meeting_id, template=template)
     store.save_summary(
         meeting_id, response.model, result, usage.input_tokens, usage.output_tokens, cost
     )
@@ -219,3 +297,56 @@ def summarize(store: Store, meeting_id: int) -> dict:
         [{**item, "said_at": to_seconds(item["said_at"])} for item in result["action_items"]],
     )
     return result
+
+
+def recipe(store: Store, meeting_id: int, name: str) -> dict:
+    """A document made from one meeting (a follow-up email, a status update...)."""
+    if name not in RECIPES:
+        raise RuntimeError(f"Unknown recipe {name!r}")
+    key = apikeys.get("anthropic")
+    if not key:
+        raise RuntimeError("Add your Anthropic API key in Settings to use this.")
+    meeting = store.meeting(meeting_id)
+    text = transcript_text(store, meeting_id)
+    if not text:
+        raise RuntimeError("This meeting has no transcript yet.")
+    me = store.me()["name"]
+    started = datetime.fromisoformat(meeting["started_at"])
+    summary = store.summary(meeting_id)
+    context = f"Meeting: {meeting['title']}\nDate: {started:%A %B %d, %Y}\n\n"
+    if summary:
+        context += f"Summary:\n{json.dumps(summary['content'], ensure_ascii=False)}\n\n"
+    context += f"Transcript:\n{text}"
+    model = summary_model(store)
+    client = anthropic.Anthropic(api_key=key)
+    response = client.beta.messages.create(
+        model=model,
+        max_tokens=3000,
+        betas=["server-side-fallback-2026-07-01"],
+        fallbacks="default",
+        output_config={"effort": "low"},
+        system=RECIPE_SYSTEM.format(me=me) + spellings(store),
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    # The meeting is the stable part: a second recipe reads it from cache.
+                    {"type": "text", "text": context, "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": RECIPES[name][1].format(me=me)},
+                ],
+            }
+        ],
+    )
+    if response.stop_reason == "refusal":
+        raise RuntimeError("Claude didn't write that.")
+    served_by = response.model if response.model in MODELS else model
+    usage = response.usage
+    cached = getattr(usage, "cache_read_input_tokens", 0) or 0
+    created = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    effective_input = usage.input_tokens + cached * 0.1 + created * 1.25
+    return {
+        "title": RECIPES[name][0],
+        "text": "".join(b.text for b in response.content if b.type == "text").strip(),
+        "model": served_by,
+        "cost_usd": cost_usd(served_by, round(effective_input), usage.output_tokens),
+    }

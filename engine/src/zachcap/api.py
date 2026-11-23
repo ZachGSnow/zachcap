@@ -53,6 +53,14 @@ class QuestionBody(BaseModel):
     question: str
 
 
+class SummaryBody(BaseModel):
+    template: str | None = None
+
+
+class RecipeBody(BaseModel):
+    recipe: str
+
+
 class Turn(BaseModel):
     question: str
     answer: str
@@ -88,6 +96,7 @@ class SettingsBody(BaseModel):
     mic_device: str | None = None
     output_device: str | None = None
     vocabulary: str | None = None
+    summary_template: str | None = None
 
 
 class Worker:
@@ -279,17 +288,32 @@ def create_app(token: str) -> FastAPI:
         return {"deleted": meeting_id}
 
     @app.post("/api/meetings/{meeting_id}/summary", dependencies=auth)
-    def create_summary(meeting_id: int, store: Store = Depends(db)):
+    def create_summary(
+        meeting_id: int, body: SummaryBody | None = None, store: Store = Depends(db)
+    ):
         from .summarize import summarize
 
         meeting_or_404(store, meeting_id)
         try:
-            summarize(store, meeting_id)
+            summarize(store, meeting_id, body.template if body else None)
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:  # network, auth, rate limits: show the reason in the app
             raise HTTPException(status_code=502, detail=f"Claude request failed: {exc}") from exc
         return store.summary(meeting_id)
+
+    @app.post("/api/meetings/{meeting_id}/recipe", dependencies=auth)
+    def make_recipe(meeting_id: int, body: RecipeBody, store: Store = Depends(db)):
+        """A document made from the meeting: follow-up email, status update, ticket notes."""
+        from .summarize import recipe
+
+        meeting_or_404(store, meeting_id)
+        try:
+            return recipe(store, meeting_id, body.recipe)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Claude request failed: {exc}") from exc
 
     @app.post("/api/meetings/{meeting_id}/ask", dependencies=auth)
     def ask(meeting_id: int, body: QuestionBody, store: Store = Depends(db)):
@@ -523,7 +547,7 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/settings", dependencies=auth)
     def get_settings(store: Store = Depends(db)):
-        from .summarize import MODELS, summary_model
+        from .summarize import DEFAULT_TEMPLATE, MODELS, RECIPES, TEMPLATES, summary_model
 
         return {
             "summary_model": summary_model(store),
@@ -531,6 +555,9 @@ def create_app(token: str) -> FastAPI:
                 {"id": model, "label": label, "input_usd": per_in, "output_usd": per_out}
                 for model, (label, per_in, per_out) in MODELS.items()
             ],
+            "summary_template": store.setting("summary_template", DEFAULT_TEMPLATE),
+            "templates": [{"id": key, "label": label} for key, (label, _) in TEMPLATES.items()],
+            "recipes": [{"id": key, "label": label} for key, (label, _) in RECIPES.items()],
             "language": store.setting("language", "en"),
             "languages": [{"id": k, "label": v} for k, v in LANGUAGES.items()],
             "mic_device": store.setting("mic_device", ""),
@@ -541,8 +568,12 @@ def create_app(token: str) -> FastAPI:
 
     @app.put("/api/settings", dependencies=auth)
     def put_settings(body: SettingsBody, store: Store = Depends(db)):
-        from .summarize import MODELS
+        from .summarize import MODELS, TEMPLATES
 
+        if body.summary_template is not None:
+            if body.summary_template not in TEMPLATES:
+                raise HTTPException(status_code=400, detail="Unknown summary style")
+            store.set_setting("summary_template", body.summary_template)
         if body.summary_model is not None:
             if body.summary_model not in MODELS:
                 raise HTTPException(status_code=400, detail="Unknown summary model")

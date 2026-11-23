@@ -196,7 +196,9 @@ export function SettingsView() {
   useEffect(() => setName(settings?.me.name ?? ""), [settings?.me.name]);
 
   const save = async (
-    change: Partial<Record<"summary_model" | "language" | "mic_device" | "output_device" | "vocabulary", string>>,
+    change: Partial<
+      Record<"summary_model" | "language" | "mic_device" | "output_device" | "vocabulary" | "summary_template", string>
+    >,
   ) => {
     try {
       await api("/api/settings", { method: "PUT", json: change });
@@ -290,6 +292,17 @@ export function SettingsView() {
                 value: m.id,
                 label: `${m.label} (about $${((HOUR_INPUT_TOKENS * m.input_usd + HOUR_OUTPUT_TOKENS * m.output_usd) / 1e6).toFixed(2)})`,
               }))}
+            />
+          </Row>
+          <Row
+            label="Usual kind of meeting"
+            help="What summaries focus on unless you pick another kind for a meeting: action items, a customer's asks, an incident's timeline..."
+          >
+            <Select
+              label="Usual kind of meeting"
+              value={settings?.summary_template ?? "general"}
+              onChange={(value) => void save({ summary_template: value })}
+              options={(settings?.templates ?? []).map((t) => ({ value: t.id, label: t.label }))}
             />
           </Row>
         </Section>

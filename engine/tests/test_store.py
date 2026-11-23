@@ -112,6 +112,27 @@ def test_the_meeting_being_recorded_is_not_listed_yet(tmp_path: Path):
     store.close()
 
 
+def test_an_older_database_gets_the_new_columns(tmp_path: Path):
+    import sqlite3
+
+    old = sqlite3.connect(tmp_path / "old.db")
+    old.execute(
+        "CREATE TABLE meetings (id INTEGER PRIMARY KEY, title TEXT NOT NULL, started_at TEXT "
+        "NOT NULL, duration REAL, folder TEXT NOT NULL, status TEXT NOT NULL DEFAULT "
+        "'recorded', source_app TEXT, notes TEXT, created_at TEXT)"
+    )
+    old.execute(
+        "INSERT INTO meetings (title, started_at, folder) VALUES ('Old', '2026-01-01', '.')"
+    )
+    old.commit()
+    old.close()
+
+    store = Store(tmp_path / "old.db")
+
+    assert store.meetings()[0]["template"] is None
+    store.close()
+
+
 def test_a_connection_can_serve_a_request_on_another_thread(tmp_path: Path):
     # FastAPI opens a request's database connection on one worker thread and runs the
     # endpoint on another. SQLite's default check broke audio playback in the app.
