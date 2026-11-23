@@ -1,11 +1,13 @@
 //! ZachCap desktop shell: starts the Python engine, hands the UI its address and
 //! token, and lives in the tray like Tailscale (closing the window keeps it running).
 
-use std::net::TcpListener;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -150,6 +152,26 @@ fn start_engine(port: u16, token: &str) -> std::io::Result<Child> {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command.spawn()
+}
+
+/// Asks the engine to stop and save a recording in progress, waiting a few seconds at
+/// most. Runs as ZachCap exits, which includes Quit, sign-out and shutdown.
+fn stop_recording(info: &EngineInfo) {
+    let address = SocketAddr::from(([127, 0, 0, 1], info.port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_secs(1)) else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let request = format!(
+        "POST /api/record/stop HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\n\
+         Content-Length: 0\r\nConnection: close\r\n\r\n",
+        info.port, info.token
+    );
+    if stream.write_all(request.as_bytes()).is_ok() {
+        // The engine answers once the audio files are closed.
+        let _ = stream.read_to_end(&mut Vec::new());
+    }
 }
 
 fn show_main(app: &AppHandle) {
@@ -303,9 +325,13 @@ pub fn run() {
         .run(|app, event| {
             if let RunEvent::Exit = event
                 && let Some(engine) = app.try_state::<Engine>()
-                && let Some(mut child) = engine.child.lock().unwrap().take()
             {
-                let _ = child.kill();
+                if let Ok(info) = &engine.info {
+                    stop_recording(info);
+                }
+                if let Some(mut child) = engine.child.lock().unwrap().take() {
+                    let _ = child.kill();
+                }
             }
         });
 }

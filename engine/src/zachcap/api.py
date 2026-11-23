@@ -9,11 +9,14 @@ GPU work runs on a single background worker so jobs never compete for memory.
 from __future__ import annotations
 
 import io
+import json
 import queue
+import re
 import secrets as pysecrets
 import shutil
 import threading
 import traceback
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +31,7 @@ from . import __version__, apikeys, audio, paths, pipeline
 from .store import Store
 
 ALLOWED_ORIGINS = ["http://tauri.localhost", "tauri://localhost", "http://localhost:1420"]
+RECORDING_FOLDER = re.compile(r"\d{4}-\d{2}-\d{2}_\d{6}")
 LANGUAGES = {"auto": "Detect automatically", "en": "English", "es": "Spanish", "fr": "French",
              "de": "German", "pt": "Portuguese", "it": "Italian", "nl": "Dutch"}  # fmt: skip
 
@@ -79,14 +83,17 @@ class Worker:
         threading.Thread(target=self._run, name="zachcap-worker", daemon=True).start()
 
     def submit(self, meeting_id: int) -> None:
+        if self.progress.get(meeting_id) == "queued":
+            return
         self.progress[meeting_id] = "queued"
         self.jobs.put(meeting_id)
 
     def _run(self) -> None:
         while True:
             meeting_id = self.jobs.get()
-            store = Store()
+            store = None
             try:
+                store = Store()
                 pipeline.process(
                     store,
                     meeting_id,
@@ -97,11 +104,47 @@ class Worker:
                 traceback.print_exc()
                 self.progress[meeting_id] = f"failed: {exc}"
             finally:
-                store.close()
+                if store is not None:
+                    store.close()
+
+
+def recover(store: Store, submit: Callable[[int], None]) -> None:
+    """Finish what an earlier run left behind when ZachCap quit, crashed or lost power:
+    recordings that never stopped cleanly, and meetings that were waiting for or in the
+    middle of processing."""
+    for meeting in store.meetings_with_status("recording"):
+        store.update_meeting(meeting["id"], status="recorded")
+    known = {Path(folder).resolve() for folder in store.meeting_folders()}
+    for folder in sorted(paths.meetings_dir().iterdir()):
+        if not folder.is_dir() or not RECORDING_FOLDER.fullmatch(folder.name):
+            continue
+        if folder.resolve() in known or not any(folder.glob("*-000.flac")):
+            continue
+        info: dict = {}
+        info_path = folder / "recording.json"
+        if info_path.exists():
+            try:
+                info = json.loads(info_path.read_text(encoding="utf-8"))
+            except ValueError:  # cut off while being written
+                info = {"complete": False}
+            # Only recordings that were cut off: a finished one without a meeting was deleted.
+            if info.get("complete") is not False:
+                continue
+        started = datetime.strptime(folder.name, "%Y-%m-%d_%H%M%S").astimezone()
+        store.create_meeting(
+            f"Recovered recording {started:%b %d %H:%M}",
+            info.get("started_at") or started.isoformat(timespec="seconds"),
+            folder,
+        )
+    for meeting in store.meetings_with_status("recorded", "processing"):
+        submit(meeting["id"])
 
 
 def create_app(token: str) -> FastAPI:
-    app = FastAPI(title="ZachCap engine", version=__version__)
+    # No interactive docs: they would answer without the token.
+    app = FastAPI(
+        title="ZachCap engine", version=__version__, docs_url=None, redoc_url=None, openapi_url=None
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=ALLOWED_ORIGINS,
@@ -111,6 +154,34 @@ def create_app(token: str) -> FastAPI:
     worker = Worker()
     recording: dict = {}
     lock = threading.Lock()
+
+    startup = Store()
+    try:
+        recover(startup, worker.submit)
+    finally:
+        startup.close()
+
+    def finish_recording() -> int | None:
+        """Stop the recorder, if one is running, and save its meeting. Returns the meeting id.
+        Used by Stop, and by the engine itself when the app goes away mid-recording."""
+        with lock:
+            recorder = recording.pop("recorder", None)
+            meeting_id = recording.pop("meeting_id", None)
+            if recorder is None:
+                return None
+            duration = recorder.elapsed
+            try:
+                duration = recorder.stop()["duration"]
+            except Exception:  # the audio saved so far still counts
+                traceback.print_exc()
+            store = Store()
+            try:
+                store.update_meeting(meeting_id, status="recorded", duration=round(duration, 3))
+            finally:
+                store.close()
+        return meeting_id
+
+    app.state.finish_recording = finish_recording
 
     def authorized(request: Request) -> None:
         supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
@@ -347,6 +418,7 @@ def create_app(token: str) -> FastAPI:
             "elapsed": round(recorder.elapsed, 1),
             "levels": recorder.levels(),
             "devices": {name: t.device["name"] for name, t in recorder.tracks.items()},
+            "errors": recorder.errors(),
         }
 
     @app.post("/api/record/start", dependencies=auth)
@@ -365,23 +437,24 @@ def create_app(token: str) -> FastAPI:
             try:
                 recorder.start()
             except Exception as exc:
+                shutil.rmtree(folder, ignore_errors=True)
                 raise HTTPException(
                     status_code=500, detail=f"Couldn't start recording: {exc}"
                 ) from exc
-            recording.update(recorder=recorder, folder=folder, title=body.title)
-        return {"recording": True}
+            # The meeting exists from the first second, so a crash can't lose it.
+            title = body.title or f"Meeting {datetime.now():%b %d %H:%M}"
+            started = recorder.started_at or datetime.now().astimezone()
+            meeting_id = store.create_meeting(
+                title, started.isoformat(timespec="seconds"), folder, status="recording"
+            )
+            recording.update(recorder=recorder, meeting_id=meeting_id, title=title)
+        return {"recording": True, "meeting_id": meeting_id}
 
     @app.post("/api/record/stop", dependencies=auth)
-    def record_stop(store: Store = Depends(db)):
-        with lock:
-            recorder = recording.pop("recorder", None)
-            if recorder is None:
-                raise HTTPException(status_code=409, detail="Not recording")
-            info = recorder.stop()
-            title = recording.pop("title", None) or f"Meeting {datetime.now():%b %d %H:%M}"
-            meeting_id = store.create_meeting(
-                title, info["started_at"], recording.pop("folder"), duration=info["duration"]
-            )
+    def record_stop():
+        meeting_id = finish_recording()
+        if meeting_id is None:
+            raise HTTPException(status_code=409, detail="Not recording")
         worker.submit(meeting_id)
         return {"meeting_id": meeting_id}
 
@@ -471,18 +544,23 @@ def _playback_file(folder: Path, track: str = "mix") -> Path:
     return target
 
 
-def _exit_with_parent(pid: int) -> None:
-    """Exit when the desktop app's process ends, even if it couldn't stop us."""
+def _exit_with_parent(pid: int, before_exit: Callable[[], object]) -> None:
+    """Exit when the desktop app's process ends, even if it couldn't stop us. A recording
+    in progress is saved first, so quitting or a crash of the app never loses it."""
     import ctypes
     import os
 
-    synchronize, infinite = 0x00100000, 0xFFFFFFFF
-    kernel32 = ctypes.windll.kernel32
+    synchronize, infinite, no_such_process = 0x00100000, 0xFFFFFFFF, 87
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     handle = kernel32.OpenProcess(synchronize, False, pid)
-    if not handle:
-        return
-    kernel32.WaitForSingleObject(handle, infinite)
-    os._exit(0)
+    if handle:
+        kernel32.WaitForSingleObject(handle, infinite)
+    elif ctypes.get_last_error() != no_such_process:
+        return  # can't watch it (access denied?): keep running rather than guess
+    try:
+        before_exit()
+    finally:
+        os._exit(0)
 
 
 def serve(port: int, token: str) -> None:
@@ -491,10 +569,16 @@ def serve(port: int, token: str) -> None:
 
     import uvicorn
 
-    parent = os.environ.get("ZACHCAP_PARENT_PID")
-    if parent and parent.isdigit():
-        threading.Thread(target=_exit_with_parent, args=(int(parent),), daemon=True).start()
     # The player cancels audio requests whenever it seeks or switches tracks; on Windows
     # asyncio logs each one as a ConnectionResetError traceback. They are harmless.
     logging.getLogger("asyncio").setLevel(logging.CRITICAL)
-    uvicorn.run(create_app(token), host="127.0.0.1", port=port, log_level="warning")
+    app = create_app(token)
+    parent = os.environ.get("ZACHCAP_PARENT_PID")
+    if parent and parent.isdigit():
+        threading.Thread(
+            target=_exit_with_parent,
+            args=(int(parent), app.state.finish_recording),
+            name="zachcap-watchdog",
+            daemon=True,
+        ).start()
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

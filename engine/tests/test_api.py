@@ -1,9 +1,13 @@
+import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from zachcap import capture, pipeline
 from zachcap.api import create_app
+from zachcap.store import Store
 
 
 @pytest.fixture
@@ -64,3 +68,81 @@ def test_import_rejects_missing_files_and_actions_validate(client: TestClient, t
     bad = client.patch("/api/actions/1", headers=AUTH, json={"status": "maybe"})
     assert bad.status_code == 400
     assert client.get("/api/stats", headers=AUTH).json()["meetings"] == 0
+
+
+def test_there_are_no_open_docs_pages(client: TestClient):
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404
+
+
+class FakeRecorder:
+    def __init__(self, folder: Path, **devices) -> None:
+        self.folder = folder
+        self.started_at = datetime.now().astimezone()
+        self.elapsed = 12.5
+        self.tracks: dict = {}
+
+    def start(self) -> None:
+        self.folder.mkdir(parents=True)
+
+    def levels(self) -> dict:
+        return {}
+
+    def errors(self) -> list:
+        return []
+
+    def stop(self) -> dict:
+        return {"duration": 12.5}
+
+
+def test_a_recording_is_a_meeting_from_its_first_second(client: TestClient, monkeypatch):
+    monkeypatch.setattr(capture, "Recorder", FakeRecorder)
+    monkeypatch.setattr(pipeline, "process", lambda *args, **kwargs: "ready")
+
+    started = client.post("/api/record/start", headers=AUTH, json={}).json()
+    store = Store()
+    assert store.meeting(started["meeting_id"])["status"] == "recording"
+    store.close()
+    assert client.get("/api/meetings", headers=AUTH).json() == []  # not listed while recording
+
+    stopped = client.post("/api/record/stop", headers=AUTH).json()
+    assert stopped["meeting_id"] == started["meeting_id"]
+    store = Store()
+    assert store.meeting(stopped["meeting_id"])["duration"] == 12.5
+    store.close()
+    assert client.post("/api/record/stop", headers=AUTH).status_code == 409
+
+
+def test_startup_finishes_what_a_crash_left_behind(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    processed: list[int] = []
+    monkeypatch.setattr(
+        pipeline, "process", lambda store, meeting_id, log: processed.append(meeting_id)
+    )
+    meetings = tmp_path / "meetings"
+    store = Store()
+    cut_off = store.create_meeting(
+        "Cut off", "2026-11-22T09:00:00", meetings / "2026-11-22_090000", status="recording"
+    )
+    busy = store.create_meeting("Busy", "2026-11-22T10:00:00", meetings / "b", status="processing")
+    store.create_meeting("Done", "2026-11-22T11:00:00", meetings / "c", status="ready")
+    store.close()
+    # Recorded by an older version that only saved the meeting at Stop.
+    orphan = meetings / "2026-11-21_100000"
+    orphan.mkdir(parents=True)
+    (orphan / "mic-000.flac").write_bytes(b"")
+    # Finished, and its meeting deleted: stays gone.
+    deleted = meetings / "2026-11-20_100000"
+    deleted.mkdir()
+    (deleted / "mic-000.flac").write_bytes(b"")
+    (deleted / "recording.json").write_text('{"complete": true}', encoding="utf-8")
+
+    client = TestClient(create_app("test-token"))
+    deadline = time.monotonic() + 5
+    while len(processed) < 3 and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    listed = {m["title"]: m for m in client.get("/api/meetings", headers=AUTH).json()}
+    recovered = listed["Recovered recording Nov 21 10:00"]
+    assert set(listed) == {"Cut off", "Busy", "Done", "Recovered recording Nov 21 10:00"}
+    assert sorted(processed) == sorted([cut_off, busy, recovered["id"]])

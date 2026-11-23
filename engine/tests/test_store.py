@@ -2,6 +2,7 @@ import threading
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from zachcap.store import Store
 from zachcap.voiceprint import Match
@@ -86,6 +87,28 @@ def test_deleting_a_meeting_forgets_what_was_learned_from_it(tmp_path: Path):
     assert store.meetings() == [] and store.action_items() == []
     assert store.voice_library("test-model") == {}
     assert store.search("line") == []
+    store.close()
+
+
+def test_a_failed_transaction_saves_nothing(tmp_path: Path):
+    store = Store(tmp_path / "test.db")
+    meeting, _ = make_meeting(store, tmp_path)
+
+    with pytest.raises(ValueError), store.transaction():
+        store.clear_results(meeting)
+        store.update_meeting(meeting, title="Renamed")
+        raise ValueError("processing failed halfway")
+
+    assert len(store.transcript(meeting)) == 2
+    assert store.meeting(meeting)["title"] == "Sync"
+    store.close()
+
+
+def test_the_meeting_being_recorded_is_not_listed_yet(tmp_path: Path):
+    store = Store(tmp_path / "test.db")
+    live = store.create_meeting("Live", "2026-11-22T20:00:00", tmp_path, status="recording")
+    assert store.meetings() == [] and store.stats()["meetings"] == 0
+    assert [m["id"] for m in store.meetings_with_status("recording")] == [live]
     store.close()
 
 

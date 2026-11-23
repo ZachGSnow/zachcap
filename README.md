@@ -16,6 +16,7 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 ## Features
 
 - **Record any call** with one button or **Ctrl+Alt+R** from anywhere; the app lives in the tray and can start with Windows. It notices when Teams or another app starts using your microphone and offers to record.
+- **Nothing lost to a crash**: the meeting is saved from its first second. If ZachCap is quit mid-call, crashes, or Windows restarts, the audio recorded so far is recovered and processed at the next start.
 - **Import recordings** you already have (a Teams .mp4, .m4a, .mp3, .wav...), with an optional time range.
 - **Transcription on your GPU** with Whisper (`large-v3-turbo`): about 2-3 minutes per hour of audio on a 4 GB laptop GPU.
 - **Speaker separation and voice recognition**: a "Who's this?" card plays a short sample of each unknown voice; name them once and ZachCap recognizes them next time, including you on your own mic and people in the room with you.
@@ -94,7 +95,7 @@ The desktop app is Tauri 2 (React, TypeScript, Tailwind, shadcn/ui). It starts t
 
 ```powershell
 cd engine
-uv run pytest -q             # 32 tests: storage, matching, audio import, API, summaries
+uv run pytest -q             # 44 tests: storage, matching, audio, capture, crash recovery, API, summaries
 cd ..\apps\desktop
 npx tsc --noEmit; npx vite build
 ```

@@ -22,6 +22,10 @@ EMBEDDING_MODEL = MODEL
 MODEL_PAGE = f"https://huggingface.co/{MODEL}"
 
 
+class SpeakerModelUnavailable(RuntimeError):
+    """No Hugging Face token, or the model's terms aren't accepted: transcribe without names."""
+
+
 @dataclass
 class Diarization:
     turns: list[Turn]  # without overlaps, for lining words up with speakers
@@ -70,9 +74,9 @@ class Diarizer:
         try:
             pipeline = Pipeline.from_pretrained(MODEL, token=token or None)
         except Exception as exc:
-            raise RuntimeError(_access_help(token)) from exc
+            raise SpeakerModelUnavailable(_access_help(token)) from exc
         if pipeline is None:
-            raise RuntimeError(_access_help(token))
+            raise SpeakerModelUnavailable(_access_help(token))
         self.device = torch.device("cuda" if gpu else "cpu")
         self.pipeline = pipeline.to(self.device)
         self.pipeline._embedding = FixedBatchEmbedding(

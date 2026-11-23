@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +23,8 @@ CREATE TABLE IF NOT EXISTS meetings (
     started_at  TEXT NOT NULL,
     duration    REAL,
     folder      TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'recorded',  -- recorded|processing|needs_names|ready|failed
+    -- recording|recorded|processing|needs_names|ready|failed
+    status      TEXT NOT NULL DEFAULT 'recorded',
     source_app  TEXT,
     notes       TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -128,13 +131,33 @@ class Store:
         # each connection still serves one request at a time, so that is safe.
         self.db = sqlite3.connect(path or paths.database(), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        self._batch = 0
         self.db.executescript(SCHEMA)
         if not self.db.execute("SELECT 1 FROM people WHERE is_me = 1").fetchone():
             self.db.execute("INSERT INTO people (name, is_me) VALUES ('You', 1)")
-            self.db.commit()
+            self._commit()
 
     def close(self) -> None:
         self.db.close()
+
+    def _commit(self) -> None:
+        if not self._batch:
+            self.db.commit()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Everything inside is saved together, or not at all if it raises."""
+        self._batch += 1
+        try:
+            yield
+        except BaseException:
+            self._batch -= 1
+            if not self._batch:
+                self.db.rollback()
+            raise
+        self._batch -= 1
+        if not self._batch:
+            self.db.commit()
 
     # settings ---------------------------------------------------------------
 
@@ -148,17 +171,24 @@ class Store:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
-        self.db.commit()
+        self._commit()
 
     # meetings ---------------------------------------------------------------
 
     def create_meeting(self, title: str, started_at: str, folder: Path, **fields) -> int:
         cur = self.db.execute(
-            "INSERT INTO meetings (title, started_at, folder, source_app, duration) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (title, started_at, str(folder), fields.get("source_app"), fields.get("duration")),
+            "INSERT INTO meetings (title, started_at, folder, source_app, duration, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                title,
+                started_at,
+                str(folder),
+                fields.get("source_app"),
+                fields.get("duration"),
+                fields.get("status", "recorded"),
+            ),
         )
-        self.db.commit()
+        self._commit()
         return cur.lastrowid
 
     def update_meeting(self, meeting_id: int, **fields) -> None:
@@ -166,19 +196,39 @@ class Store:
         self.db.execute(
             f"UPDATE meetings SET {columns} WHERE id = ?", (*fields.values(), meeting_id)
         )
-        self.db.commit()
+        self._commit()
 
     def meeting(self, meeting_id: int) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
 
     def meetings(self) -> list[sqlite3.Row]:
-        return self.db.execute("SELECT * FROM meetings ORDER BY started_at DESC").fetchall()
+        """Every meeting except the one being recorded right now."""
+        return self.db.execute(
+            "SELECT * FROM meetings WHERE status != 'recording' ORDER BY started_at DESC"
+        ).fetchall()
+
+    def meetings_with_status(self, *statuses: str) -> list[sqlite3.Row]:
+        marks = ", ".join("?" * len(statuses))
+        return self.db.execute(
+            f"SELECT * FROM meetings WHERE status IN ({marks}) ORDER BY started_at", statuses
+        ).fetchall()
+
+    def meeting_folders(self) -> list[str]:
+        return [row["folder"] for row in self.db.execute("SELECT folder FROM meetings")]
+
+    def has_results(self, meeting_id: int) -> bool:
+        return (
+            self.db.execute(
+                "SELECT 1 FROM segments WHERE meeting_id = ? LIMIT 1", (meeting_id,)
+            ).fetchone()
+            is not None
+        )
 
     def clear_results(self, meeting_id: int) -> None:
         """Forget a meeting's transcript and speakers before processing it again."""
         self.db.execute("DELETE FROM segments WHERE meeting_id = ?", (meeting_id,))
         self.db.execute("DELETE FROM meeting_speakers WHERE meeting_id = ?", (meeting_id,))
-        self.db.commit()
+        self._commit()
 
     def refresh_status(self, meeting_id: int) -> str:
         open_speakers = self.db.execute(
@@ -218,7 +268,7 @@ class Store:
                 *(sample or (None, None)),
             ),
         )
-        self.db.commit()
+        self._commit()
         return cur.lastrowid
 
     def speakers(self, meeting_id: int) -> list[sqlite3.Row]:
@@ -239,7 +289,7 @@ class Store:
             "UPDATE meeting_speakers SET person_id = ?, status = ? WHERE id = ?",
             (person_id, status, speaker_id),
         )
-        self.db.commit()
+        self._commit()
 
     def add_segments(self, meeting_id: int, rows: list[tuple]) -> None:
         """rows: (meeting_speaker_id, track, start, end, text, confidence)"""
@@ -248,7 +298,7 @@ class Store:
             "confidence) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [(meeting_id, *row) for row in rows],
         )
-        self.db.commit()
+        self._commit()
 
     def transcript(self, meeting_id: int) -> list[sqlite3.Row]:
         return self.db.execute(
@@ -291,7 +341,7 @@ class Store:
         if not create:
             return None
         cur = self.db.execute("INSERT INTO people (name) VALUES (?)", (name,))
-        self.db.commit()
+        self._commit()
         return cur.lastrowid
 
     def add_voice_sample(
@@ -302,7 +352,7 @@ class Store:
             "VALUES (?, ?, ?, ?, ?)",
             (person_id, meeting_id, to_blob(embedding), model, seconds),
         )
-        self.db.commit()
+        self._commit()
 
     def voice_library(self, model: str) -> dict[int, list[np.ndarray]]:
         library: dict[int, list[np.ndarray]] = {}
@@ -329,7 +379,7 @@ class Store:
             "VALUES (?, ?, ?, ?, ?, ?)",
             (meeting_id, model, json.dumps(content), input_tokens, output_tokens, cost_usd),
         )
-        self.db.commit()
+        self._commit()
 
     def summary(self, meeting_id: int) -> dict | None:
         row = self.db.execute(
@@ -368,7 +418,7 @@ class Store:
                 for item in items
             ],
         )
-        self.db.commit()
+        self._commit()
 
     def action_items(
         self, status: str | None = None, meeting_id: int | None = None
@@ -394,7 +444,7 @@ class Store:
             "done_at = CASE WHEN ? = 'done' THEN datetime('now') ELSE NULL END WHERE id = ?",
             (status, status, item_id),
         )
-        self.db.commit()
+        self._commit()
 
     # overviews and stats ----------------------------------------------------
 
@@ -442,7 +492,7 @@ class Store:
             "SELECT COUNT(*) AS meetings, COALESCE(SUM(duration), 0) AS seconds, "
             f"COALESCE(SUM(CASE WHEN datetime(started_at) >= {week} THEN 1 END), 0) AS week, "
             f"COALESCE(SUM(CASE WHEN datetime(started_at) >= {week} THEN duration END), 0) "
-            "AS week_seconds FROM meetings"
+            "AS week_seconds FROM meetings WHERE status != 'recording'"
         ).fetchone()
         open_items = self.db.execute(
             "SELECT COUNT(*) FROM action_items WHERE status = 'open'"
@@ -457,7 +507,7 @@ class Store:
         existing = self.person_id(name, create=False)
         if existing is None or existing == person_id:
             self.db.execute("UPDATE people SET name = ? WHERE id = ?", (name, person_id))
-            self.db.commit()
+            self._commit()
             return person_id
         for table in ("meeting_speakers", "voice_samples"):
             self.db.execute(
@@ -467,12 +517,12 @@ class Store:
         if is_me and is_me["is_me"]:
             self.db.execute("UPDATE people SET is_me = 1 WHERE id = ?", (existing,))
         self.db.execute("DELETE FROM people WHERE id = ?", (person_id,))
-        self.db.commit()
+        self._commit()
         return existing
 
     def forget_voice(self, person_id: int) -> None:
         self.db.execute("DELETE FROM voice_samples WHERE person_id = ?", (person_id,))
-        self.db.commit()
+        self._commit()
 
     def delete_person(self, person_id: int) -> None:
         self.db.execute(
@@ -480,13 +530,13 @@ class Store:
             (person_id,),
         )
         self.db.execute("DELETE FROM people WHERE id = ? AND is_me = 0", (person_id,))
-        self.db.commit()
+        self._commit()
 
     def delete_meeting(self, meeting_id: int) -> None:
         """Remove a meeting and everything learned from it, voice samples included."""
         self.db.execute("DELETE FROM voice_samples WHERE meeting_id = ?", (meeting_id,))
         self.db.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
-        self.db.commit()
+        self._commit()
 
     def reassign_segment(self, segment_id: int, name: str) -> None:
         """Give one transcript line to a different person (creating them if new)."""
@@ -515,4 +565,4 @@ class Store:
         self.db.execute(
             "UPDATE segments SET meeting_speaker_id = ? WHERE id = ?", (speaker_id, segment_id)
         )
-        self.db.commit()
+        self._commit()

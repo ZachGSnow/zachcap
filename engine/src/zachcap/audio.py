@@ -13,10 +13,19 @@ import soundfile as sf
 from scipy.signal import resample_poly
 
 RATE = 16000
+# libsndfile reports about 2**63 frames for a FLAC file whose writer never closed it.
+UNKNOWN_LENGTH = 2**62
 
 
 def load_mono_16k(path: Path) -> np.ndarray:
-    audio, rate = sf.read(path, dtype="float32", always_2d=True)
+    try:
+        if sf.info(path).frames >= UNKNOWN_LENGTH:
+            raise ValueError(f"{path.name} was never finished")
+        audio, rate = sf.read(path, dtype="float32", always_2d=True)
+    except (RuntimeError, ValueError, MemoryError):
+        # The chunk being written when ZachCap quit or crashed has no length in its
+        # header; FFmpeg decodes whatever audio it holds.
+        return decode_media(path)
     mono = audio.mean(axis=1)
     if rate != RATE:
         g = gcd(rate, RATE)
@@ -33,7 +42,17 @@ def load_track(folder: Path, name: str) -> np.ndarray | None:
     """
     chunks = sorted(folder.glob(f"{name}-[0-9][0-9][0-9].flac"))
     if chunks:
-        audio = np.concatenate([load_mono_16k(chunk) for chunk in chunks])
+        parts = []
+        for index, chunk in enumerate(chunks):
+            try:
+                parts.append(load_mono_16k(chunk))
+            except Exception:
+                # The chunk started just before a crash can hold no audio at all.
+                if index < len(chunks) - 1:
+                    raise
+        if not parts:
+            return None
+        audio = np.concatenate(parts)
         info_path = folder / "recording.json"
         if info_path.exists():
             info = json.loads(info_path.read_text(encoding="utf-8"))

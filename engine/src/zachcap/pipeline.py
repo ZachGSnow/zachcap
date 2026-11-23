@@ -24,50 +24,20 @@ SpeakerKey = tuple[str, str]  # (track, diarization label)
 
 
 def process(store: Store, meeting_id: int, log: Log = print) -> str:
+    """Transcribe and label a meeting. The new results replace the old ones in one step,
+    only once everything worked: a failed reprocess keeps the last good transcript."""
     meeting = store.meeting(meeting_id)
     if meeting is None:
         raise ValueError(f"No meeting {meeting_id}")
+    previous = meeting["status"]
+    had_results = store.has_results(meeting_id)
     store.update_meeting(meeting_id, status="processing")
-    store.clear_results(meeting_id)
     started = time.perf_counter()
     try:
         tracks = _load_tracks(Path(meeting["folder"]), log)
         duration = max(len(a) for a in tracks.values()) / audio.RATE
-
-        from .asr import Transcriber
-
-        log(f"transcribing {duration / 60:.1f} min of audio")
-        t = time.perf_counter()
-        asr = Transcriber()
-        language = store.setting("language", "en")
-        language = None if language == "auto" else language
-        words = {name: asr.words(a, language=language) for name, a in tracks.items()}
-        asr.close()
-        log(
-            f"transcribed {duration / 60:.1f} min on {asr.device} "
-            f"in {time.perf_counter() - t:.0f} s"
-        )
-
-        from .diarize import EMBEDDING_MODEL, Diarization, Diarizer
-
-        log("separating speakers")
-        t = time.perf_counter()
-        separated = True
-        try:
-            diarizer = Diarizer(apikeys.get("huggingface"))
-        except RuntimeError as exc:
-            # Still useful without it: one speaker per track ("You" and "Call audio").
-            log(f"speaker separation unavailable: {exc}")
-            separated = False
-            diarized = {
-                name: Diarization([transcript.Turn(0.0, len(a) / audio.RATE, name)], {})
-                for name, a in tracks.items()
-                if words[name]
-            }
-        else:
-            diarized = {name: diarizer.run(a) for name, a in tracks.items() if words[name]}
-            diarizer.close()
-            log(f"separated speakers in {time.perf_counter() - t:.0f} s")
+        words = _transcribe(store, tracks, duration, log)
+        diarized, separated = _diarize(tracks, words, log)
 
         utterances = {
             name: transcript.build_utterances(name, words[name], result.turns)
@@ -78,18 +48,70 @@ def process(store: Store, meeting_id: int, log: Log = print) -> str:
             if echo:
                 log(f"dropped {len(echo)} mic lines that were echo of the speakers")
 
-        if separated:
-            _store_results(store, meeting_id, utterances, diarized, EMBEDDING_MODEL)
-        else:
-            _store_unseparated(store, meeting_id, utterances)
-        store.update_meeting(meeting_id, duration=round(duration, 3))
-        status = store.refresh_status(meeting_id)
+        from .diarize import EMBEDDING_MODEL
+
+        with store.transaction():
+            if store.meeting(meeting_id) is None:
+                log("the meeting was deleted while it was being processed")
+                return "deleted"
+            store.clear_results(meeting_id)
+            if separated:
+                _store_results(store, meeting_id, utterances, diarized, EMBEDDING_MODEL)
+            else:
+                _store_unseparated(store, meeting_id, utterances)
+            store.update_meeting(meeting_id, duration=round(duration, 3))
+            status = store.refresh_status(meeting_id)
         done = f"done in {time.perf_counter() - started:.0f} s"
         log(done if separated else f"{done}; add a Hugging Face token, then Reprocess for names")
         return status
     except Exception:
-        store.update_meeting(meeting_id, status="failed")
+        if store.meeting(meeting_id) is not None:
+            keep = had_results and previous in ("ready", "needs_names")
+            store.update_meeting(meeting_id, status=previous if keep else "failed")
         raise
+
+
+def _transcribe(store: Store, tracks: dict, duration: float, log: Log) -> dict:
+    from .asr import Transcriber
+
+    log(f"transcribing {duration / 60:.1f} min of audio")
+    started = time.perf_counter()
+    asr = Transcriber()
+    try:
+        language = store.setting("language", "en")
+        language = None if language == "auto" else language
+        words = {name: asr.words(a, language=language) for name, a in tracks.items()}
+    finally:
+        asr.close()  # frees the GPU for the speaker model, even after an error
+    log(
+        f"transcribed {duration / 60:.1f} min on {asr.device} "
+        f"in {time.perf_counter() - started:.0f} s"
+    )
+    return words
+
+
+def _diarize(tracks: dict, words: dict, log: Log) -> tuple[dict, bool]:
+    """Speaker turns per track, and whether speakers were really separated."""
+    from .diarize import Diarization, Diarizer, SpeakerModelUnavailable
+
+    log("separating speakers")
+    started = time.perf_counter()
+    try:
+        diarizer = Diarizer(apikeys.get("huggingface"))
+    except SpeakerModelUnavailable as exc:
+        # Still useful without it: one speaker per track ("You" and "Call audio").
+        log(f"speaker separation unavailable: {exc}")
+        return {
+            name: Diarization([transcript.Turn(0.0, len(a) / audio.RATE, name)], {})
+            for name, a in tracks.items()
+            if words[name]
+        }, False
+    try:
+        diarized = {name: diarizer.run(a) for name, a in tracks.items() if words[name]}
+    finally:
+        diarizer.close()
+    log(f"separated speakers in {time.perf_counter() - started:.0f} s")
+    return diarized, True
 
 
 def name_speaker(store: Store, meeting_id: int, speaker_ref: str, name: str) -> None:
@@ -130,14 +152,18 @@ def resolve_speaker(store: Store, meeting_id: int, ref: str):
 
 def _load_tracks(folder: Path, log: Log) -> dict[str, np.ndarray]:
     tracks = {}
+    found = False
     for name in ("mic", "system"):
         data = audio.load_track(folder, name)
         if data is None:
             continue
+        found = True
         if audio.dbfs(data) <= SILENT_TRACK_DBFS:
             log(f"{name} track is silent, skipped")
             continue
         tracks[name] = data
+    if not found:
+        raise RuntimeError(f"This meeting's audio is missing. ZachCap expected it in {folder}.")
     if not tracks:
         raise RuntimeError(
             "Nothing to transcribe: your microphone and the computer audio were both silent. "
