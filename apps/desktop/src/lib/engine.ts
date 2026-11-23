@@ -179,6 +179,8 @@ export type Settings = {
   mask_before_claude: boolean;
   /** Count down and stop when the call ends, or after ten quiet minutes. */
   stop_when_call_ends: boolean;
+  /** Keep a daily and weekly work log in the export folder too. */
+  export_work_log: boolean;
   templates: { id: string; label: string }[];
   recipes: { id: string; label: string }[];
   me: { id: number; name: string };
@@ -271,3 +273,46 @@ export async function waitForEngine(timeoutMs = 180_000): Promise<void> {
     }
   }
 }
+
+export type WorkLogItem = {
+  id: number;
+  owner: string;
+  task: string;
+  due: string | null;
+  status: "open" | "done";
+  kind: string;
+  said_at: number | null;
+  meeting_id?: number;
+  meeting_title?: string;
+};
+
+export type WorkLogMeeting = {
+  id: number;
+  title: string;
+  started_at: string;
+  /** "09:00-09:37" */
+  time: string;
+  seconds: number;
+  /** Rounded up to the quarter hour. */
+  hours: number;
+  people: string[];
+  overview: string;
+  /** The overview's first sentence, for a time entry. */
+  note: string;
+  decisions: string[];
+  items: WorkLogItem[];
+  status: string;
+};
+
+export type WorkLog = {
+  period: "day" | "week";
+  start: string;
+  end: string;
+  title: string;
+  me: string;
+  totals: { meetings: number; seconds: number; hours: number };
+  days: { day: string; label: string; meetings: WorkLogMeeting[] }[];
+  your_items: WorkLogItem[];
+  waiting_on: WorkLogItem[];
+  markdown: string;
+};

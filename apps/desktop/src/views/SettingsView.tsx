@@ -54,6 +54,7 @@ type SettingsChange = Partial<{
   keep_audio_days: number;
   mask_before_claude: boolean;
   stop_when_call_ends: boolean;
+  export_work_log: boolean;
 }>;
 
 const THEMES: { value: Theme; label: string }[] = [
@@ -506,6 +507,19 @@ export function SettingsView() {
               </Button>
             )}
           </Row>
+          {settings?.export_folder && (
+            <Row
+              label="Work logs there too"
+              help="A daily and a weekly work log (meetings, action items, time entries) next to the meetings, kept up to date: Work log 2026-11-23.md, Work log 2026-W48.md."
+            >
+              <Switch
+                className="ml-auto"
+                aria-label="Keep work logs in the export folder"
+                checked={settings.export_work_log}
+                onCheckedChange={(on) => void save({ export_work_log: on })}
+              />
+            </Row>
+          )}
           <Row
             label="Keep recordings"
             help="After this, a meeting's audio is deleted; its transcript, summary, notes and the voices it taught stay. It can't be played or reprocessed after."

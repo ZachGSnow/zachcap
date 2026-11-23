@@ -36,7 +36,8 @@ def test_the_server_offers_read_only_tools_over_the_library(library):
     tools = asyncio.run(server.list_tools())
 
     assert {t.name for t in tools} == {
-        "search_meetings", "list_meetings", "get_meeting", "list_action_items", "list_people"
+        "search_meetings", "list_meetings", "get_meeting", "list_action_items", "list_people",
+        "get_work_log",
     }  # fmt: skip
     assert all(t.annotations.read_only_hint for t in tools)
     found = call(server, "search_meetings", {"query": "change notice"})
