@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { ShortcutAction } from "@/lib/shortcuts";
+
 /** Connection to the local Python engine (127.0.0.1 only, token-protected). */
 export type EngineInfo = { port: number; token: string };
 
@@ -212,8 +214,10 @@ export type Settings = {
   export_work_log: boolean;
   /** When a sound check last heard both sides (null: never). */
   soundcheck_passed: string | null;
-  /** Hold Ctrl+Alt+D to dictate into any app. */
+  /** Hold the dictation keys to dictate into any app. */
   dictation: boolean;
+  /** The keys for each global shortcut: picked in Settings, or the defaults. */
+  shortcuts: Record<ShortcutAction, string>;
   templates: { id: string; label: string }[];
   recipes: { id: string; label: string }[];
   me: { id: number; name: string };

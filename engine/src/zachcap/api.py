@@ -44,6 +44,7 @@ from . import (
     privacy,
     prompts,
     redact,
+    shortcuts,
     watchfolder,
 )
 from . import vocabulary as words
@@ -166,7 +167,8 @@ class SettingsBody(BaseModel):
     mask_before_claude: bool | None = None
     stop_when_call_ends: bool | None = None
     export_work_log: bool | None = None  # keep a daily and weekly work log in the export folder
-    dictation: bool | None = None  # hold Ctrl+Alt+D to dictate into any app
+    dictation: bool | None = None  # hold the dictation keys to dictate into any app
+    shortcuts: dict[str, str] | None = None  # new keys for some shortcuts, "" for the default
     also_answer_to: str | None = None  # other names you answer to, comma-separated
     watch_folder: str | None = None  # "" turns the watch folder off
     watch_existing: bool = False  # with watch_folder: import the files already there too
@@ -745,7 +747,8 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=409, detail="Not recording")
         note_id = store.add_note(meeting_id, recorder.elapsed, "snapshot", "")
         try:
-            shot = snapshot.take(Path(meeting["folder"]), note_id)
+            keys = shortcuts.current(store)["snapshot"]
+            shot = snapshot.take(Path(meeting["folder"]), note_id, keys)
         except snapshot.SnapshotError as exc:  # nothing right to capture: say why
             store.delete_note(note_id)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1215,6 +1218,7 @@ def create_app(token: str) -> FastAPI:
             "stop_when_call_ends": store.setting("stop_when_call_ends", "1") == "1",
             "export_work_log": store.setting("export_work_log") == "1",
             "dictation": store.setting(dictation.SETTING) == "1",
+            "shortcuts": shortcuts.current(store),
             "soundcheck_passed": store.setting("soundcheck_passed"),
             "templates": prompts.choices(store, "template"),
             "recipes": prompts.choices(store, "recipe"),
@@ -1230,6 +1234,11 @@ def create_app(token: str) -> FastAPI:
     def put_settings(body: SettingsBody, store: Store = Depends(db)):
         from .summarize import MODELS
 
+        if body.shortcuts:  # first: keys that can't be used change nothing
+            try:
+                shortcuts.change(store, body.shortcuts)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         if body.summary_template is not None:
             if prompts.get(store, "template", body.summary_template) is None:
                 raise HTTPException(status_code=400, detail="Unknown kind of meeting")

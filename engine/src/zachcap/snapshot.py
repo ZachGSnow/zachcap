@@ -138,7 +138,7 @@ def _top_windows(user32) -> list[int]:
     return found
 
 
-def _meeting_window(user32, ours: set[int]) -> tuple[int, str] | None:
+def _meeting_window(user32, ours: set[int], keys: str = "Ctrl+Alt+S") -> tuple[int, str] | None:
     """The front-most window of the meeting app holding the microphone now: a call app's
     (Teams, Zoom) before a browser's, and a browser's only when it has just the one window
     (any other could show anything). Raises SnapshotError when the call's windows are all
@@ -171,19 +171,19 @@ def _meeting_window(user32, ours: set[int]) -> tuple[int, str] | None:
     if found:
         raise SnapshotError(
             "The call is in a browser with several windows open: bring the call's window to "
-            "the front, then press Ctrl+Alt+S"
+            f"the front, then press {keys}"
         )
     if minimized:
         raise SnapshotError("The call window is minimized: restore it, then take the snapshot")
     return None
 
 
-def call_window() -> tuple[int, str]:
-    """The window to capture. The one in front, when it isn't ZachCap (Ctrl+Alt+S from the
-    call, or from a window someone shared); when ZachCap is in front (its camera was
-    clicked), the window of the meeting app holding the microphone. Never just "the next
-    window behind", which could be an email. Returns (handle, title); raises SnapshotError
-    with the reason when there's nothing right to capture."""
+def call_window(keys: str = "Ctrl+Alt+S") -> tuple[int, str]:
+    """The window to capture. The one in front, when it isn't ZachCap (the snapshot keys,
+    ``keys``, pressed in the call, or in a window someone shared); when ZachCap is in front
+    (its camera was clicked), the window of the meeting app holding the microphone. Never
+    just "the next window behind", which could be an email. Returns (handle, title); raises
+    SnapshotError with the reason when there's nothing right to capture."""
     user32 = _user32()
     ours = _ours()
     front = user32.GetForegroundWindow()
@@ -195,11 +195,10 @@ def call_window() -> tuple[int, str]:
     ):
         chosen = front, _title(user32, front)
     else:
-        chosen = _meeting_window(user32, ours)
+        chosen = _meeting_window(user32, ours, keys)
     if chosen is None:
         raise SnapshotError(
-            "No call window to capture: bring the window you want to the front, then press "
-            "Ctrl+Alt+S"
+            f"No call window to capture: bring the window you want to the front, then press {keys}"
         )
     if _protected(user32, chosen[0]):
         raise SnapshotError(f"{chosen[1] or 'That window'} is protected from screen capture")
@@ -318,10 +317,11 @@ def read_text(image: Image.Image) -> str:
     return asyncio.run(_recognize(image))[:MAX_TEXT]
 
 
-def take(meeting_folder: Path, note_id: int) -> dict:
+def take(meeting_folder: Path, note_id: int, keys: str = "Ctrl+Alt+S") -> dict:
     """Captures the call window into the meeting folder (the picture and a thumbnail for the
-    notes list) and reads its text."""
-    hwnd, title = call_window()
+    notes list) and reads its text. ``keys`` are the snapshot keys, for what to do next when
+    there's no right window."""
+    hwnd, title = call_window(keys)
     image = grab(hwnd)
     path = image_path(meeting_folder, note_id)
     path.parent.mkdir(parents=True, exist_ok=True)

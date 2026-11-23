@@ -17,11 +17,12 @@ import {
   TriangleAlert,
   UserRound,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { PromptList } from "@/components/PromptLibrary";
 import { SETTINGS_CHANGED } from "@/components/Recording";
+import { KeysButton } from "@/components/Shortcuts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,6 +42,14 @@ import { usePoll } from "@/hooks/usePoll";
 import { useReturnFocus } from "@/hooks/useReturnFocus";
 import { api, isTauri, type Devices, type KeyStatus, type PromptLibrary, type Settings } from "@/lib/engine";
 import { attempt, copyText, reason } from "@/lib/feedback";
+import {
+  DEFAULT_KEYS,
+  setKeys,
+  showKeys,
+  useKeys,
+  type ShortcutAction,
+  type ShortcutStatus,
+} from "@/lib/shortcuts";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
 
 const KEYS = [
@@ -258,6 +267,69 @@ function Row({ label, help, children }: { label: string; help?: string; children
   );
 }
 
+const SHORTCUTS: { action: ShortcutAction; label: string; help: string }[] = [
+  { action: "record", label: "Start or stop recording", help: "Works from anywhere, even with ZachCap in the tray." },
+  {
+    action: "bookmark",
+    label: "Bookmark this moment",
+    help: "While recording, from anywhere. Summaries make sure to cover it. Held only while recording, so other apps can use these keys the rest of the time.",
+  },
+  {
+    action: "snapshot",
+    label: "Snapshot the call",
+    help: "While recording, from anywhere: a picture of the call window, and the text Windows reads in it (an error message, a hostname), saved with the meeting's notes. Held only while recording.",
+  },
+  {
+    action: "dictate",
+    label: "Dictate",
+    help: "Hold in any app to type what you say, while Dictation is on (above). Held only then.",
+  },
+];
+
+/** A global shortcut's keys, which can be changed, and a warning when another app already
+ * has them (they never reach ZachCap then). */
+function ShortcutRow({
+  action,
+  label,
+  help,
+  keys,
+  status,
+  onPick,
+}: {
+  action: ShortcutAction;
+  label: string;
+  help: string;
+  keys: string;
+  /** What the shell found for these keys (absent outside the app). */
+  status?: ShortcutStatus;
+  /** New keys, or "" for the usual ones. */
+  onPick: (action: ShortcutAction, keys: string) => Promise<void>;
+}) {
+  const found = status?.keys === keys ? status.state : undefined;
+  return (
+    <>
+      <Row label={label} help={help}>
+        <KeysButton label={label} keys={keys} onPick={(picked) => void onPick(action, picked)} />
+        {keys !== DEFAULT_KEYS[action] && (
+          <Button size="sm" variant="ghost" onClick={() => void onPick(action, "")}>
+            Reset
+          </Button>
+        )}
+      </Row>
+      {(found === "taken" || found === "invalid") && (
+        <div className="flex items-start gap-2 px-4 py-2.5 text-xs text-amber-700 dark:text-amber-300">
+          <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1">
+            {found === "taken"
+              ? `Another app on this PC already has ${showKeys(keys)}, so pressing them never reaches ZachCap. Click the keys to pick others.`
+              : `Windows can't use ${showKeys(keys)} as a shortcut. Click the keys to pick others.`}
+          </span>
+        </div>
+      )}
+    </>
+  );
+}
+
 function Select({
   label,
   value,
@@ -403,6 +475,26 @@ export function SettingsView() {
   useEffect(() => setName(settings?.me.name ?? ""), [settings?.me.name]);
   const [aliases, setAliases] = useState("");
   useEffect(() => setAliases(settings?.also_answer_to ?? ""), [settings?.also_answer_to]);
+
+  const keysNow = useKeys();
+  const [shortcutStatus, setShortcutStatus] = useState<ShortcutStatus[]>([]);
+  useEffect(() => {
+    if (isTauri()) void invoke<ShortcutStatus[]>("shortcut_status").then(setShortcutStatus, () => undefined);
+  }, []);
+  const pickKeys = useCallback(
+    async (action: ShortcutAction, keys: string) => {
+      try {
+        const saved = await api<Settings>("/api/settings", { method: "PUT", json: { shortcuts: { [action]: keys } } });
+        setKeys(saved.shortcuts);
+        if (isTauri()) setShortcutStatus(await invoke<ShortcutStatus[]>("set_shortcuts", { keys: saved.shortcuts }));
+        toast.success(keys ? `Now ${showKeys(saved.shortcuts[action])}` : `Back to ${showKeys(DEFAULT_KEYS[action])}`);
+        await refresh();
+      } catch (error) {
+        toast.error("Couldn't change the keys", { description: reason(error) });
+      }
+    },
+    [refresh],
+  );
 
   const save = async (change: SettingsChange) => {
     try {
@@ -637,39 +729,33 @@ export function SettingsView() {
 
         <Section icon={<MessageSquareText className="size-3.5" />} title="Dictation">
           <Row
-            label="Hold Ctrl+Alt+D to dictate"
+            label={`Hold ${keysNow.dictate} to dictate`}
             help="In any app: hold the keys, speak, let go, and what you said is typed where your cursor is, spelled with your Words to know. Transcribed on this computer (a small model, ready a few seconds after you turn this on); nothing is recorded or kept. If you've moved to another window by then, it's copied instead, ready to paste. During a recording, what you dictate is left out of the meeting (the call app still hears you: mute it first)."
           >
             <Switch
               className="ml-auto"
-              aria-label="Hold Ctrl+Alt+D to dictate"
+              aria-label={`Hold ${keysNow.dictate} to dictate`}
               checked={settings?.dictation ?? false}
               onCheckedChange={(on) => void save({ dictation: on })}
             />
           </Row>
           {settings?.dictation && (
-            <Row label="Try it here" help="Click in the box, hold Ctrl+Alt+D and say something.">
-              <Textarea aria-label="Try dictation here" placeholder="Hold Ctrl+Alt+D and speak" className="min-h-16 text-sm" />
+            <Row label="Try it here" help={`Click in the box, hold ${keysNow.dictate} and say something.`}>
+              <Textarea aria-label="Try dictation here" placeholder={`Hold ${keysNow.dictate} and speak`} className="min-h-16 text-sm" />
             </Row>
           )}
         </Section>
 
         <Section icon={<Keyboard className="size-3.5" />} title="Shortcuts">
-          <Row label="Start or stop recording" help="Works from anywhere, even with ZachCap in the tray.">
-            <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Ctrl + Alt + R</kbd>
-          </Row>
-          <Row
-            label="Bookmark this moment"
-            help="While recording, from anywhere. Summaries make sure to cover it. Held only while recording, so other apps can use these keys the rest of the time."
-          >
-            <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Ctrl + Alt + B</kbd>
-          </Row>
-          <Row
-            label="Snapshot the call"
-            help="While recording, from anywhere: a picture of the call window, and the text Windows reads in it (an error message, a hostname), saved with the meeting's notes. Held only while recording."
-          >
-            <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Ctrl + Alt + S</kbd>
-          </Row>
+          {SHORTCUTS.map((shortcut) => (
+            <ShortcutRow
+              key={shortcut.action}
+              {...shortcut}
+              keys={keysNow[shortcut.action]}
+              status={shortcutStatus.find((status) => status.action === shortcut.action)}
+              onPick={pickKeys}
+            />
+          ))}
           <Row label="Play or pause" help="On a meeting's page.">
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">Space</kbd>
             <kbd className="rounded-md border bg-muted px-2 py-1 font-mono text-xs">K</kbd>
