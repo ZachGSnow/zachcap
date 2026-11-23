@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from . import __version__, apikeys, audio, paths, pipeline
+from . import __version__, apikeys, audio, export, paths, pipeline
 from .store import Store
 
 ALLOWED_ORIGINS = ["http://tauri.localhost", "tauri://localhost", "http://localhost:1420"]
@@ -93,6 +93,11 @@ class NoteTextBody(BaseModel):
     text: str
 
 
+class ExportBody(BaseModel):
+    format: str
+    path: str  # chosen in the app's save dialog
+
+
 class KeyBody(BaseModel):
     value: str
 
@@ -111,6 +116,7 @@ class SettingsBody(BaseModel):
     output_device: str | None = None
     vocabulary: str | None = None
     summary_template: str | None = None
+    export_folder: str | None = None  # "" turns automatic export off
 
 
 class Worker:
@@ -139,6 +145,7 @@ class Worker:
                     log=lambda msg, m=meeting_id: self.progress.__setitem__(m, msg),
                 )
                 self.progress.pop(meeting_id, None)
+                export.auto_export(store, meeting_id)
             except Exception as exc:  # surfaced to the UI, full trace to the console
                 traceback.print_exc()
                 self.progress[meeting_id] = f"failed: {exc}"
@@ -291,6 +298,7 @@ def create_app(token: str) -> FastAPI:
         if not body.title.strip():
             raise HTTPException(status_code=400, detail="The title can't be empty")
         store.update_meeting(meeting_id, title=body.title.strip())
+        export.auto_export(store, meeting_id)
         return {"title": body.title.strip()}
 
     @app.delete("/api/meetings/{meeting_id}", dependencies=auth)
@@ -315,6 +323,7 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:  # network, auth, rate limits: show the reason in the app
             raise HTTPException(status_code=502, detail=f"Claude request failed: {exc}") from exc
+        export.auto_export(store, meeting_id)
         return store.summary(meeting_id)
 
     @app.post("/api/meetings/{meeting_id}/recipe", dependencies=auth)
@@ -372,12 +381,15 @@ def create_app(token: str) -> FastAPI:
         if not body.name.strip():
             raise HTTPException(status_code=400, detail="The name can't be empty")
         pipeline.name_speaker(store, meeting_id, str(speaker_id), body.name.strip())
+        export.auto_export(store, meeting_id)
         return {"status": store.meeting(meeting_id)["status"]}
 
     @app.post("/api/meetings/{meeting_id}/confirm", dependencies=auth)
     def confirm(meeting_id: int, store: Store = Depends(db)):
         meeting_or_404(store, meeting_id)
-        return {"confirmed": pipeline.confirm_matches(store, meeting_id)}
+        confirmed = pipeline.confirm_matches(store, meeting_id)
+        export.auto_export(store, meeting_id)
+        return {"confirmed": confirmed}
 
     @app.get("/api/meetings/{meeting_id}/audio", dependencies=auth)
     def meeting_audio(meeting_id: int, track: str = "mix", store: Store = Depends(db)):
@@ -404,6 +416,45 @@ def create_app(token: str) -> FastAPI:
         sf.write(buffer, clip, audio.RATE, format="WAV", subtype="PCM_16")
         return Response(buffer.getvalue(), media_type="audio/wav")
 
+    # exports ------------------------------------------------------------------------
+
+    def check_format(fmt: str) -> None:
+        if fmt not in export.FORMATS:
+            raise HTTPException(
+                status_code=400, detail=f"format is one of {', '.join(export.FORMATS)}"
+            )
+
+    @app.get("/api/meetings/{meeting_id}/export", dependencies=auth)
+    def export_meeting(meeting_id: int, format: str = "md", store: Store = Depends(db)):
+        """The meeting as a file, for a download."""
+        from urllib.parse import quote
+
+        meeting_or_404(store, meeting_id)
+        check_format(format)
+        name = export.file_name(store, meeting_id, format)
+        return Response(
+            export.render(store, meeting_id, format),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"},
+        )
+
+    @app.post("/api/meetings/{meeting_id}/export", dependencies=auth)
+    def export_to_file(meeting_id: int, body: ExportBody, store: Store = Depends(db)):
+        """Write the meeting to the path the user picked in the save dialog."""
+        meeting_or_404(store, meeting_id)
+        check_format(body.format)
+        target = Path(body.path)
+        if target.suffix.lower() != f".{body.format}" or not target.parent.is_dir():
+            raise HTTPException(status_code=400, detail="Pick a file name in an existing folder")
+        target.write_text(export.render(store, meeting_id, body.format), encoding="utf-8")
+        return {"path": str(target)}
+
+    @app.get("/api/meetings/{meeting_id}/export-name", dependencies=auth)
+    def export_name(meeting_id: int, format: str = "md", store: Store = Depends(db)):
+        meeting_or_404(store, meeting_id)
+        check_format(format)
+        return {"name": export.file_name(store, meeting_id, format)}
+
     # notes and bookmarks ----------------------------------------------------------
 
     def check_note(body: NoteBody) -> str:
@@ -421,6 +472,7 @@ def create_app(token: str) -> FastAPI:
         meeting_or_404(store, meeting_id)
         text = check_note(body)
         note_id = store.add_note(meeting_id, max(0.0, body.at or 0.0), body.kind, text)
+        export.auto_export(store, meeting_id)
         return dict(store.note(note_id))
 
     @app.patch("/api/notes/{note_id}", dependencies=auth)
@@ -428,11 +480,15 @@ def create_app(token: str) -> FastAPI:
         if store.note(note_id) is None:
             raise HTTPException(status_code=404, detail="No such note")
         store.update_note(note_id, body.text.strip()[:2000])
+        export.auto_export(store, store.note(note_id)["meeting_id"])
         return dict(store.note(note_id))
 
     @app.delete("/api/notes/{note_id}", dependencies=auth)
     def remove_note(note_id: int, store: Store = Depends(db)):
+        note = store.note(note_id)
         store.delete_note(note_id)
+        if note is not None:
+            export.auto_export(store, note["meeting_id"])
         return {"deleted": note_id}
 
     @app.post("/api/segments/{segment_id}/speaker", dependencies=auth)
@@ -624,6 +680,7 @@ def create_app(token: str) -> FastAPI:
                 for model, (label, per_in, per_out) in MODELS.items()
             ],
             "summary_template": store.setting("summary_template", DEFAULT_TEMPLATE),
+            "export_folder": store.setting("export_folder", ""),
             "templates": [{"id": key, "label": label} for key, (label, _) in TEMPLATES.items()],
             "recipes": [{"id": key, "label": label} for key, (label, _) in RECIPES.items()],
             "language": store.setting("language", "en"),
@@ -642,6 +699,14 @@ def create_app(token: str) -> FastAPI:
             if body.summary_template not in TEMPLATES:
                 raise HTTPException(status_code=400, detail="Unknown summary style")
             store.set_setting("summary_template", body.summary_template)
+        if body.export_folder is not None:
+            folder = body.export_folder.strip()
+            if folder and not Path(folder).is_dir():
+                raise HTTPException(status_code=400, detail="That folder doesn't exist")
+            store.set_setting("export_folder", folder)
+            if folder:  # bring the folder up to date with what's already here
+                for meeting in store.meetings():
+                    export.auto_export(store, meeting["id"])
         if body.summary_model is not None:
             if body.summary_model not in MODELS:
                 raise HTTPException(status_code=400, detail="Unknown summary model")

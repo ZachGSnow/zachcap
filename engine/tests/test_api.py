@@ -212,3 +212,45 @@ def test_notes_bookmarks_and_a_private_pause_while_recording(client: TestClient,
     client.delete(f"/api/notes/{notes[0]['id']}", headers=AUTH)
     left = client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()["notes"]
     assert [n["text"] for n in left] == ["Follow up", "Key moment"]
+
+
+def test_exports_to_a_download_a_chosen_file_and_a_folder(client: TestClient, tmp_path: Path):
+    store = Store()
+    meeting_id = store.create_meeting("Weekly sync", "2026-11-20T09:00:00", tmp_path / "audio")
+    store.close()
+
+    download = client.get(f"/api/meetings/{meeting_id}/export?format=srt", headers=AUTH)
+    assert download.status_code == 200
+    assert "2026-11-20%200900%20Weekly%20sync.srt" in download.headers["content-disposition"]
+    assert (
+        client.get(f"/api/meetings/{meeting_id}/export?format=pdf", headers=AUTH).status_code == 400
+    )
+
+    chosen = tmp_path / "out" / "notes.md"
+    chosen.parent.mkdir()
+    saved = client.post(
+        f"/api/meetings/{meeting_id}/export",
+        headers=AUTH,
+        json={"format": "md", "path": str(chosen)},
+    )
+    assert saved.status_code == 200 and chosen.read_text(encoding="utf-8").startswith(
+        "# Weekly sync"
+    )
+    wrong = client.post(
+        f"/api/meetings/{meeting_id}/export",
+        headers=AUTH,
+        json={"format": "md", "path": str(chosen.with_suffix(".txt"))},
+    )
+    assert wrong.status_code == 400
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    assert (
+        client.put(
+            "/api/settings", headers=AUTH, json={"export_folder": str(vault / "x")}
+        ).status_code
+        == 400
+    )
+    settings = client.put("/api/settings", headers=AUTH, json={"export_folder": str(vault)}).json()
+    assert settings["export_folder"] == str(vault)
+    assert [p.name for p in vault.iterdir()] == ["2026-11-20 0900 Weekly sync.md"]  # backfilled

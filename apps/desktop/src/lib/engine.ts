@@ -145,6 +145,7 @@ export type Settings = {
   output_device: string;
   vocabulary: string;
   summary_template: string;
+  export_folder: string;
   templates: { id: string; label: string }[];
   recipes: { id: string; label: string }[];
   me: { id: number; name: string };
