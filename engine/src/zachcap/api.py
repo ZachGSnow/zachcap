@@ -45,6 +45,7 @@ from . import (
     prompts,
     redact,
     shortcuts,
+    tickets,
     watchfolder,
 )
 from . import vocabulary as words
@@ -82,6 +83,11 @@ class LineSpeakerBody(BaseModel):
 
 class TitleBody(BaseModel):
     title: str
+
+
+class MeetingChange(BaseModel):
+    title: str | None = None
+    ticket: str | None = None  # "" takes it off
 
 
 class QuestionBody(BaseModel):
@@ -169,6 +175,7 @@ class SettingsBody(BaseModel):
     export_work_log: bool | None = None  # keep a daily and weekly work log in the export folder
     dictation: bool | None = None  # hold the dictation keys to dictate into any app
     shortcuts: dict[str, str] | None = None  # new keys for some shortcuts, "" for the default
+    ticket_patterns: str | None = None  # how ticket numbers look ("#######, INC-####"); "" off
     also_answer_to: str | None = None  # other names you answer to, comma-separated
     watch_folder: str | None = None  # "" turns the watch folder off
     watch_existing: bool = False  # with watch_folder: import the files already there too
@@ -223,6 +230,7 @@ class Worker:
                     log=lambda msg, m=meeting_id: self.progress.__setitem__(m, msg),
                 )
                 self.progress.pop(meeting_id, None)
+                tickets.fill(store, meeting_id)
                 export.auto_export(store, meeting_id)
             except Exception as exc:  # surfaced to the UI, full trace to the console
                 traceback.print_exc()
@@ -464,16 +472,41 @@ def create_app(token: str) -> FastAPI:
             "me": store.me()["name"],
             # Other people's lines that say your name.
             "mentions": mentions.find(store, meeting_id),
+            # Ticket numbers found in it, best first, other than the one it has.
+            "ticket_suggestions": [
+                found
+                for found in ticket_candidates(store, meeting_id)
+                if found["ticket"] != meeting["ticket"]
+            ],
         }
 
+    def ticket_candidates(store: Store, meeting_id: int) -> list[dict]:
+        try:
+            return tickets.candidates(store, meeting_id)
+        except ValueError:  # patterns saved before a stricter check: none found
+            return []
+
     @app.patch("/api/meetings/{meeting_id}", dependencies=auth)
-    def rename_meeting(meeting_id: int, body: TitleBody, store: Store = Depends(db)):
+    def change_meeting(meeting_id: int, body: MeetingChange, store: Store = Depends(db)):
+        """A new title, or the ticket it was about ("" takes the ticket off)."""
         meeting_or_404(store, meeting_id)
-        if not body.title.strip():
-            raise HTTPException(status_code=400, detail="The title can't be empty")
-        store.update_meeting(meeting_id, title=body.title.strip())
-        export.auto_export(store, meeting_id)
-        return {"title": body.title.strip()}
+        changes: dict = {}
+        if body.title is not None:
+            if not body.title.strip():
+                raise HTTPException(status_code=400, detail="The title can't be empty")
+            changes["title"] = body.title.strip()
+        if body.ticket is not None:
+            try:
+                changes["ticket"] = tickets.checked(body.ticket) or None
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if changes:
+            store.update_meeting(meeting_id, **changes)
+            if "ticket" not in changes:
+                tickets.fill(store, meeting_id)  # a ticket number typed in the title
+            export.auto_export(store, meeting_id)
+        meeting = store.meeting(meeting_id)
+        return {"title": meeting["title"], "ticket": meeting["ticket"]}
 
     @app.delete("/api/meetings/{meeting_id}", dependencies=auth)
     def delete_meeting(meeting_id: int, store: Store = Depends(db)):
@@ -687,6 +720,7 @@ def create_app(token: str) -> FastAPI:
         meeting_or_404(store, meeting_id)
         text = check_note(body)
         note_id = store.add_note(meeting_id, max(0.0, body.at or 0.0), body.kind, text)
+        tickets.fill(store, meeting_id)
         export.auto_export(store, meeting_id)
         return dict(store.note(note_id))
 
@@ -695,6 +729,7 @@ def create_app(token: str) -> FastAPI:
         if store.note(note_id) is None:
             raise HTTPException(status_code=404, detail="No such note")
         store.update_note(note_id, body.text.strip()[:2000])
+        tickets.fill(store, store.note(note_id)["meeting_id"])
         export.auto_export(store, store.note(note_id)["meeting_id"])
         return dict(store.note(note_id))
 
@@ -757,6 +792,7 @@ def create_app(token: str) -> FastAPI:
             snapshot.remove_pictures(Path(meeting["folder"]), note_id)
             raise HTTPException(status_code=400, detail=f"Couldn't take a snapshot: {exc}") from exc
         store.update_note(note_id, shot["text"])
+        tickets.fill(store, meeting_id)  # the ticket's own window, snapshotted
         with lock:
             if recording.get("meeting_id") == meeting_id:
                 recording["notes"] = recording.get("notes", 0) + 1
@@ -925,10 +961,22 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/search", dependencies=auth)
     def search(q: str, store: Store = Depends(db)):
+        # A ticket number finds the meetings about that ticket first.
+        about = [
+            {
+                "meeting_id": m["id"],
+                "title": m["title"],
+                "start": 0,
+                "speaker": "Ticket",
+                "snippet": f"[{m['ticket']}]",
+            }
+            for m in store.meetings()
+            if m["ticket"] and m["ticket"] == tickets.normalized(q)
+        ]
         try:
-            return [dict(hit) for hit in store.search(q)]
+            return about + [dict(hit) for hit in store.search(q)]
         except Exception:  # FTS syntax errors from half-typed queries
-            return []
+            return about
 
     # recording ----------------------------------------------------------------
 
@@ -969,6 +1017,7 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=409, detail="Not recording")
         text = check_note(body)
         note_id = store.add_note(recording["meeting_id"], recorder.elapsed, body.kind, text)
+        tickets.fill(store, recording["meeting_id"])
         recording["notes"] = recording.get("notes", 0) + 1
         return dict(store.note(note_id))
 
@@ -1230,6 +1279,7 @@ def create_app(token: str) -> FastAPI:
             "export_work_log": store.setting("export_work_log") == "1",
             "dictation": store.setting(dictation.SETTING) == "1",
             "shortcuts": shortcuts.current(store),
+            "ticket_patterns": store.setting(tickets.SETTING, ""),
             "soundcheck_passed": store.setting("soundcheck_passed"),
             "templates": prompts.choices(store, "template"),
             "recipes": prompts.choices(store, "recipe"),
@@ -1250,6 +1300,15 @@ def create_app(token: str) -> FastAPI:
                 shortcuts.change(store, body.shortcuts)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if body.ticket_patterns is not None:
+            written = ", ".join(p.strip() for p in body.ticket_patterns.split(",") if p.strip())
+            try:
+                tickets.patterns(written)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            store.set_setting(tickets.SETTING, written)
+            for meeting in store.meetings():  # tickets in titles and notes fill in now
+                tickets.fill(store, meeting["id"])
         if body.summary_template is not None:
             if prompts.get(store, "template", body.summary_template) is None:
                 raise HTTPException(status_code=400, detail="Unknown kind of meeting")

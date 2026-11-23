@@ -51,6 +51,7 @@ def markdown(store: Store, meeting_id: int) -> str:
         f"{started:%A %B %d, %Y %H:%M}"
         + (f" | {round((meeting['duration'] or 0) / 60)} min" if meeting["duration"] else "")
         + (f" | {', '.join(people)}" if people else "")
+        + (f" | Ticket {meeting['ticket']}" if meeting["ticket"] else "")
     )
     summary = store.summary(meeting_id)
     if summary:

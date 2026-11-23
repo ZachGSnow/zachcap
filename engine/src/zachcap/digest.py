@@ -93,6 +93,7 @@ def build(store: Store, period: str, day: date) -> dict:
                 "decisions": list(content.get("decisions") or []),
                 "items": items,
                 "status": meeting["status"],
+                "ticket": meeting["ticket"],
             }
         )
     every = [m for listed in days.values() for m in listed]
@@ -155,18 +156,18 @@ def markdown(log: dict, cite: bool = False) -> str:
     lines += [f"{count}, {_duration(totals['seconds'])}, {totals['hours']:g} h to bill.", ""]
 
     week = log["period"] == "week"
+    # A Ticket column once any meeting has one (most logs without tickets stay as they were).
+    ticketed = any(m.get("ticket") for day in log["days"] for m in day["meetings"])
+    columns = ["Time", "Hours", *(["Ticket"] if ticketed else []), "Meeting", "Note"]
+    if week:
+        columns.insert(0, "Day")
     lines += ["## Time entries", ""]
-    lines += (
-        ["| Day | Time | Hours | Meeting | Note |", "|---|---|---|---|---|"]
-        if week
-        else [
-            "| Time | Hours | Meeting | Note |",
-            "|---|---|---|---|",
-        ]
-    )
+    lines += ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
     for day in log["days"]:
         for m in day["meetings"]:
             row = [m["time"], f"{m['hours']:g}", _cell(m["title"]), _cell(m["note"])]
+            if ticketed:
+                row.insert(2, _cell(m.get("ticket") or ""))
             if week:
                 row.insert(0, f"{date.fromisoformat(day['day']):%a %d}")
             lines.append("| " + " | ".join(row) + " |")
@@ -176,7 +177,8 @@ def markdown(log: dict, cite: bool = False) -> str:
         if week:
             lines += ["", f"### {day['label']}"]
         for m in day["meetings"]:
-            heading = f"{'####' if week else '###'} {m['time']} {m['title']}"
+            ticket = f" (ticket {m['ticket']})" if m.get("ticket") else ""
+            heading = f"{'####' if week else '###'} {m['time']} {m['title']}{ticket}"
             lines += ["", heading + (f" [M{m['id']}]" if cite else ""), ""]
             if m["people"]:
                 lines += [f"With {', '.join(m['people'])}.", ""]

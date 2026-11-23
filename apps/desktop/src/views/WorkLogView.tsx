@@ -35,7 +35,7 @@ function timeEntries(log: WorkLog): string {
   return log.days
     .flatMap((day) =>
       day.meetings.map((m) =>
-        [log.period === "week" ? day.day : null, m.time, `${m.hours} h`, m.note ? `${m.title}: ${m.note}` : m.title]
+        [log.period === "week" ? day.day : null, m.time, `${m.hours} h`, m.ticket ? `Ticket ${m.ticket}` : null, m.note ? `${m.title}: ${m.note}` : m.title]
           .filter(Boolean)
           .join("  "),
       ),
@@ -208,6 +208,11 @@ export function WorkLogView({ onOpen }: { onOpen: (meetingId: number) => void })
                         <td className="w-28 py-2 pl-4 font-mono text-xs tabular-nums text-muted-foreground">{m.time}</td>
                         <td className="w-14 py-2 font-mono text-xs tabular-nums">{m.hours} h</td>
                         <td className="py-2 pr-4 [overflow-wrap:anywhere]">
+                          {m.ticket && (
+                            <span className="mr-1.5 font-mono text-xs text-muted-foreground" title="The ticket it was about">
+                              {m.ticket}
+                            </span>
+                          )}
                           <button onClick={() => onOpen(m.id)} className="text-left font-medium hover:underline">
                             {m.title}
                           </button>

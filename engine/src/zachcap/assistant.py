@@ -111,7 +111,11 @@ def search(store: Store, query: str, limit: int = 25, meeting_id: int | None = N
 
 
 def meetings_list(
-    store: Store, since: str | None = None, until: str | None = None, person: str | None = None
+    store: Store,
+    since: str | None = None,
+    until: str | None = None,
+    person: str | None = None,
+    ticket: str | None = None,
 ) -> str:
     participants = store.participants()
     lines = []
@@ -123,14 +127,17 @@ def meetings_list(
             continue
         if person and not any(person.lower() in n.lower() for n in names):
             continue
+        if ticket and (m["ticket"] or "") != ticket.strip().upper():
+            continue
         matching += 1
         if len(lines) >= MEETINGS_LIMIT:
             continue  # counted, so the note below says how many there are
         summary = store.summary(m["id"])
         overview = summary["content"]["overview"] if summary else "(not summarized)"
         minutes = round((m["duration"] or 0) / 60)
+        about = f" ticket {m['ticket']};" if m["ticket"] else ""
         lines.append(
-            f'M{m["id"]} {day} "{m["title"]}" {minutes} min; '
+            f'M{m["id"]} {day} "{m["title"]}" {minutes} min;{about} '
             f"{', '.join(names) or 'speakers not named'}. {overview}"
         )
     if matching > len(lines):
@@ -149,6 +156,8 @@ def meeting_detail(store: Store, meeting_id: int, start_at: str | None = None) -
         return f"There is no meeting M{meeting_id}."
     begin = to_seconds(start_at) if start_at else None
     parts = [f'M{meeting_id} "{meeting["title"]}" on {_day(meeting["started_at"])}']
+    if meeting["ticket"]:
+        parts[0] += f", ticket {meeting['ticket']}"
     summary = store.summary(meeting_id)
     if summary and begin is None:  # the first part has it; later parts only go on
         parts.append("Summary: " + json.dumps(summary["content"], ensure_ascii=False))
@@ -234,16 +243,21 @@ def make_tools(store: Store) -> list:
 
     @beta_tool
     def list_meetings(
-        since: str | None = None, until: str | None = None, person: str | None = None
+        since: str | None = None,
+        until: str | None = None,
+        person: str | None = None,
+        ticket: str | None = None,
     ) -> str:
-        """Meetings, newest first, with date, length, who spoke and the summary's overview.
+        """Meetings, newest first, with date, length, ticket, who spoke and the summary's
+        overview.
 
         Args:
             since: Only meetings on or after this date, YYYY-MM-DD.
             until: Only meetings on or before this date, YYYY-MM-DD.
             person: Only meetings this person spoke in.
+            ticket: Only meetings about this service ticket number.
         """
-        return privacy.outgoing(store, meetings_list(store, since, until, person))
+        return privacy.outgoing(store, meetings_list(store, since, until, person, ticket))
 
     @beta_tool
     def get_meeting(meeting_id: int, start_at: str | None = None) -> str:

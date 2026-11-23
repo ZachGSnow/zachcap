@@ -62,10 +62,15 @@ def create_server() -> MCPServer:
         person: Annotated[
             str | None, Field(description="Only meetings this person spoke in")
         ] = None,
+        ticket: Annotated[
+            str | None, Field(description="Only meetings about this service ticket number")
+        ] = None,
     ) -> str:
-        """Meetings, newest first, with date, length, who spoke and the summary's overview."""
+        """Meetings, newest first, with date, length, ticket, who spoke and the summary's
+        overview."""
         with library() as store:
-            return privacy.outgoing(store, assistant.meetings_list(store, since, until, person))
+            listed = assistant.meetings_list(store, since, until, person, ticket)
+            return privacy.outgoing(store, listed)
 
     @server.tool(annotations=READ_ONLY)
     def get_meeting(

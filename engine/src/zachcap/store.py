@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS meetings (
     notes       TEXT,
     template    TEXT,                               -- the kind of meeting, for summaries
     audio_removed_at TEXT,                          -- set when old audio was deleted
+    ticket      TEXT,                               -- the service ticket it was about
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -232,7 +233,7 @@ class Store:
     def _migrate(self) -> None:
         """Columns added after a database was created (CREATE TABLE IF NOT EXISTS skips them)."""
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(meetings)")}
-        for column in ("template", "audio_removed_at"):
+        for column in ("template", "audio_removed_at", "ticket"):
             if column not in columns:
                 self.db.execute(f"ALTER TABLE meetings ADD COLUMN {column} TEXT")
                 self.db.commit()
