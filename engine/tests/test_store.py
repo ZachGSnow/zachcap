@@ -133,6 +133,28 @@ def test_an_older_database_gets_the_new_columns(tmp_path: Path):
     store.close()
 
 
+def test_meeting_time_per_day_and_people_recognized_by_voice(tmp_path: Path):
+    from datetime import date
+
+    store = Store(tmp_path / "test.db")
+    store.create_meeting("Mon", "2026-11-16T09:00:00-05:00", tmp_path, duration=1800.0)
+    store.create_meeting("Mon 2", "2026-11-16T22:30:00-05:00", tmp_path, duration=600.0)
+    store.create_meeting("Old", "2026-10-01T09:00:00-05:00", tmp_path, duration=900.0)
+    store.create_meeting("Live", "2026-11-20T09:00:00-05:00", tmp_path, status="recording")
+    store.person_id("Typed but never heard")
+    voiced = store.person_id("Dana")
+    store.add_voice_sample(voiced, 1, np.ones(4), "test-model", 5.0)
+
+    days = store.by_day(days=7, today=date(2026, 11, 20))
+
+    assert [d["day"] for d in days] == [f"2026-11-{n}" for n in range(14, 21)]
+    # 22:30 local time stays on the 16th, even though it is the 17th in UTC.
+    assert {d["day"]: d["seconds"] for d in days}["2026-11-16"] == 2400.0
+    assert sum(d["seconds"] for d in days) == 2400.0
+    assert store.stats()["people"] == 1
+    store.close()
+
+
 def test_a_connection_can_serve_a_request_on_another_thread(tmp_path: Path):
     # FastAPI opens a request's database connection on one worker thread and runs the
     # endpoint on another. SQLite's default check broke audio playback in the app.

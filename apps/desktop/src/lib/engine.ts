@@ -112,6 +112,7 @@ export type Stats = {
   week_seconds: number;
   open_actions: number;
   people: number;
+  by_day: { day: string; seconds: number }[];
 };
 
 export type SearchHit = {
