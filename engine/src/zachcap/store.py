@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import numpy as np
@@ -347,12 +349,29 @@ class Store:
     def add_voice_sample(
         self, person_id: int, meeting_id: int, embedding: np.ndarray, model: str, seconds: float
     ) -> None:
+        """Learn a voice. A sample of the same meeting speaker replaces any earlier one, so
+        correcting a name moves the voiceprint to the right person instead of copying it."""
+        if not np.linalg.norm(embedding) > 1e-6:  # empty (or NaN) embeddings match no one
+            return
+        blob = to_blob(embedding)
+        self.db.execute(
+            "DELETE FROM voice_samples WHERE meeting_id = ? AND embedding = ?", (meeting_id, blob)
+        )
         self.db.execute(
             "INSERT INTO voice_samples (person_id, meeting_id, embedding, model, seconds) "
             "VALUES (?, ?, ?, ?, ?)",
-            (person_id, meeting_id, to_blob(embedding), model, seconds),
+            (person_id, meeting_id, blob, model, seconds),
         )
         self._commit()
+
+    def delete_orphan_voice_samples(self) -> int:
+        """Forget samples learned from meetings that no longer exist."""
+        cursor = self.db.execute(
+            "DELETE FROM voice_samples WHERE meeting_id IS NOT NULL "
+            "AND meeting_id NOT IN (SELECT id FROM meetings)"
+        )
+        self._commit()
+        return cursor.rowcount
 
     def voice_library(self, model: str) -> dict[int, list[np.ndarray]]:
         library: dict[int, list[np.ndarray]] = {}
@@ -392,19 +411,22 @@ class Store:
     # action items -----------------------------------------------------------
 
     def replace_action_items(self, meeting_id: int, items: list[dict]) -> None:
-        """Store a meeting's action items, keeping 'done' on items that survive a regenerate."""
-        done = {
-            (row["owner"].lower(), row["task"].lower())
+        """Store a meeting's action items after a (re)summary without losing what was ticked
+        off: a new item that matches a done one (the same task, perhaps reworded or now with
+        a real name as owner) stays done, and done items the new summary left out are kept."""
+        done = [
+            dict(row)
             for row in self.db.execute(
-                "SELECT owner, task FROM action_items WHERE meeting_id = ? AND status = 'done'",
+                "SELECT * FROM action_items WHERE meeting_id = ? AND status = 'done'",
                 (meeting_id,),
             )
-        }
-        self.db.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
-        self.db.executemany(
-            "INSERT INTO action_items (meeting_id, owner, task, due, said_at, kind, status, "
-            "done_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [
+        ]
+        rows = []
+        for item in items:
+            match = _same_task(item["task"], done)
+            if match is not None:
+                done.remove(match)
+            rows.append(
                 (
                     meeting_id,
                     item["owner"],
@@ -412,11 +434,20 @@ class Store:
                     item.get("due"),
                     item.get("said_at"),
                     item.get("kind", "action"),
-                    "done" if (item["owner"].lower(), item["task"].lower()) in done else "open",
-                    None,
+                    "done" if match else "open",
+                    match["done_at"] if match else None,
                 )
-                for item in items
-            ],
+            )
+        rows += [
+            (meeting_id, d["owner"], d["task"], d["due"], d["said_at"], d["kind"], "done",
+             d["done_at"])
+            for d in done
+        ]  # fmt: skip
+        self.db.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
+        self.db.executemany(
+            "INSERT INTO action_items (meeting_id, owner, task, due, said_at, kind, status, "
+            "done_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
         )
         self._commit()
 
@@ -538,11 +569,28 @@ class Store:
         self.db.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
         self._commit()
 
-    def reassign_segment(self, segment_id: int, name: str) -> None:
-        """Give one transcript line to a different person (creating them if new)."""
+    def reassign_segment(
+        self, segment_id: int, name: str | None = None, speaker_id: int | None = None
+    ) -> None:
+        """Give one transcript line to another voice of the same meeting (speaker_id), even
+        an unnamed one, or to a person by name (created if new)."""
         segment = self.db.execute("SELECT * FROM segments WHERE id = ?", (segment_id,)).fetchone()
         if segment is None:
             raise ValueError("No such line")
+        if speaker_id is not None:
+            target = self.speaker(speaker_id)
+            if target is None or target["meeting_id"] != segment["meeting_id"]:
+                raise ValueError("No such speaker in this meeting")
+        elif name:
+            speaker_id = self._speaker_for_person(segment, name)
+        else:
+            raise ValueError("Say who said it")
+        self.db.execute(
+            "UPDATE segments SET meeting_speaker_id = ? WHERE id = ?", (speaker_id, segment_id)
+        )
+        self._commit()
+
+    def _speaker_for_person(self, segment: sqlite3.Row, name: str) -> int:
         me = self.me()
         person = me["id"] if name.strip().lower() in {"you", "me"} else self.person_id(name)
         speaker = self.db.execute(
@@ -550,19 +598,29 @@ class Store:
             "AND status IN ('auto', 'confirmed') ORDER BY track = ? DESC LIMIT 1",
             (segment["meeting_id"], person, segment["track"]),
         ).fetchone()
-        if speaker is None:
-            speaker_id = self.add_speaker(
-                segment["meeting_id"],
-                segment["track"],
-                name,
-                None,
-                segment["end"] - segment["start"],
-                None,
-                Match(person, 1.0, "confirmed"),
-            )
-        else:
-            speaker_id = speaker["id"]
-        self.db.execute(
-            "UPDATE segments SET meeting_speaker_id = ? WHERE id = ?", (speaker_id, segment_id)
+        if speaker is not None:
+            return speaker["id"]
+        return self.add_speaker(
+            segment["meeting_id"],
+            segment["track"],
+            name,
+            None,
+            segment["end"] - segment["start"],
+            None,
+            Match(person, 1.0, "confirmed"),
         )
-        self._commit()
+
+
+def _normalized(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+
+def _same_task(task: str, candidates: list[dict], threshold: float = 0.8) -> dict | None:
+    """The candidate describing the same task, allowing for rewording by a new summary."""
+    wanted = _normalized(task)
+    best, best_ratio = None, threshold
+    for candidate in candidates:
+        ratio = SequenceMatcher(None, wanted, _normalized(candidate["task"])).ratio()
+        if ratio >= best_ratio:
+            best, best_ratio = candidate, ratio
+    return best

@@ -164,9 +164,12 @@ export function NamePrompt({
   );
 }
 
+/** Where a line can move: a voice of this meeting (named or not), or a known person. */
+type LineTarget = { label: string; speakerId?: number; name?: string };
+
 export function Transcript({
   segments,
-  speakerNames,
+  speakers,
   people,
   colorOf,
   currentId,
@@ -176,7 +179,7 @@ export function Transcript({
   onChanged,
 }: {
   segments: Segment[];
-  speakerNames: string[];
+  speakers: Speaker[];
   people: Person[];
   colorOf: (name: string) => SpeakerColor;
   currentId: number | undefined;
@@ -202,17 +205,33 @@ export function Transcript({
     if (playing) currentRow.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [currentId, playing]);
 
-  const reassign = async (segment: Segment, name: string) => {
+  const reassign = async (segment: Segment, target: LineTarget) => {
     try {
-      await api(`/api/segments/${segment.id}/speaker`, { method: "POST", json: { name } });
-      toast.success(`Line moved to ${name}`);
+      await api(`/api/segments/${segment.id}/speaker`, {
+        method: "POST",
+        json: target.speakerId != null ? { speaker_id: target.speakerId } : { name: target.name },
+      });
+      toast.success(`Line moved to ${target.label}`);
       onChanged();
     } catch (error) {
       toast.error("Couldn't move the line", { description: String(error) });
     }
   };
 
-  const choices = Array.from(new Set([...speakerNames, ...people.map((p) => p.name)]));
+  // Voices of this meeting by id, so picking "Speaker 2" never invents a person called
+  // that; then everyone else ZachCap knows, by name.
+  const voices = useMemo(() => {
+    const seen = new Set<string>();
+    return speakers.flatMap((s) => {
+      if (seen.has(s.display_name)) return [];
+      seen.add(s.display_name);
+      return [{ label: s.display_name, speakerId: s.id, personId: s.person_id }];
+    });
+  }, [speakers]);
+  const others = useMemo(() => {
+    const present = new Set(speakers.filter((s) => s.status === "auto" || s.status === "confirmed").map((s) => s.person_id));
+    return people.filter((p) => !present.has(p.id)).map((p) => ({ label: p.name, name: p.name }));
+  }, [speakers, people]);
 
   return (
     <div>
@@ -263,17 +282,28 @@ export function Transcript({
                     </span>
                   </button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-52">
+                <DropdownMenuContent align="start" className="w-56">
                   <DropdownMenuLabel className="text-xs text-muted-foreground">Who said this?</DropdownMenuLabel>
-                  {choices
-                    .filter((name) => name !== segment.speaker)
-                    .slice(0, 12)
-                    .map((name) => (
-                      <DropdownMenuItem key={name} onSelect={() => void reassign(segment, name)}>
-                        <span className={cn("size-2 rounded-full", colorOf(name).dot)} />
-                        {name}
+                  {voices
+                    .filter((voice) => voice.speakerId !== segment.meeting_speaker_id && voice.label !== segment.speaker)
+                    .map((voice) => (
+                      <DropdownMenuItem key={`voice-${voice.speakerId}`} onSelect={() => void reassign(segment, voice)}>
+                        <span className={cn("size-2 rounded-full", colorOf(voice.label).dot)} />
+                        {voice.label}
                       </DropdownMenuItem>
                     ))}
+                  {others.length > 0 && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel className="text-xs text-muted-foreground">Someone you know</DropdownMenuLabel>
+                      {others.slice(0, 8).map((person) => (
+                        <DropdownMenuItem key={`person-${person.name}`} onSelect={() => void reassign(segment, person)}>
+                          <span className={cn("size-2 rounded-full", colorOf(person.label).dot)} />
+                          {person.label}
+                        </DropdownMenuItem>
+                      ))}
+                    </>
+                  )}
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onSelect={() => setMoving(segment)}>
                     <UserRoundSearch className="size-4" />
@@ -293,7 +323,7 @@ export function Transcript({
         people={people}
         onCancel={() => setMoving(null)}
         onSubmit={(name) => {
-          if (moving) void reassign(moving, name);
+          if (moving) void reassign(moving, { label: name, name });
           setMoving(null);
         }}
       />
