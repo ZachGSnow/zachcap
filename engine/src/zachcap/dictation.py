@@ -94,10 +94,13 @@ class Microphone:
         return (None, self._pyaudio.paContinue)
 
     def stop(self) -> np.ndarray:
-        """Stops and returns what was heard, as 16 kHz mono float32."""
+        """Stops and returns what was heard, as 16 kHz mono float32 (all of it, even if the
+        device went away and stopping it failed)."""
         try:
             self._stream.stop_stream()
             self._stream.close()
+        except OSError:
+            pass  # unplugged mid-hold: what was heard before is still worth typing
         finally:
             self._pa.terminate()
         return to_16k_mono(b"".join(self._chunks), self.channels, self.rate)
@@ -164,7 +167,9 @@ class Transcriber:
 
 
 def model_for(language: str | None) -> str:
-    return ENGLISH_MODEL if language in (None, "en") else ANY_LANGUAGE_MODEL
+    """The English model for English; the multilingual one for any other language, and to
+    detect it (None: the English model would hear everything as English)."""
+    return ENGLISH_MODEL if language == "en" else ANY_LANGUAGE_MODEL
 
 
 # Windows ------------------------------------------------------------------------------
@@ -195,6 +200,7 @@ def _windows() -> SimpleNamespace:
         (user32.EmptyClipboard, [], BOOL),
         (user32.SetClipboardData, [wintypes.UINT, HANDLE], HANDLE),
         (user32.CloseClipboard, [], BOOL),
+        (user32.RegisterClipboardFormatW, [wintypes.LPCWSTR], wintypes.UINT),
         (kernel32.GlobalAlloc, [wintypes.UINT, ctypes.c_size_t], HANDLE),
         (kernel32.GlobalLock, [HANDLE], ctypes.c_void_p),
         (kernel32.GlobalUnlock, [HANDLE], BOOL),
@@ -356,13 +362,38 @@ def type_into(window: int | None, text: str) -> tuple[int, str | None]:
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 HWND_MESSAGE = -3  # the parent of a window that is never shown
+# Formats that keep it out of Windows' clipboard history (Win+V) and off the cloud clipboard,
+# which would sync it to the user's other devices: a dictation may hold a password.
+PRIVATE_FORMATS = (
+    "ExcludeClipboardContentFromMonitorProcessing",
+    "CanIncludeInClipboardHistory",
+    "CanUploadToCloudClipboard",
+)
+
+
+def _global_memory(win, data: bytes):
+    """Movable memory holding ``data``, for the clipboard (None if Windows has none)."""
+    memory = win.kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+    if not memory:
+        return None
+    pointer = win.kernel32.GlobalLock(memory)
+    if not pointer:
+        win.kernel32.GlobalFree(memory)
+        return None
+    ctypes.memmove(pointer, data, len(data))
+    win.kernel32.GlobalUnlock(memory)
+    return memory
 
 
 def copy_to_clipboard(text: str) -> bool:
-    """Puts ``text`` on the clipboard: only when it couldn't be typed, so it isn't lost. A
-    hidden window owns it while it's set (with no owner, Windows lets SetClipboardData fail)."""
+    """Puts ``text`` on the clipboard, kept out of clipboard history and the cloud clipboard:
+    only when it couldn't be typed, so it isn't lost. The memory is filled first, so a
+    failure leaves what was on the clipboard alone, and a hidden window owns it while it's set
+    (with no owner, Windows lets SetClipboardData fail)."""
     win = _windows()
-    data = text.encode("utf-16-le") + b"\0\0"
+    memory = _global_memory(win, text.encode("utf-16-le") + bytes(2))
+    if not memory:
+        return False
     owner = win.user32.CreateWindowExW(
         0, "STATIC", None, 0, 0, 0, 0, 0, HWND_MESSAGE, None, None, None
     )
@@ -372,22 +403,20 @@ def copy_to_clipboard(text: str) -> bool:
                 break
             time.sleep(0.05)
         else:
+            win.kernel32.GlobalFree(memory)
             return False
         try:
             win.user32.EmptyClipboard()
-            memory = win.kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
-            if not memory:
-                return False
-            pointer = win.kernel32.GlobalLock(memory)
-            if not pointer:
+            if not win.user32.SetClipboardData(CF_UNICODETEXT, memory):
                 win.kernel32.GlobalFree(memory)
                 return False
-            ctypes.memmove(pointer, data, len(data))
-            win.kernel32.GlobalUnlock(memory)
-            if win.user32.SetClipboardData(CF_UNICODETEXT, memory):
-                return True  # the clipboard owns the memory now
-            win.kernel32.GlobalFree(memory)
-            return False
+            # The clipboard owns the memory now. The privacy formats are best effort.
+            for name in PRIVATE_FORMATS:
+                format_id = win.user32.RegisterClipboardFormatW(name)
+                extra = _global_memory(win, bytes(4)) if format_id else None  # a DWORD 0
+                if extra and not win.user32.SetClipboardData(format_id, extra):
+                    win.kernel32.GlobalFree(extra)
+            return True
         finally:
             win.user32.CloseClipboard()
     finally:
@@ -395,10 +424,19 @@ def copy_to_clipboard(text: str) -> bool:
             win.user32.DestroyWindow(owner)
 
 
+class NotListening(RuntimeError):
+    """Stop or cancel for a dictation that already ended (finished, cancelled or closed)."""
+
+
+class NotHere(RuntimeError):
+    """The window in front won't let dictation work: it runs as administrator."""
+
+
 class Dictation:
     """Listens while the keys are held: start when they go down, finish when they come up.
     Each hold is its own dictation with a number. A quick second one may start while the
-    first is still being finished; they are typed in the order they ended."""
+    first is still being finished; they are typed in the order they ended, each once the
+    keys of any hold under way are let go."""
 
     def __init__(self, transcriber: Transcriber | None = None, microphone=None) -> None:
         self.transcriber = transcriber or Transcriber()
@@ -407,16 +445,51 @@ class Dictation:
         self._numbers = itertools.count(1)
         self._lock = threading.Lock()
         self._in_order = ThreadPoolExecutor(1, thread_name_prefix="dictation")
+        self._holds = 0  # dictations listening, or opening the mic to
+        self._holds_lock = threading.Lock()
+        # Told True when the first hold starts and False when the last one ends, so a
+        # recording under way can leave the dictation out of the meeting.
+        self.on_listening = None
 
     @property
     def listening(self) -> bool:
         return bool(self._open)
 
+    @property
+    def holding(self) -> bool:
+        """Whether the keys are held for a dictation now (listening, or about to)."""
+        return self._holds > 0
+
+    def _hold(self, change: int) -> None:
+        with self._holds_lock:
+            before = self._holds
+            self._holds = max(0, before + change)
+            if (before > 0) != (self._holds > 0) and self.on_listening is not None:
+                try:
+                    self.on_listening(self._holds > 0)
+                except Exception:  # the dictation goes on; the recording keeps its own
+                    pass
+
     def start(self, mic_name: str | None = None) -> int:
         """Starts listening and returns this dictation's number, for finish. A dictation
         whose key-up never arrives is closed MAX_SECONDS + GRACE_SECONDS later, and the oldest
-        is closed when more than MAX_AT_ONCE are open, so the mic is never left open."""
-        mic = (self._microphone or Microphone)(mic_name)
+        is closed when more than MAX_AT_ONCE are open, so the mic is never left open.
+
+        Raises NotHere when the window in front runs as administrator: Windows hides from
+        other programs when keys are let go there (the hold would end at once), and drops
+        what they type into it."""
+        window = foreground_window()
+        if window is not None and runs_above_us(window):
+            raise NotHere(
+                "That window runs as administrator, so Windows won't let ZachCap hear the "
+                "keys being let go or type into it. Dictate in another window."
+            )
+        self._hold(+1)
+        try:
+            mic = (self._microphone or Microphone)(mic_name)
+        except BaseException:
+            self._hold(-1)
+            raise
         with self._lock:
             number = next(self._numbers)
             expire = threading.Timer(MAX_SECONDS + GRACE_SECONDS, self.cancel, args=(number,))
@@ -425,10 +498,17 @@ class Dictation:
             extra = [self._open.pop(old) for old in sorted(self._open)[:-MAX_AT_ONCE]]
         expire.start()
         for old_mic, old_expire in extra:
-            old_expire.cancel()
-            old_mic.stop()
+            self._close(old_mic, old_expire)
         _sound("Speech On.wav")
         return number
+
+    def _close(self, mic, expire: threading.Timer):
+        """Stops a dictation's mic (returning what it heard) and ends its hold."""
+        expire.cancel()
+        try:
+            return mic.stop()
+        finally:
+            self._hold(-1)
 
     def finish(
         self,
@@ -440,16 +520,16 @@ class Dictation:
     ) -> dict:
         """Stops listening, transcribes, applies the Words to know corrections (``fix``) and
         types the text into the window that was in front when the keys came up (``number``
-        None: the newest dictation). Returns the text, timings and how it was delivered."""
+        None: the newest dictation). Returns the text, timings and how it was delivered.
+        Raises NotListening if that dictation already ended."""
         window = foreground_window() if type_it else None
         with self._lock:
             if number is None and self._open:
                 number = max(self._open)
             mic, expire = self._open.pop(number, (None, None))
         if mic is None:
-            raise RuntimeError("Not listening")
-        expire.cancel()
-        audio = mic.stop()
+            raise NotListening("Not listening")
+        audio = self._close(mic, expire)
         _sound("Speech Off.wav")
         job = self._in_order.submit(self._deliver, audio, window, language, hotwords, fix, type_it)
         return job.result()
@@ -460,7 +540,13 @@ class Dictation:
         if fix is not None and text:
             text = fix(text)
         text = printable(text)
-        typed, why = type_into(window, text + " ") if text and type_it else (0, None)
+        typed, why = 0, None
+        if text and type_it:
+            # A hold under way: its keys are down, and its text comes after this one.
+            deadline = time.monotonic() + MAX_SECONDS + GRACE_SECONDS
+            while self.holding and time.monotonic() < deadline:
+                time.sleep(0.05)
+            typed, why = type_into(window, text + " ")
         return {
             "text": text,
             "seconds": round(audio.size / RATE, 1),
@@ -476,5 +562,4 @@ class Dictation:
             numbers = list(self._open) if number is None else [number]
             dropped = [self._open.pop(n) for n in numbers if n in self._open]
         for mic, expire in dropped:
-            expire.cancel()
-            mic.stop()
+            self._close(mic, expire)

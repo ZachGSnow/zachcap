@@ -143,6 +143,7 @@ class TrackRecorder:
         self.level_dbfs = -120.0
         self.errors: list[str] = []
         self.paused = False
+        self.muted = False  # silence on this track only: a dictation while recording
         self._t0 = t0
         self._given_t0 = t0 is not None
         self._clock = clock
@@ -160,7 +161,8 @@ class TrackRecorder:
         # A private pause: silence instead of sound, decided as the audio arrives (audio
         # still queued when Resume is pressed was said during the pause). Both tracks keep
         # their length, so they stay in sync.
-        self._queue.put((captured, bytes(len(in_data)) if self.paused else in_data))
+        silent = self.paused or self.muted
+        self._queue.put((captured, bytes(len(in_data)) if silent else in_data))
         return (None, pyaudio.paContinue)
 
     @property
@@ -627,6 +629,13 @@ class Recorder:
     @property
     def paused(self) -> bool:
         return any(track.paused for track in self.tracks.values())
+
+    def mute_mic(self, muted: bool = True) -> None:
+        """The mic track records silence while you dictate (a ticket note isn't part of the
+        meeting); the call goes on being recorded, and it isn't a pause."""
+        mic = self.tracks.get("mic")
+        if mic is not None:
+            mic.muted = muted
 
     def pause(self, paused: bool = True) -> None:
         """Pause (or resume) privately: both tracks record silence until resumed."""

@@ -177,7 +177,7 @@ NO_STORE = {"Cache-Control": "no-store"}
 
 
 class DictateBody(BaseModel):
-    type: bool = True  # type the text into the app in front (False: only return it)
+    type: bool = False  # type the text into the app in front (the page asks for it)
     id: int | None = None  # which dictation (the number start gave); the newest if not given
 
 
@@ -283,6 +283,16 @@ def create_app(token: str) -> FastAPI:
         return None if language == "auto" else language
 
     lock = threading.Lock()
+
+    def leave_dictation_out(listening: bool) -> None:
+        """While you dictate during a recording, its mic track records silence: a ticket
+        note isn't part of the meeting (the call goes on being recorded)."""
+        with lock:
+            recorder = recording.get("recorder")
+        if recorder is not None:
+            recorder.mute_mic(listening)
+
+    dictator.on_listening = leave_dictation_out
 
     startup = Store()
     try:
@@ -981,6 +991,8 @@ def create_app(token: str) -> FastAPI:
                 raise HTTPException(
                     status_code=500, detail=f"Couldn't start recording: {exc}"
                 ) from exc
+            if dictator.holding:  # started mid-dictation: that's left out too
+                recorder.mute_mic(True)
             # The meeting exists from the first second, so a crash can't lose it.
             title = body.title or f"Meeting {datetime.now():%b %d %H:%M}"
             started = recorder.started_at or datetime.now().astimezone()
@@ -1052,6 +1064,8 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=400, detail="Dictation is off (Settings)")
         try:
             number = dictator.start(store.setting("mic_device") or None)
+        except dictation.NotHere as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except OSError as exc:
             raise HTTPException(status_code=400, detail=f"Couldn't open the mic: {exc}") from exc
         return {"listening": True, "id": number}
@@ -1070,8 +1084,10 @@ def create_app(token: str) -> FastAPI:
                 fix=vocab.correct,
                 type_it=body.type,
             )
-        except RuntimeError as exc:
+        except dictation.NotListening as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:  # the speech model or the mic: say what went wrong
+            raise HTTPException(status_code=500, detail=f"Dictation failed: {exc}") from exc
 
     @app.post("/api/dictate/cancel", dependencies=auth)
     def dictate_cancel(body: DictateBody | None = None):

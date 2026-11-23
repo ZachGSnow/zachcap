@@ -480,6 +480,37 @@ def test_resuming_a_pause_is_remembered(tmp_path: Path, monkeypatch):
     recorder.stop()
 
 
+def test_a_dictation_silences_only_the_mic_track_and_is_no_pause(tmp_path: Path, monkeypatch):
+    import numpy as np
+    import soundfile as sf
+
+    fake = fake_pyaudio()
+    monkeypatch.setattr(capture, "pyaudio", fake)
+    clock = FakeClock(100.0)
+    mic = capture.TrackRecorder("mic", MIC, tmp_path, 300, t0=100.0, clock=clock)
+    mic.start(fake.PyAudio())
+    loud = np.full(1024, 8000, np.int16).tobytes()
+    for muted in (False, True, False):
+        clock.now += 1024 / 16000  # one buffer's worth of time
+        mic.muted = muted
+        mic._callback(loud, 1024, None, 0)
+        drained(mic)
+    mic.stop()
+    audio, _ = sf.read(tmp_path / "mic-000.flac", dtype="int16")
+    assert len(audio) == 3 * 1024  # the dictation is kept as silence, in time
+    assert audio[:1024].min() > 0 and not audio[1024:2048].any() and audio[2048:].min() > 0
+
+    # The recorder mutes its mic track only: the call goes on, and it isn't a pause.
+    recorder = capture.Recorder(tmp_path / "meeting")
+    recorder.tracks = {"mic": SimpleNamespace(muted=False, paused=False),
+                       "system": SimpleNamespace(muted=False, paused=False)}  # fmt: skip
+    recorder.mute_mic()
+    assert recorder.tracks["mic"].muted and not recorder.tracks["system"].muted
+    assert not recorder.paused
+    recorder.mute_mic(False)
+    assert not recorder.tracks["mic"].muted
+
+
 def test_a_track_ends_when_stop_was_pressed_not_when_stopping_finished(tmp_path: Path):
     # Stopping takes a moment (captures closing, the last writes); audio that arrives
     # meanwhile must not make the call track longer than the mic track.

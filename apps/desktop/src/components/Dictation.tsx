@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
 
+import { SETTINGS_CHANGED } from "@/components/Recording";
 import { usePoll } from "@/hooks/usePoll";
 import { api, isTauri, type Settings } from "@/lib/engine";
 import { announce } from "@/lib/feedback";
@@ -28,8 +29,15 @@ const NOT_TYPED: Record<NonNullable<Dictated["why"]>, string> = {
  * was said where the cursor is. The shell registers the keys only while dictation is on in
  * Settings, and tells this page when they go down and up. */
 export function DictationKeys() {
-  const { data: settings } = usePoll(() => api<Settings>("/api/settings"), 10_000);
+  const { data: settings, refresh } = usePoll(() => api<Settings>("/api/settings"), 10_000);
   const enabled = settings?.dictation ?? false;
+
+  // Turned on or off in Settings: the keys follow at once, not at the next look.
+  useEffect(() => {
+    const changed = () => void refresh();
+    window.addEventListener(SETTINGS_CHANGED, changed);
+    return () => window.removeEventListener(SETTINGS_CHANGED, changed);
+  }, [refresh]);
 
   useEffect(() => {
     if (isTauri()) void invoke("set_dictation", { enabled }).catch(() => undefined);
