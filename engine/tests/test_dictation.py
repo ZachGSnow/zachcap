@@ -101,10 +101,51 @@ def test_text_is_typed_as_characters_never_as_enter_or_tab():
             "Took the ER visit notes. Ah, and 5 mm screws.",
             "Took the ER visit notes. Ah, and 5 mm screws.",
         ),
+        # Taking things back, said the ways people say it.
+        ("Call Dana at three. Actually, scratch that. Call her at four.", "Call her at four."),
+        ("No, scratch that. Wait.", "Wait."),
+        ("Call Dana at three, scratch that, call her at four.", "Call her at four."),
+        ("Reboot the server at 3 p.m. tonight, scratch that.", ""),
+        ("Call Mr. Jones at three. Scratch that, call her at four.", "Call her at four."),
+        ("scratch that, call her at four.", "call her at four."),  # lowercase stays lowercase
+        # "Scratch that" as ordinary words is typed as said.
+        ("Did the cat scratch that?", "Did the cat scratch that?"),
+        ("Be careful not to scratch that.", "Be careful not to scratch that."),
+        (
+            "Reset the password. Scratch that item off the list.",
+            "Reset the password. Scratch that item off the list.",
+        ),
+        # Fillers next to punctuation, and words that only look like fillers.
+        ("I will call him, um. Then reboot.", "I will call him. Then reboot."),
+        ("Is that right, uh?", "Is that right?"),
+        ("Uh... let me check.", "Let me check."),
+        ("Hmm? Call Dana.", "Call Dana."),
+        ("Uh, vCenter is down.", "vCenter is down."),  # spelled as Words to know has it
+        ("Uh-huh, sure. Mm-hmm, sure.", "Uh-huh, sure. Mm-hmm, sure."),
     ],
 )
 def test_what_you_say_is_tidied_on_this_pc(said: str, typed: str):
     assert dictation.tidy(said) == typed
+
+
+def test_fillers_are_only_dropped_from_english():
+    # "um" is Portuguese for "a"; "Detect automatically" may be anything.
+    assert dictation.tidy("Preciso de um computador novo.", english=False) == (
+        "Preciso de um computador novo."
+    )
+
+
+def test_a_dictation_taken_back_says_so_and_a_snippet_still_matches(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    dictator = dictation.Dictation(FakeTranscriber("Um, reboot note."), microphone=FakeMic)
+    dictator.start()
+    done = dictator.finish(None, "en", None, type_it=False, snippets={"reboot note": "Rebooted."})
+    assert done["text"] == "Rebooted." and not done["taken_back"]
+    dictator.transcriber.said = "Scratch that."
+    dictator.start()
+    done = dictator.finish(None, "en", None, type_it=False)
+    assert done["text"] == "" and done["taken_back"]  # not "nothing heard"
 
 
 def test_audio_is_resampled_to_16k_mono():

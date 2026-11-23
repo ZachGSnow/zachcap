@@ -173,34 +173,80 @@ class Transcriber:
         return " ".join(segment.text.strip() for segment in segments).strip()
 
 
-# Sounds, not words: dropped from dictation (lowercase, or capitalized at a sentence's
-# start; "ER" and "Ah" are left alone, and so is "mm" for millimetres).
-FILLERS = re.compile(r"(?<![\w'])(?:[Uu]m+|[Uu]h+|[Uu]hm|[Ee]rm|[Hh]mm+)(?![\w'])[,.]?\s*")
-SCRATCH = re.compile(r"(?i)^scratch that\b[\s,.;:!-]*")
-SCRATCHED = re.compile(r"(?i)[,;:]?\s*\bscratch that\W*$")
+# Sounds, not words, in English dictation (lowercase, or capitalized at a sentence's start):
+# "ER", "Ah", "mm" for millimetres, "Uh-huh" and "Mm-hmm" are left alone.
+FILLER = r"(?<![\w'-])(?:[Uu]m+|[Uu]h+|[Uu]hm|[Ee]rm|[Hh]mm+)(?![\w'-])"
+# "Scratch that" as a command: a sentence that is it, or opens with it (after "actually",
+# "sorry", "no" or "wait"), takes back the sentence before; "..., scratch that." ends one and
+# takes it back; "..., scratch that, ..." takes back what came before it in that sentence.
+# Used as words ("Did the cat scratch that?", "scratch that item") it's left as said.
+LEAD_IN = r"(?:(?:actually|sorry|no|oh wait|wait|oops)[,.!]?\s+)?"
+RETRACT = re.compile(rf"(?i)^{LEAD_IN}scratch that(?:[.!;:]\s*|,\s*|$)")
+RETRACTED = re.compile(r"(?i),\s*scratch that[.!]?$")
+INSIDE = re.compile(r"(?i)^.*?,\s*scratch that,\s*(?=\S)")
+ABBREVIATIONS = {"dr", "mr", "mrs", "ms", "st", "vs", "etc", "jr", "sr", "no", "approx", "inc"}
 
 
-def _capital(sentence: str) -> str:
-    return sentence[:1].upper() + sentence[1:]
+def _sentences(text: str) -> list[str]:
+    """Sentences, not split after an abbreviation ("Mr.", "3 p.m.", "e.g.") or an initial."""
+    sentences: list[str] = []
+    for part in re.split(r"(?<=[.!?])\s+", text.strip()):
+        words = sentences[-1].split() if sentences else []
+        last = words[-1].lower().rstrip(".") if words else ""
+        if (
+            sentences
+            and sentences[-1].endswith(".")
+            and (
+                last in ABBREVIATIONS or len(last) == 1 or re.fullmatch(r"(?:[a-z]\.)+[a-z]", last)
+            )
+        ):
+            sentences[-1] += " " + part
+        else:
+            sentences.append(part)
+    return sentences
 
 
-def tidy(text: str) -> str:
-    """What was said, tidied on this PC: filler sounds (um, uh) go, and "scratch that" takes
-    back the sentence before it ("Call at three. Scratch that, call at four." is "Call at
-    four."), or the one it ends. A sentence that lost its first word starts with a capital
-    again; anything else is left as said."""
+def _without_fillers(sentence: str) -> str:
+    # One before an end mark goes with the comma before it ("him, um." is "him."); elsewhere
+    # with the comma or dots after it ("Uh... let me" is "let me").
+    sentence = re.sub(rf",?\s*{FILLER}\s*(?=[.?!])", "", sentence)
+    sentence = re.sub(rf"{FILLER}[,.]*\s*", "", sentence)
+    sentence = re.sub(r"^[\s.,;:?!]+", "", sentence)  # nothing left before the words
+    return re.sub(r"\s{2,}", " ", sentence).strip()
+
+
+def _as_said(said: str, sentence: str) -> str:
+    """A sentence that lost its first words starts with a capital again, if it did as said
+    and the new first word is an ordinary lowercase one ("vCenter" stays as spelled)."""
+    first = sentence.split(maxsplit=1)[0] if sentence else ""
+    if said[:1].isupper() and first.isalpha() and first.islower():
+        return sentence[:1].upper() + sentence[1:]
+    return sentence
+
+
+def tidy(text: str, english: bool = True) -> str:
+    """What was said, tidied on this PC: filler sounds (um, uh) go when dictating in English,
+    and "scratch that" takes back what came before it ("Call at three. Scratch that, call at
+    four." is "Call at four."). Anything else is left as said."""
     kept: list[str] = []
-    for said in re.split(r"(?<=[.!?])\s+", text.strip()):
-        sentence = FILLERS.sub("", said).strip()
-        if SCRATCH.match(sentence):
+    capital = False  # a sentence that was only a filler ("Uh...") lends the next its capital
+    for said in _sentences(text):
+        sentence = _without_fillers(said) if english else said.strip()
+        if capital:
+            said, capital = said[:1].upper() + said[1:], False
+        if not sentence:
+            capital = said[:1].isupper()
+            continue
+        if RETRACT.match(sentence):
             if kept:
                 kept.pop()
-            sentence = _capital(SCRATCH.sub("", sentence))
-        elif SCRATCHED.search(sentence):
+            sentence = RETRACT.sub("", sentence)
+        elif RETRACTED.search(sentence):
             continue
-        elif sentence[:1] != said.strip()[:1] and said.strip()[:1].isupper():
-            sentence = _capital(sentence)
-        if sentence:
+        else:
+            sentence = INSIDE.sub("", sentence)
+        sentence = _as_said(said, sentence)
+        if sentence and re.search(r"\w", sentence):
             kept.append(sentence)
     return " ".join(kept)
 
@@ -632,7 +678,8 @@ class Dictation:
         text = self.transcriber.text(audio, language, hotwords)
         if fix is not None and text:
             text = fix(text)
-        text = tidy(text) if text else text
+        heard = text
+        text = tidy(text, english=language == "en") if text else text
         text = printable(snippets.get(cue(text), text) if text else text)
         typed, why = 0, None
         if text and type_it:
@@ -648,6 +695,8 @@ class Dictation:
             "typed": typed,
             "copied": bool(why) and copy_to_clipboard(text),
             "why": why,
+            # Something was said, and "scratch that" took it all back: not "nothing heard".
+            "taken_back": bool(heard) and not text,
         }
         if text and forgotten == self._forgotten:  # not forgotten while it was transcribed
             delivered = "typed" if typed and not why else "copied" if result["copied"] else "kept"
