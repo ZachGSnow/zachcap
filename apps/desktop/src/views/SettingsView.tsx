@@ -874,7 +874,7 @@ export function SettingsView() {
         <Section icon={<MessageSquareText className="size-3.5" />} title="Dictation">
           <Row
             label={`Hold ${keysNow.dictate} to dictate`}
-            help="In any app: hold the keys, speak, let go, and what you said is typed where your cursor is, spelled with your Words to know. Transcribed on this computer (a small model, ready a few seconds after you turn this on); nothing is recorded or kept. If you've moved to another window by then, it's copied instead, ready to paste. During a recording, what you dictate is left out of the meeting (the call app still hears you: mute it first)."
+            help="In any app: hold the keys, speak, let go, and what you said is typed where your cursor is, spelled with your Words to know. Transcribed on this computer (a small model, ready a few seconds after you turn this on); nothing is recorded or kept. If you've moved to another window by then, it's copied instead, ready to paste. During a recording, what you dictate is left out of the meeting (the call app still hears you: mute it first). Um and uh are left out, and 'scratch that' takes back the sentence before it."
           >
             <Switch
               className="ml-auto"
