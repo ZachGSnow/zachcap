@@ -12,10 +12,75 @@ const HOSTILE =
 const ESCAPED = String.raw`\![x](https://example.com/p.png) \<img src=https://example.com/a.png> \<script>alert(1)\</script> \![x][1] \</transcript>`;
 const DEFINITION = "[1]: https://example.com/p.png"; // where "![x][1]" would load its picture from
 
+// The same text as the engine's export tests: code anyone in a meeting could say, show or write,
+// for the notes app's plugins to run: Dataview's inline JavaScript and inline query, Templater
+// commands, code blocks a plugin runs (dataviewjs on its own lines and indented in a list, a
+// Mermaid diagram), and an indented code block, which Dataview reads too.
+const PLUGINS = [
+  '`$= dv.page()` `= this.file.name` <% tp.file.create_new() %> <%* tR += "x" %>',
+  "```dataviewjs",
+  "dv.paragraph(1)",
+  "```",
+  "- Steps",
+  "  ```dataviewjs",
+  "  dv.paragraph(2)",
+  "  ```",
+  "~~~mermaid",
+  "graph TD",
+  "~~~",
+  "",
+  "    $= dv.pages().length",
+].join("\n");
+// The same as the Markdown writes it: a backslash before the "=" of each query, inside each "<%"
+// and before each mark of a fence.
+const PLUGINS_ESCAPED = [
+  '`$\\= dv.page()` `\\= this.file.name` <\\% tp.file.create_new() %> <\\%* tR += "x" %>',
+  "\\`\\`\\`dataviewjs",
+  "dv.paragraph(1)",
+  "\\`\\`\\`",
+  "- Steps",
+  "  \\`\\`\\`dataviewjs",
+  "  dv.paragraph(2)",
+  "  \\`\\`\\`",
+  "\\~\\~\\~mermaid",
+  "graph TD",
+  "\\~\\~\\~",
+  "",
+  "    $\\= dv.pages().length",
+].join("\n");
+// The engine's tests' other cases, as written and as inert() writes them.
+const BROKEN = [
+  ["`` $= x `` `\xa0= y`", "`` $\\= x `` `\xa0\\= y`"],
+  ["`\n= z` and > `\n> $= w`", "`\n\\= z` and > `\n> $\\= w`"],
+  ["Press the ` key\n= this.file.name", "Press the ` key\n\\= this.file.name"],
+  ["-     $= dv.pages()", "-     $\\= dv.pages()"],
+  ["[^1]: ```dataviewjs\n> ````tasks\n1. ~~~button", "[^1]: \\`\\`\\`dataviewjs\n> \\`\\`\\`\\`tasks\n1. \\~\\~\\~button"],
+  ["<%_ x _%> <%- x -%> <%+ x %>", "<\\%_ x _%> <\\%- x -%> <\\%+ x %>"],
+  ["<%<b> \\<% <<%", "<\\%\\<b> \\<\\% <<\\%"],
+];
+const UNCHANGED = [
+  "The cutover is Friday at 8 pm.",
+  "Ping me! [01:05] x <5 and 3 < 4",
+  "`x = 1` and a = b, x == y, 2 + 2 = 4",
+  "use `>=` or `!=`, `$x` and `$$=`",
+  "<5% of 100% %> 50%",
+  "a ``code`` span, ~~struck~~, $5 = price",
+  "- [ ] 09:05-09:07\n> 1. step",
+  "C:\\Users\\Public",
+];
+
 /** Image and HTML syntax a Markdown app acts on: "![", or "<" and a letter, "/", "!" or "?",
  * without a backslash in front that escapes it (an odd number of them). */
 function active(markdown: string): string[] {
   return [...markdown.matchAll(/(?<!\\)(?:\\\\)*(!\[|<[A-Za-z/!?])/g)].map((found) => found[1]);
+}
+
+/** Code a notes app's plugins would run from the Markdown: a Templater tag ("<%" anywhere, as
+ * Templater reads the raw text), a code fence (three backticks or tildes), and Dataview's "=" or
+ * "$=" where a code's text starts (after backticks, first on a line, or after a code block's
+ * indentation). */
+function runs(markdown: string): string[] {
+  return markdown.match(/<%|```|~~~|`[ \t]*\$?=|^[ \t>]*\$?=|(?:\t| {4})[ \t]*\$?=/gm) ?? [];
 }
 
 function summary(content: Partial<SummaryContent>): Summary {
@@ -66,6 +131,19 @@ describe("inert", () => {
       expect(inert(text)).toBe(text);
     }
   });
+
+  it("breaks what plugins run, and nothing else", () => {
+    expect(inert(PLUGINS)).toBe(PLUGINS_ESCAPED);
+    expect(runs(PLUGINS)).not.toEqual([]);
+    expect(runs(PLUGINS_ESCAPED)).toEqual([]);
+    for (const [text, escaped] of BROKEN) {
+      expect(inert(text)).toBe(escaped);
+      expect(runs(escaped)).toEqual([]);
+    }
+    for (const text of UNCHANGED) {
+      expect(inert(text)).toBe(text);
+    }
+  });
 });
 
 describe("summaryMarkdown", () => {
@@ -103,5 +181,21 @@ describe("summaryMarkdown", () => {
     expect(text).toContain(`## Decisions\n- ${ESCAPED}`);
     expect(text).toContain(`**${ESCAPED}**\n- ${ESCAPED}`);
     expect(text).toContain(`## Open questions\n- ${ESCAPED}`);
+  });
+
+  it("runs no plugin code from other people's words or Claude's", () => {
+    const content = {
+      overview: PLUGINS,
+      decisions: [PLUGINS],
+      who_said_what: [{ speaker: PLUGINS, points: [PLUGINS] }],
+      open_questions: [PLUGINS],
+    };
+    const text = summaryMarkdown(`Cutover ${PLUGINS}`, summary(content), [item({ owner: PLUGINS, task: PLUGINS, due: PLUGINS })]);
+    expect(runs(text)).toEqual([]);
+    expect(text).toContain(`# Cutover ${PLUGINS_ESCAPED}\n\n${PLUGINS_ESCAPED}\n\n## Action items\n`);
+    expect(text).toContain(`- [ ] **${PLUGINS_ESCAPED}**: ${PLUGINS_ESCAPED} (${PLUGINS_ESCAPED})`);
+    expect(text).toContain(`## Decisions\n- ${PLUGINS_ESCAPED}`);
+    expect(text).toContain(`**${PLUGINS_ESCAPED}**\n- ${PLUGINS_ESCAPED}`);
+    expect(text).toContain(`## Open questions\n- ${PLUGINS_ESCAPED}`);
   });
 });

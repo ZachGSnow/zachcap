@@ -22,6 +22,75 @@ ESCAPED = (
 )
 DEFINITION = "[1]: https://example.com/p.png"  # where "![x][1]" would load its picture from
 
+# Code anyone in a meeting could say, show or write, for the notes app's plugins to run when
+# they open the files: Dataview's inline JavaScript and inline query, Templater commands (run
+# when a new file appears), code blocks a plugin runs (dataviewjs on its own lines and indented
+# in a list, a Mermaid diagram), and an indented code block, which Dataview reads too. The
+# page's tests (src/lib/markdown.test.ts) use the same text.
+PLUGINS = "\n".join(
+    (
+        '`$= dv.page()` `= this.file.name` <% tp.file.create_new() %> <%* tR += "x" %>',
+        "```dataviewjs",
+        "dv.paragraph(1)",
+        "```",
+        "- Steps",
+        "  ```dataviewjs",
+        "  dv.paragraph(2)",
+        "  ```",
+        "~~~mermaid",
+        "graph TD",
+        "~~~",
+        "",
+        "    $= dv.pages().length",
+    )
+)
+# The same as the Markdown writes it: a backslash before the "=" of each query, inside each
+# "<%" and before each mark of a fence.
+PLUGINS_ESCAPED = "\n".join(
+    (
+        '`$\\= dv.page()` `\\= this.file.name` <\\% tp.file.create_new() %> <\\%* tR += "x" %>',
+        "\\`\\`\\`dataviewjs",
+        "dv.paragraph(1)",
+        "\\`\\`\\`",
+        "- Steps",
+        "  \\`\\`\\`dataviewjs",
+        "  dv.paragraph(2)",
+        "  \\`\\`\\`",
+        "\\~\\~\\~mermaid",
+        "graph TD",
+        "\\~\\~\\~",
+        "",
+        "    $\\= dv.pages().length",
+    )
+)
+# More of the same, as written and as inert() writes it: a code's text after a space Dataview
+# trims (a non-breaking one too); on the next line, in a quote too; a line after a backtick left
+# open; an indented code block in a list item; fences after a footnote, a quote or a list
+# marker; Templater's other tags; and "<%" next to HTML, each with one backslash.
+BROKEN = (
+    ("`` $= x `` `\xa0= y`", "`` $\\= x `` `\xa0\\= y`"),
+    ("`\n= z` and > `\n> $= w`", "`\n\\= z` and > `\n> $\\= w`"),
+    ("Press the ` key\n= this.file.name", "Press the ` key\n\\= this.file.name"),
+    ("-     $= dv.pages()", "-     $\\= dv.pages()"),
+    (
+        "[^1]: ```dataviewjs\n> ````tasks\n1. ~~~button",
+        "[^1]: \\`\\`\\`dataviewjs\n> \\`\\`\\`\\`tasks\n1. \\~\\~\\~button",
+    ),
+    ("<%_ x _%> <%- x -%> <%+ x %>", "<\\%_ x _%> <\\%- x -%> <\\%+ x %>"),
+    ("<%<b> \\<% <<%", "<\\%\\<b> \\<\\% <<\\%"),
+)
+# Ordinary words, times and code no plugin runs, which inert() leaves as they are.
+UNCHANGED = (
+    "The cutover is Friday at 8 pm.",
+    "Ping me! [01:05] x <5 and 3 < 4",
+    "`x = 1` and a = b, x == y, 2 + 2 = 4",
+    "use `>=` or `!=`, `$x` and `$$=`",
+    "<5% of 100% %> 50%",
+    "a ``code`` span, ~~struck~~, $5 = price",
+    "- [ ] 09:05-09:07\n> 1. step",
+    "C:\\Users\\Public",
+)
+
 
 @pytest.fixture
 def meeting(tmp_path: Path):
@@ -139,6 +208,96 @@ def test_other_peoples_words_load_nothing_from_the_files(meeting, tmp_path: Path
     assert f"{heading}, ticket {ESCAPED}) [M{meeting_id}]" in work
     assert r"Topics: \<b>Cutover\</b> (" in work
     assert f"## Your open items (You)\n\n- [ ] {ESCAPED} (due {ESCAPED}), from Cutover" in work
+
+
+def runs(markdown: str) -> list[str]:
+    """Code a notes app's plugins would run from the file: a Templater tag ("<%" anywhere, as
+    Templater reads the raw text), a code fence (three backticks or tildes), and Dataview's "="
+    or "$=" where a code's text starts (after backticks, first on a line, or after a code
+    block's indentation)."""
+    return re.findall(
+        r"<%|```|~~~|`[ \t]*\$?=|^[ \t>]*\$?=|(?:\t| {4})[ \t]*\$?=", markdown, re.MULTILINE
+    )
+
+
+def test_inert_breaks_what_plugins_run_and_nothing_else():
+    assert export.inert(PLUGINS) == PLUGINS_ESCAPED
+    assert runs(PLUGINS)
+    assert runs(PLUGINS_ESCAPED) == []
+    for text, escaped in BROKEN:
+        assert export.inert(text) == escaped, text
+        assert runs(escaped) == [], text
+    for text in UNCHANGED:
+        assert export.inert(text) == text
+
+
+def test_other_peoples_words_run_no_plugin_code_from_the_files(meeting, tmp_path: Path):
+    store, meeting_id = meeting
+    client = "Contoso `$= dv.page()` <% tp.file.create_new() %>"
+    store.update_meeting(meeting_id, title=f"Cutover {PLUGINS}", ticket=PLUGINS, client=client)
+    mallory = store.person_id(f"Mallory {PLUGINS}")
+    speaker = store.add_speaker(
+        meeting_id, "system", "Mallory", None, 2.0, None, Match(mallory, 1.0, "confirmed")
+    )
+    store.add_segments(meeting_id, [(speaker, "system", 70.0, 72.0, PLUGINS, 0.9)])
+    content = {"overview": PLUGINS, "decisions": [PLUGINS], "open_questions": [PLUGINS]}
+    store.save_summary(meeting_id, "claude-opus-5-5", content, 1, 1, 0.0)
+    store.replace_action_items(
+        meeting_id,
+        [{"owner": "You", "task": PLUGINS, "due": PLUGINS}, {"owner": PLUGINS, "task": PLUGINS}],
+    )
+    store.add_note(meeting_id, 80.0, "note", PLUGINS)
+    store.add_note(meeting_id, 81.0, "snapshot", PLUGINS)
+    store.add_note(meeting_id, 82.0, "file", f"{PLUGINS}\nA log line")
+    store.set_setting("topics", "`$= dv.page()` <% x %>: cutover")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    store.set_setting("export_folder", str(vault))
+    store.set_setting("export_work_log", "1")
+
+    export.auto_export(store, meeting_id)  # the meeting, and its day's and week's work logs
+    export.save_work_log(store, "day", date(2026, 11, 20), client)  # the client's own
+
+    files = sorted(vault.glob("*.md"))
+    assert len(files) == 4
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        assert runs(text) == [], path.name
+        assert PLUGINS_ESCAPED in text, path.name
+    md = export.markdown(store, meeting_id)
+    first = PLUGINS_ESCAPED.split("\n")[0]  # a snapshot's lines are joined, a file's name is one
+    client_escaped = "Contoso `$\\= dv.page()` <\\% tp.file.create_new() %>"
+    assert md.startswith(f"# Cutover {PLUGINS_ESCAPED}\n\nFriday November 20, 2026 09:05 | 2 min")
+    for part in (
+        f" | Client {client_escaped} | Ticket {PLUGINS_ESCAPED}",
+        f"## Summary\n\n{PLUGINS_ESCAPED}\n\n## Decisions\n\n- {PLUGINS_ESCAPED}\n\n## Action",
+        f"- [ ] **You**: {PLUGINS_ESCAPED} (due {PLUGINS_ESCAPED})",
+        f"- [ ] **{PLUGINS_ESCAPED}**: {PLUGINS_ESCAPED}",
+        f"## Open questions\n\n- {PLUGINS_ESCAPED}",
+        f"- [01:20] {PLUGINS_ESCAPED}\n",
+        f"- [01:21] Snapshot: {first} / \\`\\`\\`dataviewjs / dv.paragraph(1) / \\`\\`\\` / - ",
+        # Mid-line, where no code starts, "$=" stays as it is.
+        " / \\~\\~\\~mermaid / graph TD / \\~\\~\\~ / $= dv.pages().length\n",
+        f"- [01:22] Attached file: {first} (",
+        f"**[01:10] Mallory {PLUGINS_ESCAPED}:** {PLUGINS_ESCAPED}",
+        # ZachCap's own Markdown, ordinary words and times are written as before.
+        "## My notes\n\n- [01:01] Check the backup line\n",
+        "- [01:30] Bookmarked moment\n",
+        "## Transcript\n\n**[00:01] Dana:** The cutover is Friday.  \n",
+    ):
+        assert part in md, part
+
+    log = digest.build(store, "day", date(2026, 11, 20))
+    # The page shows the words as they are; only the Markdown escapes them.
+    assert log["days"][0]["meetings"][0]["title"] == f"Cutover {PLUGINS}"
+    work = digest.markdown(log, cite=True)
+    about = f"({client_escaped}, ticket {PLUGINS_ESCAPED})"
+    assert f"### 09:05-09:07 Cutover {PLUGINS_ESCAPED} {about} [M{meeting_id}]" in work
+    assert "Topics: `$\\= dv.page()` <\\% x %> (" in work
+    mine = f"## Your open items (You)\n\n- [ ] {PLUGINS_ESCAPED} (due {PLUGINS_ESCAPED}), from"
+    assert mine in work
+    table = "| Time | Hours | Client | Ticket | Meeting | Note |\n|---|---|---|---|---|---|\n"
+    assert f"{table}| 09:05-09:07 | 0.25 | {client_escaped} | " in work
 
 
 def test_subtitles_and_text(meeting):
