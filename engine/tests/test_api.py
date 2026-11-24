@@ -29,7 +29,7 @@ def test_health_and_empty_lists_with_the_token(client: TestClient, tmp_path: Pat
     assert health["ok"] and health["data"] == str(tmp_path)
     assert client.get("/api/meetings", headers=auth).json() == []
     assert [p["name"] for p in client.get("/api/people", headers=auth).json()] == ["You"]
-    assert client.get("/api/record?token=test-token").json() == {"recording": False}
+    assert client.get("/api/record?token=test-token").json() == {"recording": False, "event": None}
 
 
 def test_only_the_app_origin_may_call_from_a_browser(client: TestClient):
@@ -153,7 +153,7 @@ def test_a_start_the_database_refuses_leaves_nothing_recording(client: TestClien
 
     assert refused.status_code == 500 and "database is locked" in refused.json()["detail"]
     assert started[0].stopped and not started[0].folder.exists()
-    assert client.get("/api/record", headers=AUTH).json() == {"recording": False}
+    assert client.get("/api/record", headers=AUTH).json() == {"recording": False, "event": None}
 
 
 def test_startup_finishes_what_a_crash_left_behind(tmp_path: Path, monkeypatch):

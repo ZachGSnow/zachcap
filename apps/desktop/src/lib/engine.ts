@@ -179,8 +179,20 @@ export type SearchHit = {
   snippet: string;
 };
 
+/** Something done on its own for a call: a recording started when a call app took the mic,
+ * stopped when the call ended, deleted (not a call after all, or Don't record), or one that
+ * couldn't start. */
+export type CallEvent = {
+  id: number;
+  kind: "started" | "stopped" | "discarded" | "declined" | "failed";
+  app: string | null;
+  meeting_id: number | null;
+  reason?: "call" | "quiet";
+  detail?: string;
+};
+
 export type RecordState =
-  | { recording: false }
+  | { recording: false; event?: CallEvent | null }
   | {
       recording: true;
       title: string | null;
@@ -196,6 +208,11 @@ export type RecordState =
       call?: { apps: string[]; ended_for: number | null };
       /** Seconds since anyone was heard on either track. */
       quiet_for?: number;
+      /** Started on its own when a call app took the mic; confirmed once it held it a minute. */
+      auto?: { app: string; meeting_id: number; confirmed: boolean } | null;
+      /** Counting down to stop on its own: the call ended, or nobody was heard for ten minutes. */
+      stopping?: { reason: "call" | "quiet"; in: number } | null;
+      event?: CallEvent | null;
     };
 
 /** A snapshot's text is what Windows read in the picture of the call. */
@@ -249,6 +266,12 @@ export type Settings = {
   mask_before_claude: boolean;
   /** Count down and stop when the call ends, or after ten quiet minutes. */
   stop_when_call_ends: boolean;
+  /** Start recording when a chosen call app takes the mic. */
+  auto_record: boolean;
+  /** The call apps that do. */
+  auto_record_apps: string[];
+  /** The call apps that can (never a web browser). */
+  auto_record_choices: string[];
   /** Keep a daily and weekly work log in the export folder too. */
   export_work_log: boolean;
   /** When a sound check last heard both sides (null: never). */

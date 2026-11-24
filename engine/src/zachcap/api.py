@@ -34,6 +34,7 @@ from . import (
     apikeys,
     attachments,
     audio,
+    autorecord,
     clients,
     dictation,
     digest,
@@ -186,6 +187,8 @@ class SettingsBody(BaseModel):
     keep_audio_days: int | None = None  # 0 keeps recordings forever
     mask_before_claude: bool | None = None
     stop_when_call_ends: bool | None = None
+    auto_record: bool | None = None  # start recording when a chosen call app takes the mic
+    auto_record_apps: list[str] | None = None  # the call apps that do (see autorecord)
     export_work_log: bool | None = None  # keep a daily and weekly work log in the export folder
     dictation: bool | None = None  # hold the dictation keys to dictate into any app
     dictation_snippets: str | None = None  # "cue: text to type", one per line
@@ -369,7 +372,140 @@ def create_app(token: str) -> FastAPI:
                 store.close()
         return meeting_id
 
+    def begin_recording(store: Store, title: str | None) -> int:
+        """Starts recording into a new meeting and returns its id. Raises HTTPException
+        (409 when already recording or checking the sound, 500 when it can't start)."""
+        from .capture import Recorder
+
+        with lock:
+            if recording.get("recorder") is not None:
+                raise HTTPException(status_code=409, detail="Already recording")
+            if recording.get("checking"):
+                raise HTTPException(status_code=409, detail="A sound check is running")
+            folder = paths.meetings_dir() / datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            recorder = Recorder(
+                folder,
+                mic_name=store.setting("mic_device") or None,
+                output_name=store.setting("output_device") or None,
+            )
+            try:
+                recorder.start()
+            except Exception as exc:
+                shutil.rmtree(folder, ignore_errors=True)
+                raise HTTPException(
+                    status_code=500, detail=f"Couldn't start recording: {exc}"
+                ) from exc
+            if dictator.holding:  # started mid-dictation: that's left out too
+                recorder.mute_mic(True)
+            # The meeting exists from the first second, so a crash can't lose it.
+            title = title or f"Meeting {datetime.now():%b %d %H:%M}"
+            started = recorder.started_at or datetime.now().astimezone()
+            try:
+                meeting_id = store.create_meeting(
+                    title, started.isoformat(timespec="seconds"), folder, status="recording"
+                )
+            except Exception as exc:  # the database busy or full: don't leave it recording
+                try:
+                    recorder.stop()
+                except Exception:
+                    traceback.print_exc()
+                shutil.rmtree(folder, ignore_errors=True)
+                raise HTTPException(
+                    status_code=500, detail=f"Couldn't start recording: {exc}"
+                ) from exc
+            # Warnings while it runs, call-end detection, and no sleep until it stops.
+            watch = Watch(recorder, folder)
+            try:
+                watch.start()
+            except Exception:  # never worth losing the recording over
+                traceback.print_exc()
+            recording.update(
+                recorder=recorder, meeting_id=meeting_id, title=title, notes=0, watch=watch
+            )
+        return meeting_id
+
+    def stop_recording() -> int | None:
+        """Stops and saves the recording, then transcribes it. None if not recording."""
+        meeting_id = finish_recording()
+        if meeting_id is not None:
+            worker.submit(meeting_id)
+        return meeting_id
+
+    def discard_recording() -> None:
+        """Stops the recording and deletes it, audio and all: Don't record, or a call app
+        that let go of the mic within a minute (not a call after all)."""
+        meeting_id = finish_recording()
+        if meeting_id is None:
+            return
+        store = Store()
+        try:
+            meeting = store.meeting(meeting_id)
+            if meeting is None:
+                return
+            folder = Path(meeting["folder"]).resolve()
+            store.delete_meeting(meeting_id)
+            store.scrub_deleted_text()
+            if folder.is_relative_to(paths.meetings_dir().resolve()) and folder.exists():
+                shutil.rmtree(folder, ignore_errors=True)
+        finally:
+            store.close()
+
+    def recording_now() -> dict | None:
+        """What the call watch needs to know about the recording running now, if any."""
+        with lock:
+            recorder = recording.get("recorder")
+            watch = recording.get("watch")
+            meeting_id = recording.get("meeting_id")
+        if recorder is None:
+            return None
+        status = watch.status() if watch is not None else {}
+        return {
+            "meeting_id": meeting_id,
+            "paused": recorder.paused,
+            "call": status.get("call") or {},
+            "quiet_for": status.get("quiet_for", 0.0),
+            "call_seen": list(watch.call_seen) if watch is not None else [],
+            "heard": any(
+                getattr(track, "heard_at", None) is not None
+                for track in getattr(recorder, "tracks", {}).values()
+            ),
+        }
+
+    # Settings the call watch reads every couple of seconds: from the database at most every
+    # ten seconds, and at once after Settings saves.
+    watch_settings: dict = {"at": float("-inf"), "value": None}
+
+    def call_settings() -> dict:
+        if time.monotonic() - watch_settings["at"] > 10 or watch_settings["value"] is None:
+            store = Store()
+            try:
+                watch_settings["value"] = {
+                    "auto": store.setting(autorecord.SETTING, "1") == "1",
+                    "apps": autorecord.chosen(store.setting(autorecord.APPS_SETTING)),
+                    "stop": store.setting("stop_when_call_ends", "1") == "1",
+                }
+            finally:
+                store.close()
+            watch_settings["at"] = time.monotonic()
+        return watch_settings["value"]
+
+    def start_for_call(app_name: str) -> int:
+        store = Store()
+        try:
+            return begin_recording(store, f"{app_name} call {datetime.now():%b %d %H:%M}")
+        finally:
+            store.close()
+
+    call_watch = autorecord.CallWatch(
+        settings=call_settings,
+        recording=recording_now,
+        start=start_for_call,
+        stop=stop_recording,
+        discard=discard_recording,
+    )
+
     app.state.finish_recording = finish_recording
+    app.state.call_watch = call_watch
     app.state.submit = worker.submit
     # The watch folder's looks (a thread started by serve()); Settings reads what it found.
     app.state.folder_watch = watchfolder.FolderWatch(worker.submit)
@@ -1096,11 +1232,15 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/record", dependencies=auth)
     def record_status():
+        # Recordings started and stopped for calls: the one this is (if it started it), the
+        # countdown to stop, and the latest thing done on its own (for a notification).
+        auto = call_watch.status()
         recorder = recording.get("recorder")
         if recorder is None:
-            return {"recording": False}
+            return {"recording": False, "event": auto["event"]}
         watch = recording.get("watch")
         return {
+            **auto,
             "recording": True,
             "title": recording.get("title"),
             "elapsed": round(recorder.elapsed, 1),
@@ -1137,62 +1277,30 @@ def create_app(token: str) -> FastAPI:
 
     @app.post("/api/record/start", dependencies=auth)
     def record_start(body: RecordBody, store: Store = Depends(db)):
-        from .capture import Recorder
-
-        with lock:
-            if recording.get("recorder") is not None:
-                raise HTTPException(status_code=409, detail="Already recording")
-            if recording.get("checking"):
-                raise HTTPException(status_code=409, detail="A sound check is running")
-            folder = paths.meetings_dir() / datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            recorder = Recorder(
-                folder,
-                mic_name=store.setting("mic_device") or None,
-                output_name=store.setting("output_device") or None,
-            )
-            try:
-                recorder.start()
-            except Exception as exc:
-                shutil.rmtree(folder, ignore_errors=True)
-                raise HTTPException(
-                    status_code=500, detail=f"Couldn't start recording: {exc}"
-                ) from exc
-            if dictator.holding:  # started mid-dictation: that's left out too
-                recorder.mute_mic(True)
-            # The meeting exists from the first second, so a crash can't lose it.
-            title = body.title or f"Meeting {datetime.now():%b %d %H:%M}"
-            started = recorder.started_at or datetime.now().astimezone()
-            try:
-                meeting_id = store.create_meeting(
-                    title, started.isoformat(timespec="seconds"), folder, status="recording"
-                )
-            except Exception as exc:  # the database busy or full: don't leave it recording
-                try:
-                    recorder.stop()
-                except Exception:
-                    traceback.print_exc()
-                shutil.rmtree(folder, ignore_errors=True)
-                raise HTTPException(
-                    status_code=500, detail=f"Couldn't start recording: {exc}"
-                ) from exc
-            # Warnings while it runs, call-end detection, and no sleep until it stops.
-            watch = Watch(recorder, folder)
-            try:
-                watch.start()
-            except Exception:  # never worth losing the recording over
-                traceback.print_exc()
-            recording.update(
-                recorder=recorder, meeting_id=meeting_id, title=title, notes=0, watch=watch
-            )
+        meeting_id = begin_recording(store, body.title)
         return {"recording": True, "meeting_id": meeting_id}
 
     @app.post("/api/record/stop", dependencies=auth)
     def record_stop():
-        meeting_id = finish_recording()
+        meeting_id = stop_recording()
         if meeting_id is None:
             raise HTTPException(status_code=409, detail="Not recording")
-        worker.submit(meeting_id)
         return {"meeting_id": meeting_id}
+
+    @app.post("/api/record/keep", dependencies=auth)
+    def record_keep():
+        """Keep recording: calls off the countdown to stop (the call ended, or a long
+        quiet) until the call app is back or someone speaks."""
+        return {"kept": call_watch.keep()}
+
+    @app.post("/api/record/decline", dependencies=auth)
+    def record_decline():
+        """Don't record: deletes the recording ZachCap started on its own for a call, and
+        doesn't record that app again until it lets go of the mic."""
+        try:
+            return call_watch.decline()
+        except LookupError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/soundcheck", dependencies=auth)
     def sound_check(store: Store = Depends(db)):
@@ -1291,13 +1399,17 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/call", dependencies=auth)
     def call():
-        """Apps using the microphone right now, so the app can offer to record."""
+        """Apps using the microphone right now, so the app can offer to record, and which
+        of them start a recording on their own (those it needn't offer)."""
         from .calls import apps_using_mic
 
         try:
-            return {"apps": apps_using_mic()}
+            apps = apps_using_mic()
         except OSError:
-            return {"apps": []}
+            apps = []
+        chosen = call_settings()
+        on_their_own = [a for a in apps if chosen["auto"] and a in chosen["apps"]]
+        return {"apps": apps, "auto": on_their_own}
 
     @app.get("/api/mcp", dependencies=auth)
     def mcp_config():
@@ -1409,6 +1521,12 @@ def create_app(token: str) -> FastAPI:
                 "mask_before_claude": store.setting("mask_before_claude") == "1",
                 # Offer to stop (with a countdown) when the call ends or after a long silence.
                 "stop_when_call_ends": store.setting("stop_when_call_ends", "1") == "1",
+                # Start recording when a chosen call app takes the mic (never a browser).
+                "auto_record": store.setting(autorecord.SETTING, "1") == "1",
+                "auto_record_apps": sorted(
+                    autorecord.chosen(store.setting(autorecord.APPS_SETTING))
+                ),
+                "auto_record_choices": autorecord.choosable(),
                 "export_work_log": store.setting("export_work_log") == "1",
                 "dictation": store.setting(dictation.SETTING) == "1",
                 "dictation_snippets": store.setting(dictation.SNIPPETS, ""),
@@ -1470,6 +1588,17 @@ def create_app(token: str) -> FastAPI:
             store.set_setting("mask_before_claude", "1" if body.mask_before_claude else "0")
         if body.stop_when_call_ends is not None:
             store.set_setting("stop_when_call_ends", "1" if body.stop_when_call_ends else "0")
+        if body.auto_record is not None:
+            store.set_setting(autorecord.SETTING, "1" if body.auto_record else "0")
+        if body.auto_record_apps is not None:
+            unknown = set(body.auto_record_apps) - set(autorecord.choosable())
+            if unknown:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Not a call app ZachCap can record on its own: {sorted(unknown)[0]}",
+                )
+            store.set_setting(autorecord.APPS_SETTING, ", ".join(sorted(body.auto_record_apps)))
+        watch_settings["value"] = None  # the call watch reads the new ones at its next look
         if body.dictation_snippets is not None:
             try:
                 dictation.snippets(body.dictation_snippets)
@@ -1605,11 +1734,15 @@ def serve(port: int, token: str) -> None:
             name="zachcap-watchdog",
             daemon=True,
         ).start()
-    # Recordings saved in the watch folder import themselves (off until a folder is chosen).
-    # Started here rather than in create_app, so tests never leave one running.
+    # Recordings saved in the watch folder import themselves (off until a folder is chosen),
+    # and calls are recorded on their own. Started here rather than in create_app, so tests
+    # never leave one running.
     threading.Thread(
         target=app.state.folder_watch.run_forever,
         name="zachcap-watch-folder",
         daemon=True,
+    ).start()
+    threading.Thread(
+        target=app.state.call_watch.run_forever, name="zachcap-call-watch", daemon=True
     ).start()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
