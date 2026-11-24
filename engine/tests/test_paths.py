@@ -15,6 +15,8 @@ from zachcap import export, imports, paths, pipeline, watchfolder
 from zachcap.api import create_app
 from zachcap.store import Store
 
+LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
+
 AUTH = {"Authorization": "Bearer test-token"}
 DRIVE_REMOVABLE, DRIVE_FIXED, DRIVE_REMOTE = 2, 3, 4  # as GetDriveTypeW says them
 SHARE = r"\\fileserver\share"
@@ -139,7 +141,7 @@ def test_a_saved_folder_is_used_only_when_it_is_on_this_pc(drives):
 @pytest.fixture
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    return TestClient(create_app("test-token"))
+    return TestClient(create_app("test-token"), base_url=LOCAL)
 
 
 def far(path) -> bool:
