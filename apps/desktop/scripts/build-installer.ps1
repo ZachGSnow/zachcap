@@ -10,10 +10,15 @@
     src-tauri\src\lib.rs). Prints the installer's path and SHA-256.
 
     Run from a clean checkout of the commit being released: the BUILD stamp records it, and
-    the installed app sets its engine up again whenever the stamp changes.
+    the installed app sets its engine up again whenever the stamp changes. A tree with
+    uncommitted changes is refused unless -AllowDirty is given (for a test build).
+
+    ZachCap's own code goes in as a wheel built here with that uv, so the installed app only
+    installs pinned, hash-checked files and never fetches a build tool.
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File apps\desktop\scripts\build-installer.ps1
 #>
+param([switch]$AllowDirty)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
@@ -55,6 +60,7 @@ foreach ($file in $files) {
 $version = (Get-Content (Join-Path $tauri 'tauri.conf.json') -Raw | ConvertFrom-Json).version
 $commit = git -C $repo rev-parse --short HEAD
 $dirty = if (git -C $repo status --porcelain) { '+local-changes' } else { '' }
+if ($dirty -and -not $AllowDirty) { throw 'The working tree has uncommitted changes: commit them, or pass -AllowDirty for a test build' }
 $stamp = "$version $commit$dirty $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
 [IO.File]::WriteAllText((Join-Path $stage 'engine\BUILD'), $stamp)
 
@@ -71,7 +77,12 @@ foreach ($license in $UvLicenses.GetEnumerator()) {
     Copy-Item $path (Join-Path $stage "uv\$($license.Key)")
 }
 
-Write-Host "Staged engine ($(@($files).Count) files, BUILD $stamp) and uv $UvVersion"
+# ZachCap's own code as a wheel, from the staged copy (only what git tracks).
+$uv = Join-Path $stage 'uv\uv.exe'
+& $uv build (Join-Path $stage 'engine') --wheel --out-dir (Join-Path $stage 'engine\wheel') --no-config
+if ($LASTEXITCODE -ne 0) { throw "uv build failed ($LASTEXITCODE)" }
+
+Write-Host "Staged engine ($(@($files).Count) files and its wheel, BUILD $stamp) and uv $UvVersion"
 
 Push-Location $desktop
 try {
