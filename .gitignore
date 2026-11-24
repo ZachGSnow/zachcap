@@ -41,6 +41,8 @@ node_modules/
 apps/desktop/dist/
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
+# What build-installer.ps1 stages for the installer (the engine's files and uv)
+apps/desktop/src-tauri/installer/
 
 # OS / editors
 .DS_Store

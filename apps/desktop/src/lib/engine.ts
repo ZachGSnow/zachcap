@@ -373,8 +373,11 @@ export function mediaUrl(path: string): string {
   return `${base()}${path}${path.includes("?") ? "&" : "?"}token=${info?.token}`;
 }
 
-export async function waitForEngine(timeoutMs = 180_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+/** Waits until the engine answers. While an installed copy sets its engine up (the first
+ * launch downloads Python and the speech libraries, a few GB), `onSetup` hears what it's
+ * doing and the wait doesn't run out. */
+export async function waitForEngine(timeoutMs = 180_000, onSetup?: (step: string) => void): Promise<void> {
+  let deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
       await api("/api/health");
@@ -382,7 +385,13 @@ export async function waitForEngine(timeoutMs = 180_000): Promise<void> {
     } catch (error) {
       const stopped = isTauri() ? await invoke<string | null>("engine_exited") : null;
       if (stopped) throw new Error(stopped);
-      if (Date.now() > deadline) throw error;
+      const setup = isTauri() ? await invoke<string | null>("engine_setup") : null;
+      if (setup !== null) {
+        onSetup?.(setup);
+        deadline = Date.now() + timeoutMs;
+      } else if (Date.now() > deadline) {
+        throw error;
+      }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   }

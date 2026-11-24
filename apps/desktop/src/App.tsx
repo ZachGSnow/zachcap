@@ -39,7 +39,7 @@ const MEDIA = ["mp4", "m4a", "mp3", "wav", "flac", "ogg", "webm", "mkv", "aac", 
 const briefQuestion = (name: string) =>
   `Brief me on ${name} before my next meeting with them: what we talked about recently, what's still open between us, and anything either of us promised.`;
 
-function Startup({ error, onRetry }: { error?: string; onRetry?: () => void }) {
+function Startup({ error, setup, onRetry }: { error?: string; setup?: string; onRetry?: () => void }) {
   return (
     <div className="flex h-screen select-none flex-col items-center justify-center gap-3 text-center">
       <div className="flex size-12 items-center justify-center rounded-xl bg-foreground text-background">
@@ -55,6 +55,18 @@ function Startup({ error, onRetry }: { error?: string; onRetry?: () => void }) {
               Try again
             </Button>
           )}
+        </>
+      ) : setup !== undefined ? (
+        <>
+          <p className="flex items-center gap-2 font-medium">
+            <Loader2 className="size-4 animate-spin" />
+            Setting up the speech engine
+          </p>
+          <p className="max-w-md text-sm text-muted-foreground">
+            The first start after installing downloads Python and the speech libraries (a few GB), so it
+            takes a few minutes. ZachCap opens when it's done.
+          </p>
+          <p className="max-w-md truncate font-mono text-xs text-muted-foreground">{setup}</p>
         </>
       ) : (
         <p className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -279,11 +291,13 @@ function Shell() {
 export default function App() {
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string>();
+  const [setup, setSetup] = useState<string>();
 
   const start = useCallback(() => {
     setError(undefined);
+    setSetup(undefined);
     connect()
-      .then(() => waitForEngine())
+      .then(() => waitForEngine(undefined, setSetup))
       .then(() => setReady(true))
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
@@ -299,6 +313,6 @@ export default function App() {
     start();
   };
 
-  if (!ready) return <Startup error={error} onRetry={isTauri() ? () => void retry() : undefined} />;
+  if (!ready) return <Startup error={error} setup={setup} onRetry={isTauri() ? () => void retry() : undefined} />;
   return <Shell />;
 }
