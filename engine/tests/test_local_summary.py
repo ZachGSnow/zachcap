@@ -49,6 +49,7 @@ class Model:
         self.unloaded: list[str] = []
         self.answer = lambda call: ANSWER
         self.cut_off = lambda call: False
+        self.read = 1000  # tokens of what it's asked
 
     def chat(self, on, system, user, shape, cancel, context, most) -> ollama.Reply:
         cancel.check()
@@ -60,7 +61,7 @@ class Model:
         if isinstance(answer, Exception):
             raise answer
         text = answer if isinstance(answer, str) else json.dumps(answer)
-        return ollama.Reply(text.strip(), read=1000, written=100, cut_off=self.cut_off(call))
+        return ollama.Reply(text.strip(), self.read, written=100, cut_off=self.cut_off(call))
 
 
 @pytest.fixture
@@ -191,7 +192,7 @@ def test_answers_are_held_to_the_meeting(store, model):
         ("Unassigned", "Order it", None, "action", "00:03"),  # "month" was never said
         ("Dana", "Send it", "by Tuesday", "action", "01:01"),
         ("Sam", "Call", None, "action", "01:01"),
-        ("Sam", "Meet", "5 PM", "action", "00:03"),
+        ("Sam", "Meet", None, "action", "00:03"),  # nor a time
     ]
     assert kept["decisions"] == ["It's on Friday."] and kept["open_questions"] == []
     points = ["One.", "Two.", "Three.", "Four."]
@@ -199,9 +200,65 @@ def test_answers_are_held_to_the_meeting(store, model):
     assert (kept["overview"], kept["title"]) == ("It is on Friday.", "")
     # What isn't there is empty; what isn't even a list is an error.
     assert set(local_summary.held({}, part, ["Sam"], local_summary.WHOLE)) == set(kept)
-    for odd in ({"topics": ["The cutover"]}, {"action_items": 3}, {"who_said_what": "Dana"}):
+    for odd in (
+        {"topics": ["The cutover"]},
+        {"action_items": 3},
+        {"who_said_what": "Dana"},
+        {"decisions": {"text": "Keep it."}},
+        {"open_questions": [{"text": "Who?"}]},
+    ):
         with pytest.raises(ollama.Failed, match="didn't answer as asked"):
             local_summary.held(odd, part, ["Sam"], local_summary.WHOLE)
+
+
+MAIL = {"title": "Mail", "start": "00:03"}
+DANA = {"speaker": "Dana", "points": ["One."]}
+
+
+@pytest.mark.parametrize(
+    ("field", "odd", "right"),
+    [
+        ("decisions", "Keep it.", ["Keep it."]),
+        ("decisions", [{"a": 1}, "Keep it.", ["Keep that."], 5, None], ["Keep it."]),
+        ("open_questions", "Who?", ["Who?"]),
+        ("topics", MAIL, [MAIL]),
+        ("topics", ["Phones", {**MAIL, "start": {}}], [MAIL]),
+        ("who_said_what", [{**DANA, "points": "One."}, {**DANA, "points": 3}, 7], [DANA]),
+        ("who_said_what", {**DANA, "speaker": ["Dana"]}, []),
+        ("overview", ["One.", "Two."], "One. Two."),
+        ("overview", {"text": "One."}, ""),
+        ("title", 5, ""),
+    ],
+)
+def test_an_odd_answer_is_taken_as_far_as_it_is_right(field, odd, right):
+    part = [Line(s, s + 3, who, text) for s, who, text in SHORT]
+    names = ["Sam", "Dana"]
+    assert local_summary.held({field: odd}, part, names, local_summary.WHOLE)[field] == right
+
+
+def test_an_odd_action_item_is_left_out():
+    part = [Line(s, s + 3, who, text) for s, who, text in SHORT]
+    odd = [7, {"owner": ["Dana"], "task": "send it", "due": ["Tuesday"], "said_at": 1}, {"task": 5}]
+    kept = local_summary.held({"action_items": odd}, part, ["Sam", "Dana"], ["action_items"])
+    item = {"owner": "Unassigned", "task": "Send it", "due": "Tuesday", "kind": "action"}
+    assert kept == {"action_items": [{**item, "said_at": "00:03"}]}
+
+
+@pytest.mark.parametrize(
+    ("odd", "settled"),
+    [
+        (["D1", ["Q1"], {"n": 1}, 5, None, "D1"], ["D1"]),
+        ("D1", ["D1"]),
+        ([["D1"]], []),
+        ({"D1": True}, []),
+        (5, []),
+        (None, []),
+    ],
+)
+def test_odd_notes_of_what_is_settled_are_left_out(odd, settled):
+    before = {"D1": "The mail moves tonight at nine.", "Q1": "Who is on call?"}
+    said = local_summary.settled({"settled": odd}, before, ["The mail moves tonight at ten."])
+    assert said == {"settled": settled, "changed": []}
 
 
 @pytest.mark.parametrize(
@@ -212,11 +269,113 @@ def test_answers_are_held_to_the_meeting(store, model):
         ("Replace switch 1", "Replace switch 2", False),
         ("Send the report to Dana", "Send the report to Mark", False),
         ("Call", "Call the vendor about the firewall firmware", False),
+        ("Migrate the mail tonight", "Not migrate the mail tonight", False),
+        ("We will migrate the mail tonight", "We won't migrate the mail tonight", False),
+        ("Turn on the alerts of the mail queue", "Turn off the alerts of the mail queue", False),
+        ("We cancel the move of the mail", "We do not cancel the move of the mail", False),
+        ("We can't move the mail tonight", "We cannot move the mail tonight", True),
+        ("The relay isn't moved tonight", "The relay is not moved tonight", True),
         ("", "", False),
     ],
 )
 def test_a_task_said_again_is_the_same_one(one, other, same):
     assert local_summary._same_task(one, other) is local_summary._same_task(other, one) is same
+
+
+@pytest.mark.parametrize(
+    ("before", "now"),
+    [
+        ("We will not migrate the mail tonight.", "We will migrate the mail tonight."),
+        ("We will migrate the mail tonight.", "We won't migrate the mail tonight."),
+        ("The cutover will happen on Friday.", "The cutover will no longer happen on Friday."),
+        ("Reboot the mail server tonight.", "Don't reboot the mail server tonight."),
+        ("The Friday cutover is on.", "The Friday cutover is cancelled."),
+        ("We will cancel the move.", "We will not cancel the move."),
+        ("We can move the mail tonight.", "We can't move the mail tonight."),
+    ],
+)
+def test_a_decision_that_a_later_part_turns_round_is_replaced(store, model, before, now):
+    meeting = add_meeting(store, LONG[:80])
+    decided = iter(([before, "Keep the old relay."], [now], []))
+    model.answer = lambda call: {**ANSWER, "decisions": next(decided), "settled": []}
+
+    content = local_summary.summary(store, meeting, "small:4b")
+
+    _, second, together = model.calls
+    assert content["decisions"] == ["Keep the old relay.", now]
+    assert f"D1 (decided): {before}" in second.user  # it was told, and named nothing
+    assert f"Decided: {before}" not in together.user and f"Decided: {now}" in together.user
+
+
+def test_a_decision_is_turned_round_by_a_later_part_only():
+    both = ["If the backup has not run by nine, wait.", "If the backup has run by nine, wait."]
+    assert local_summary._still([kept(decisions=both)], "D") == both
+    many = [f"Decision {n} of these {n}." for n in range(40)]  # more than a part is told of
+    answers = [kept(decisions=["We move it tonight.", *many])]
+    answers.append(kept(decisions=["We never move it tonight."]))
+    assert local_summary._still(answers, "D") == [*many, "We never move it tonight."]
+    back = ["We move it tonight.", "We never move it tonight.", "We move it tonight."]
+    assert local_summary._still([kept(decisions=[said]) for said in back], "D") == back[-1:]
+    asked = [kept(open_questions=["Is it moved?"]), kept(open_questions=["Is it not moved?"])]
+    assert len(local_summary._still(asked, "Q")) == 2
+    # And only by the same words: a "not" about something else leaves it alone.
+    for before, now in (
+        ("Replace switch 1 tonight.", "Don't replace switch 2 tonight."),
+        ("Dana takes the phones on Friday.", "Dana takes Friday off."),
+        ("The lab gets new phones this week.", "The lab gets no new phones."),
+    ):
+        answers = [kept(decisions=[before]), kept(decisions=[now])]
+        assert local_summary._still(answers, "D") == [before, now]
+
+
+def test_what_is_said_again_is_as_it_was_said_last():
+    said = "Move the mail server tonight at ten with Dana and Marcus on call."
+    again = kept(decisions=[said])
+    # Said again after it was changed, it holds; changed after it was said again, it doesn't.
+    answers = [again, kept(decisions=["Order it."], changed=["D1"]), again]
+    assert local_summary._still(answers, "D") == [said, "Order it."]
+    answers = [again, again, kept(changed=["D2"])]
+    assert local_summary._still(answers, "D") == [f"{said} (Changed later.)"]
+    # Its words are the last ones, unless it was said in more detail before.
+    short, longer = "Send Priya and Sam the new list.", "Send Priya and Sam the new list by noon."
+    for first, last, stays in (
+        ("Dana, not Priya, calls the vendor.", "Priya, not Dana, calls the vendor.", 1),
+        (longer, short, 0),
+        (short, longer, 1),
+    ):
+        answers = [kept(decisions=[first]), kept(decisions=[last])]
+        assert local_summary._still(answers, "D") == [(first, last)[stays]]
+
+
+def test_an_action_item_is_due_when_it_was_said_last():
+    def items(*said) -> list[tuple]:
+        answers = [
+            kept(
+                action_items=[
+                    {"owner": owner, "task": task, "due": due, "kind": "commitment", "said_at": at}
+                ]
+            )
+            for at, owner, task, due in said
+        ]
+        listed = local_summary._action_items(answers)
+        return [(i["said_at"], i["owner"], i["task"], i["due"]) for i in listed]
+
+    friday = ("05:00", "Dana", "Send the report", "Friday")
+    assert items(friday, ("45:00", "Dana", "Send the report", "Monday")) == [
+        ("45:00", "Dana", "Send the report", "Monday")  # and where that was said
+    ]
+    assert items(friday, ("45:00", "Dana", "Send the report", None)) == [friday]
+    assert items(friday, ("45:00", "Dana", "Send the report", "Friday")) == [friday]
+    detailed = ("05:00", "Dana", "Send the report to Priya and Sam", None)
+    assert items(detailed, ("45:00", "Dana", "Send the report to Priya", "Monday")) == [
+        ("45:00", "Dana", "Send the report to Priya and Sam", "Monday")
+    ]
+    # Taken back, only that is left; somebody else's is theirs.
+    reboot = ("05:00", "Dana", "Reboot the mail server", "tonight")
+    back = ("45:00", "Dana", "Not reboot the mail server", None)
+    other = ("06:00", "Sam", "Reboot the mail server", None)
+    assert items(reboot, other, back) == [other, back]
+    assert items(reboot, back, ("50:00", *reboot[1:])) == [("50:00", *reboot[1:])]
 
 
 def lines(count: int, size: int = 100, pause: float = 1.0) -> list[Line]:
@@ -240,6 +399,111 @@ def test_a_transcript_is_cut_at_pauses():
     # A short rest stays with the part before it, and one long line is a part of its own.
     assert [len(p) for p in local_summary.parts(lines(48), 5000)] == [48]
     assert [len(p) for p in local_summary.parts(lines(3, size=6000), 5000)] == [1, 1, 1]
+
+
+@pytest.mark.parametrize(
+    ("due", "said"),
+    [
+        ("before the weekend", True),
+        ("Before the Weekend.", True),
+        ("by the weekend", True),  # its words, but for a small one
+        ("Monday, next week", True),
+        ("5 p.m.", True),
+        ("5 PM", True),
+        ("the  3rd", True),
+        ("\u91d1\u66dc\u65e5\u307e\u3067", True),
+        ("\u91d1\u66dc\u65e5", True),
+        ("\u6708\u66dc\u65e5", False),
+        ("2026-12-01", False),
+        ("11/27", False),
+        ("Q3", False),
+        ("by the end of the quarter", False),
+        ("before Christmas", False),
+        ("next month", False),
+        ("now", False),  # not in "know"
+        ("Mon", False),
+        ("on it", False),
+        ("none", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_a_due_date_is_one_that_was_said(due, said):
+    talk = (
+        "You know the report: I'll look at it before",
+        "the weekend, or by 5 p.m. on Monday the 3rd, next week.",
+        "\u91d1\u66dc\u65e5\u307e\u3067\u306b\u5831\u544a\u66f8\u3092\u9001\u308a\u307e\u3059\u3002",
+    )
+    part = [Line(i * 5.0, i * 5.0 + 4, "Dana", text) for i, text in enumerate(talk)]
+    written = " ".join((due or "").split()).rstrip(".")
+    assert local_summary._due(due, part) == (written if said else None)
+
+
+def add_talk(store: Store, meeting: int, text: str, start: float, end: float) -> None:
+    """Adds a line of Dana's, who speaks in the meeting, with an end of its own."""
+    speaker = next(r for r in store.transcript(meeting) if r["speaker"] == "Dana")
+    row = (speaker["meeting_speaker_id"], "system", start, end, text, 0.9)
+    store.add_segments(meeting, [row])
+
+
+def test_a_line_without_a_pause_is_several_lines(store):
+    meeting = add_meeting(store, [(600.0, "Sam", "Right."), (1502.0, "Dana", "So much for that.")])
+    talk = " ".join(f"Sentence {i} is about the mail move, v1.{i} of it." for i in range(700))
+    add_talk(store, meeting, talk, 0.0, 1500.0)
+
+    said = local_summary.lines_of(store, meeting)
+
+    *pieces, last = [line for line in said if line.speaker == "Dana"]
+    assert last == Line(1502.0, 1505.0, "Dana", "So much for that.")
+    assert len(talk) > 30_000 and " ".join(piece.text for piece in pieces) == talk  # all of it
+    for piece in pieces:
+        assert len(piece.text) <= local_summary.LINE_CHARS and piece.text.endswith(" of it.")
+        at = 1500.0 * talk.index(piece.text) / len(talk)
+        assert abs(piece.start - at) < 0.1 and piece.start < piece.end
+    assert (pieces[0].start, pieces[-1].end) == (0.0, pytest.approx(1500.0))
+    # Somebody else's word is where it was said, between two of them.
+    assert [line.start for line in said] == sorted(line.start for line in said)
+    right = next(i for i, line in enumerate(said) if line.text == "Right.")
+    assert said[right - 1].start <= 600.0 <= said[right + 1].start
+    # A line that fits is as it was.
+    assert local_summary.lines_of(store, add_meeting(store, SHORT)) == [
+        Line(start, start + 3.0, who, text) for start, who, text in SHORT
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "ends"),
+    [
+        (" ".join(f"word{i}" for i in range(900)), "0123456789"),  # no sentence ends: whole words
+        ("Yes. " + " ".join(f"word{i}" for i in range(900)), "0123456789"),
+        ("\u91d1\u66dc\u65e5\u307e\u3067\u306b\u9001\u308a\u307e\u3059\u3002" * 300, "\u3002"),
+        ("\u3042" * 2500, "\u3042"),  # nowhere to cut
+    ],
+)
+def test_a_long_line_is_cut_where_it_can_be(text, ends):
+    pieces = Line(60.0, 660.0, "Dana", text).pieces()
+    assert len(pieces) > 2 and all(len(p.text) <= local_summary.LINE_CHARS for p in pieces)
+    assert "".join(p.text for p in pieces).replace(" ", "") == text.replace(" ", "")
+    assert all(piece.text[-1] in ends and piece.text == piece.text.strip() for piece in pieces)
+    assert all(len(piece.text) >= local_summary.LINE_CHARS // 2 for piece in pieces[:-1])
+
+
+def test_a_summary_of_a_talk_without_a_pause_is_of_all_of_it(store, model):
+    meeting = add_meeting(store, [(610.0, "Sam", "Right."), (1502.0, "Dana", "That's it.")])
+    talk = " ".join(f"word{i}" for i in range(3600)) + " Dana resets the passwords on Friday."
+    add_talk(store, meeting, talk, 0.0, 1500.0)
+    noted_at = (0.0, 300.0, 605.0, 615.0, 900.0, 1499.0, 1600.0)
+    for at in noted_at:
+        store.add_note(meeting, at, "note", f"Note at {at}.")
+
+    local_summary.summary(store, meeting, "small:4b")
+
+    *noted, _ = model.calls
+    sent = "\n".join(call.user for call in noted)
+    assert len(noted) > 2 and all(sent.split().count(f"word{i}") == 1 for i in range(1, 3599))
+    assert "Dana resets the passwords on Friday." in sent and "cut off" not in sent
+    assert all(sent.count(f"Note at {at}.") == 1 for at in noted_at)
+    assert sent.count("[10:10] Sam: Right.") == 1
 
 
 LONG = [(i * 10.0, "Sam" if i % 2 else "Dana", f"Line {i} " + "word " * 40) for i in range(120)]
@@ -295,8 +559,9 @@ def test_a_long_meeting_is_noted_part_by_part_and_put_together(store, model):
     assert [t["title"] for t in content["topics"]] == ["Cutover", "Phones"]
     assert (content["title"], content["overview"]) == ("The whole call", "Everything.")
     assert content["decisions"] == [f"Decision {n}." for n in range(1, of + 1)]
-    # Everyone's points are their own, some of every part.
-    points = [f"Sam's {n}." for n in range(1, of + 1)]
+    # Everyone's points are their own: the first of every part, and one more that fits.
+    first, *others = [f"Sam's {n}." for n in range(1, of + 1)]
+    points = [first, "More.", *others]
     assert content["who_said_what"] == [{"speaker": "Sam", "points": points}]
     assert (store.summary(meeting)["input_tokens"], model.unloaded) == (
         1000 * (of + 1),
@@ -396,7 +661,9 @@ def test_one_line_that_doesnt_fit_is_an_error(store, model):
     assert store.summary(meeting) is None and model.unloaded == ["small:4b"]
 
 
-@pytest.mark.parametrize("answer", ["Sure! Here is the summary.", "[1, 2]", "{", {"topics": [1]}])
+@pytest.mark.parametrize(
+    "answer", ["Sure! Here is the summary.", "[1, 2]", "{", "[" * 3000, {"topics": [1]}]
+)
 def test_an_answer_out_of_shape_is_an_error_and_keeps_the_last_summary(store, model, answer):
     meeting = add_meeting(store, SHORT)
     store.save_summary(meeting, "claude-opus-5-5", {"title": "Kept"}, 1, 1, 0.1)
@@ -433,6 +700,158 @@ def test_the_kind_is_settled_by_clues_or_by_the_model(store, model):
     assert store.meeting(unclear)["template"] == "general"  # not one of the kinds
 
 
+BROKEN = [
+    "The call was about the move.",
+    '{"overview": "The the the the',
+    {"overview": " ", "title": "T"},
+    {"overview": {"text": "x"}, "title": []},
+    ollama.TooLong("Ollama: the input length exceeds the context length"),
+    ollama.Failed("Ollama: the runner stopped"),
+]
+STOPS = [
+    ollama.Cancelled("Stopped."),
+    ollama.NotRunning("Ollama isn't answering on this PC."),
+    ollama.NotHere("Ollama: model 'small:4b' not found"),
+]
+
+
+def about_parts(model: Model, *overviews) -> list[SimpleNamespace]:
+    """Answers each part, and then the calls for the overview, which are returned."""
+    asked: list[SimpleNamespace] = []
+
+    def answer(call):
+        if "topics" in call.shape["properties"]:
+            number = len(model.calls)
+            return {
+                **ANSWER,
+                "topics": [{"title": f"Topic {number}", "start": "00:00"}],
+                "decisions": [f"Decision {number}."],
+                "settled": [],
+            }
+        asked.append(call)
+        return overviews[len(asked) - 1]
+
+    model.answer = answer
+    return asked
+
+
+@pytest.mark.parametrize("broken", BROKEN)
+def test_an_overview_that_fails_is_asked_for_again_with_less(store, model, broken):
+    meeting = add_meeting(store, LONG)
+    asked = about_parts(model, broken, {"overview": "Everything.", "title": "The call"})
+    content = local_summary.summary(store, meeting, "small:4b")
+    assert (content["overview"], content["title"]) == ("Everything.", "The call")
+    first, second = [call.user.split("<summary>")[1].split("</summary>")[0] for call in asked]
+    assert len(second) < len(first) * 0.6 and "Part 1" in second and "Part 4" in second
+    assert first.startswith(second[:20]) and model.unloaded == ["small:4b"]
+
+
+@pytest.mark.parametrize("broken", BROKEN)
+def test_an_overview_that_isnt_written_is_made_of_the_notes(store, model, broken):
+    meeting = add_meeting(store, LONG)
+    asked = about_parts(model, broken, broken)
+    content = local_summary.summary(store, meeting, "small:4b")
+    assert len(asked) == 2 and len(model.calls) == 6
+    # Said to be so, with nothing that isn't in the notes; the meeting keeps its title.
+    assert content["title"] == "Cutover sync"
+    assert content["overview"] == (
+        "The model didn't write an overview. Topics: Topic 1; Topic 2; Topic 3; Topic 4. "
+        "Decided: Decision 1. Decision 3. Decision 4."
+    )
+    assert content["decisions"] == [f"Decision {n}." for n in (1, 2, 3, 4)]
+    assert store.summary(meeting)["content"] == content and model.unloaded == ["small:4b"]
+    assert len(store.action_items(meeting_id=meeting)) == 1
+
+
+def test_an_overview_cut_off_is_one_that_fails(store, model):
+    meeting = add_meeting(store, LONG)
+    asked = about_parts(
+        model, {"overview": "Half", "title": "T"}, {"overview": "Half", "title": "T"}
+    )
+    model.cut_off = lambda call: "topics" not in call.shape["properties"]
+    content = local_summary.summary(store, meeting, "small:4b")
+    assert len(asked) == 2 and content["overview"].startswith("The model didn't write an overview.")
+
+
+def test_an_overview_of_nothing_noted_says_so():
+    assert local_summary.outline([kept(), kept()]) == {
+        "overview": "The model didn't write an overview.",
+        "title": "",
+    }
+
+
+@pytest.mark.parametrize("stop", STOPS)
+def test_what_stops_a_summary_stops_its_overview(store, model, stop):
+    meeting = add_meeting(store, LONG)
+    for overviews in ((stop,), ("Not JSON.", stop)):
+        asked = about_parts(model, *overviews)
+        with pytest.raises(type(stop), match=str(stop)):
+            local_summary.summary(store, meeting, "small:4b")
+        assert len(asked) == len(overviews) and model.unloaded.pop() == "small:4b"
+    # Stopped while it failed, it isn't asked again.
+    asked = about_parts(model, "Not JSON.", ANSWER)
+    answer = model.answer
+    model.answer = lambda call: (
+        answer(call)
+        if "topics" in call.shape["properties"]
+        else call.cancel.cancel() or answer(call)
+    )
+    with pytest.raises(ollama.Cancelled):
+        local_summary.summary(store, meeting, "small:4b")
+    assert len(asked) == 1 and store.summary(meeting) is None
+
+
+@pytest.mark.parametrize(
+    ("odd", "stays"),
+    [
+        ("Sure, it is a project.", "general"),
+        ("[1]", "general"),
+        ({"kind": ["project"]}, "general"),
+        ({}, "general"),
+        (ollama.TooLong("Ollama: the input length exceeds the context length"), "auto"),
+        (ollama.Failed("Ollama: the runner stopped"), "auto"),
+    ],
+)
+def test_a_kind_that_isnt_picked_is_general(store, model, odd, stays):
+    unclear = add_meeting(store, [*SHORT, (90.0, "Mark", "Hello.")])
+    model.answer = lambda call: odd if call.most == 60 else ANSWER
+    content = local_summary.summary(store, unclear, "small:4b", "auto")
+    pick, written = model.calls
+    assert content["template"] == "general" and content["title"] == "Cutover sync"
+    assert prompts.TEMPLATES["general"][1] in written.system
+    # A pick that couldn't be made leaves the meeting Automatic: the next summary picks.
+    assert store.meeting(unclear)["template"] == stays
+    model.cut_off = lambda call: call.most == 60
+    assert local_summary.summary(store, unclear, "small:4b", "auto")["template"] == "general"
+
+
+@pytest.mark.parametrize("stop", STOPS)
+def test_what_stops_a_summary_stops_the_pick(store, model, stop):
+    unclear = add_meeting(store, [*SHORT, (90.0, "Mark", "Hello.")])
+    model.answer = lambda call: stop if call.most == 60 else ANSWER
+    with pytest.raises(type(stop), match=str(stop)):
+        local_summary.summary(store, unclear, "small:4b", "auto")
+    assert len(model.calls) == 1 and model.unloaded == ["small:4b"]
+
+
+def test_the_first_part_is_under_way_while_the_kind_is_picked(store, model):
+    for talk, of in ((SHORT, 1), (LONG, 4)):
+        unclear = add_meeting(store, [*talk, (talk[-1][0] + 5.0, "Mark", "Hello.")])
+        seen: list = []
+
+        def answer(call, seen=seen):
+            seen.append("pick" if call.most == 60 else "part")
+            return {"kind": "project"} if call.most == 60 else {**ANSWER, "settled": []}
+
+        model.answer = answer
+        local_summary.summary(
+            store, unclear, "small:4b", "auto", progress=lambda *at, seen=seen: seen.append(at)
+        )
+        assert seen[:3] == [(1, of), "pick", "part"]
+        later = [(n, of) for n in range(1, of + 2)] if of > 1 else [(1, 1)]
+        assert [at for at in seen if isinstance(at, tuple)] == later
+
+
 def test_no_transcript_no_model_no_summary(store, model):
     empty = add_meeting(store, [])
     with pytest.raises(RuntimeError, match="no transcript"):
@@ -441,6 +860,42 @@ def test_no_transcript_no_model_no_summary(store, model):
     with pytest.raises(ollama.Failed, match="doesn't have gone:7b"):
         local_summary.summary(store, meeting, "gone:7b")
     assert model.calls == []
+
+
+def kept(**fields) -> dict:
+    """What is kept of the answer for one part."""
+    empty = {field: [] for field in (*local_summary.PART, "settled", "changed")}
+    return {**empty, **fields}
+
+
+@pytest.mark.parametrize(
+    ("count", "topics", "points"),
+    [
+        (2, [0, 0, 0, 0, 1, 1, 1, 1], [0, 0, 0, 1, 1]),
+        (6, [0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 5], [0, 1, 2, 4, 5]),
+        (18, [0, 1, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 16, 17], [0, 4, 8, 13, 17]),
+    ],
+)
+def test_topics_and_points_are_from_every_part_of_a_long_meeting(count, topics, points):
+    answers = [
+        kept(
+            topics=[{"title": f"Topic {n}.{i}", "start": f"{n}:0{i}"} for i in range(4)],
+            who_said_what=[{"speaker": "Dana", "points": [f"{n}.{i}" for i in range(4)]}],
+        )
+        for n in range(count)
+    ]
+    starts = [tuple(map(int, t["start"].split(":"))) for t in local_summary._topics(answers)]
+    assert [part for part, _ in starts] == topics and starts == sorted(starts)
+    [entry] = local_summary._points(answers, ["Dana", "Sam"])
+    said = [tuple(map(int, point.split("."))) for point in entry["points"]]
+    assert [part for part, _ in said] == points and said == sorted(said)
+
+
+def test_a_topic_that_goes_on_in_the_next_part_is_one_topic():
+    topics = [["Mail", "Phones"], ["phones", "Mail"], [], ["Mail", "Wrap-up"]]
+    answers = [kept(topics=[{"title": t, "start": "00:00"} for t in part]) for part in topics]
+    titles = [topic["title"] for topic in local_summary._topics(answers)]
+    assert titles == ["Mail", "Phones", "Mail", "Wrap-up"]
 
 
 def test_the_notes_put_together_never_grow_past_what_fits():
@@ -458,6 +913,32 @@ def test_the_notes_put_together_never_grow_past_what_fits():
     text = local_summary.notes_text(answers, 4000)
     assert len(text) <= 4000 and text.count("To do: Dana: Do it") == 18
     assert len(local_summary.notes_text(answers, 100)) <= 100
+
+
+def test_the_notes_put_together_keep_the_end_of_a_long_meeting():
+    def part(n: int) -> dict:
+        task = f"Check server {n} and send the report to the client team"
+        return kept(
+            topics=[{"title": f"Topic {n}.{i} of the move", "start": "00:00"} for i in (1, 2)],
+            decisions=[f"The mail relay of site {n}.{i} moves to the new server." for i in (1, 2)],
+            open_questions=[f"Who covers site {n}?"],
+            action_items=[{"owner": "Dana", "task": f"{task} ({i})"} for i in range(13)],
+            who_said_what=[{"speaker": "Dana", "points": [f"Moves site {n}."] * 4}],
+        )
+
+    answers = [part(n) for n in range(1, 19)]  # three hours
+    whole = local_summary.notes_text(answers, 10**6).splitlines()
+    text = local_summary.notes_text(answers)
+    assert local_summary.NOTES_CHARS * 0.8 < len(text) <= local_summary.NOTES_CHARS
+    assert set(text.splitlines()) <= set(whole)  # no line is cut
+    todo = []
+    for n, said in enumerate(text.split("\n\n"), 1):
+        assert said.startswith(f"Part {n}\nTopics: Topic {n}.1 of the move; Topic {n}.2 of")
+        assert said.count("Decided: ") == 2 and f"Open: Who covers site {n}?" in said
+        assert "Moves site" not in said  # what people said goes first
+        todo.append(said.count("To do: "))
+    assert len(todo) == 18 and 0 < min(todo) == max(todo) < 13  # then as much of every part
+    assert local_summary.notes_text(answers, 40) == ""  # not even their numbers fit
 
 
 def test_a_document_is_written_from_the_transcript_and_the_summary(store, model):
@@ -496,6 +977,203 @@ def test_a_document_of_a_long_meeting_needs_its_summary(store, model):
     model.answer = lambda call: "Notes."
     assert local_summary.document(store, meeting, "ticket", "small:4b")["text"] == "Notes."
     assert "<transcript>" not in model.calls[-1].user and "Long" in model.calls[-1].user
+
+
+def busy(parts: int) -> dict:
+    """A saved summary of a long and busy meeting."""
+    return {
+        "title": "Mail relay move",
+        "overview": "The call was about moving the mail relay. It ended with a plan for Friday.",
+        "decisions": [
+            f"Decided {n}: the relay of site {n} moves on Friday." for n in range(parts * 2)
+        ],
+        "action_items": [
+            {
+                "owner": ("Dana", "Priya")[n % 2],
+                "task": f"Task {n}: send the list of the mailboxes of site {n} to the client",
+                "due": "Friday" if n % 2 else None,
+                "kind": "commitment",
+                "said_at": f"{n // 60}:{n % 60:02d}:00",
+            }
+            for n in range(parts * 13)
+        ],
+        "who_said_what": [
+            {"speaker": who, "points": [f"{who} said {n} about the list." for n in range(5)]}
+            for who in ("Dana", "Priya", "Marcus")
+        ],
+        "open_questions": [f"Open {n}: who covers the phones of site {n}?" for n in range(parts)],
+        "topics": [{"title": f"Topic {n} of the move", "start": f"{n}:00"} for n in range(14)],
+        "template": "incident",
+    }
+
+
+def size(content: dict) -> int:
+    return len(json.dumps(content, ensure_ascii=False))
+
+
+@pytest.mark.parametrize("parts", [1, 6, 18])
+@pytest.mark.parametrize("most", [1000, 4000, 9500, 16_000])
+def test_a_summary_that_is_too_long_is_shortened(parts, most):
+    whole = busy(parts)
+    short = local_summary.shortened(whole, most)
+    assert whole == busy(parts)  # it's kept as it was
+    assert short == whole if size(whole) <= most else most - 200 < size(short) <= most
+    assert all(short[f] == whole[f] for f in ("title", "overview", "template"))
+    # One list is cut into: those needed less are gone, those needed more are whole.
+    order = ("who_said_what", *local_summary.LEAST_NEEDED)
+    left = [len(short[field]) / len(whole[field]) for field in order]
+    assert left == sorted(left) and sum(0 < share < 1 for share in left) <= 1
+    # What stays of it is from all of the meeting.
+    for field in local_summary.LEAST_NEEDED:
+        at = [whole[field].index(entry) for entry in short[field]]
+        steps = {later - earlier for earlier, later in zip(at, at[1:], strict=False)}
+        assert len(at) < 2 or (at[0], at[-1]) == (0, len(whole[field]) - 1)
+        assert not steps or max(steps) - min(steps) <= 1
+
+
+def test_what_people_said_is_shortened_evenly():
+    whole = busy(1)
+    short = local_summary.shortened(whole, size(whole) - 200)
+    points = [[point.split()[2] for point in entry["points"]] for entry in short["who_said_what"]]
+    assert points == [["0", "4"]] * 3  # some of everyone's
+    assert all(short[field] == whole[field] for field in whole if field != "who_said_what")
+    # Summaries of other versions may lack some of it.
+    for content in ({"title": "Long"}, {"overview": "x" * 900}, {"decisions": None, "topics": []}):
+        kept = local_summary.shortened(content, 100)
+        assert {field: kept[field] for field in content} == content
+
+
+ASKED = "What about the relay and the list for the client?"
+
+
+@pytest.mark.parametrize("room", [30_000, 16_000, 9_000, 5_000])
+def test_a_long_meetings_documents_and_answers_fit(store, model, room):
+    talk = [
+        (i * 10.0, "Dana", f"The relay and the list, line {i}, for the client.") for i in range(720)
+    ]
+    meeting = add_meeting(store, talk)
+    store.save_summary(meeting, "claude-opus-5-5", busy(12), 1, 1, 0.1)
+
+    def answer(call):
+        if len(call.system) + len(call.user) > room:  # as Ollama says it, in characters here
+            return ollama.TooLong("Ollama: the input length exceeds the context length")
+        return "Text [00:00]."
+
+    model.answer = answer
+    document = local_summary.document(store, meeting, "ticket", "small:4b")
+    asked = model.calls[-1]
+    assert document["text"].startswith("Text") and "<transcript>" not in asked.user
+    told = local_summary.answer(store, meeting, ASKED, "small:4b")
+    assert told["answer"] == "Text [00:00]." and "Lines of the transcript" in model.calls[-1].user
+    for call in (asked, model.calls[-1]):
+        assert (
+            "The call was about moving the mail relay." in call.user and "Decided 0:" in call.user
+        )
+        assert room / 4 < len(call.system) + len(call.user) <= room
+    for call in (call for call in model.calls if room >= 9_000):  # the first that was asked
+        assert "Decided 23:" in call.user and len(call.user) < 40_000
+    assert model.unloaded == ["small:4b"] * 2
+
+
+def test_a_document_or_an_answer_that_cant_fit_says_so(store, model):
+    meeting = add_meeting(store, LONG)
+    store.save_summary(meeting, "claude-opus-5-5", busy(6), 1, 1, 0.1)
+    model.answer = lambda call: ollama.TooLong("Ollama: the input length exceeds the context")
+    for write in (
+        lambda: local_summary.document(store, meeting, "ticket", "small:4b"),
+        lambda: local_summary.answer(store, meeting, ASKED, "small:4b"),
+    ):
+        model.calls.clear()
+        with pytest.raises(ollama.Failed, match="small:4b can't read this much at once") as failed:
+            write()
+        assert "exceeds" not in str(failed.value)
+        sizes = [len(call.user) for call in model.calls]
+        assert 3 < len(sizes) < 7 and sizes == sorted(sizes, reverse=True)
+        assert model.unloaded.pop() == "small:4b"
+    # Without a summary, that is what to write first.
+    short = add_meeting(store, [(i * 10.0, "Dana", "word " * 100) for i in range(20)])
+    with pytest.raises(RuntimeError, match="write the summary first"):
+        local_summary.document(store, short, "ticket", "small:4b")
+    assert model.unloaded.pop() == "small:4b"
+
+
+def test_a_transcript_too_dense_to_fit_leaves_the_summary_to_write_from(store, model):
+    meeting = add_meeting(store, [(i * 10.0, "Dana", "word " * 100) for i in range(20)])
+    store.save_summary(meeting, "claude-opus-5-5", busy(1), 1, 1, 0.1)
+    model.answer = lambda call: (
+        ollama.TooLong("too long") if "<transcript>" in call.user else "From the summary."
+    )
+    document = local_summary.document(store, meeting, "ticket", "small:4b")
+    assert document["text"] == "From the summary." and "Decided 1:" in model.calls[-1].user
+
+
+def test_text_cut_off_for_lack_of_room_is_asked_for_with_less(store, model):
+    meeting = add_meeting(store, LONG)
+    store.save_summary(meeting, "claude-opus-5-5", busy(6), 1, 1, 0.1)
+    for write in (
+        lambda: local_summary.document(store, meeting, "ticket", "small:4b")["text"],
+        lambda: local_summary.answer(store, meeting, ASKED, "small:4b")["answer"],
+    ):
+        model.calls.clear()
+        model.read = 7900  # of the 8192 it holds: it runs into the end of that
+        model.cut_off = lambda call: len(model.calls) == 1
+
+        def answer(call):
+            if len(model.calls) == 2:
+                model.read = 4000
+            return "Half" if len(model.calls) == 1 else "All of it."
+
+        model.answer = answer
+        assert write() == "All of it." and len(model.calls) == 2
+        assert len(model.calls[1].user) < len(model.calls[0].user)
+
+
+def test_text_that_never_began_is_an_error(store, model):
+    meeting = add_meeting(store, SHORT)
+    model.answer = lambda call: ""
+    model.cut_off = lambda call: True
+    for write in (
+        lambda: local_summary.document(store, meeting, "email", "small:4b"),
+        lambda: local_summary.answer(store, meeting, "Who?", "small:4b"),
+    ):
+        with pytest.raises(ollama.Failed, match="small:4b wrote nothing before it ran out of room"):
+            write()
+        assert model.unloaded.pop() == "small:4b"
+    model.cut_off = lambda call: False
+    with pytest.raises(ollama.Failed, match="didn't write that"):
+        local_summary.document(store, meeting, "email", "small:4b")
+
+
+def test_a_long_meetings_documents_and_answers_have_your_notes(store, model):
+    meeting = add_meeting(store, LONG)
+    store.save_summary(meeting, "claude-opus-5-5", busy(1), 1, 1, 0.1)
+    store.add_note(meeting, 30.0, "note", "The RMA number is 8841")
+    store.add_note(meeting, 40.0, "snapshot", "Event ID 4625 Audit Failure")
+    model.answer = lambda call: "Text."
+    for write in (
+        lambda: local_summary.document(store, meeting, "ticket", "small:4b"),
+        lambda: local_summary.answer(store, meeting, ASKED, "small:4b"),
+    ):
+        write()
+        said = model.calls[-1].user
+        assert "[00:30] The RMA number is 8841" in said
+        assert "<screen_text>\n[00:40] Event ID 4625 Audit Failure\n</screen_text>" in said
+    # As many as fit, from all of the meeting, and none of them is most of it.
+    for n in range(200):
+        store.add_note(meeting, 100.0 + n, "note", f"Note {n} " + "of it " * 10)
+        store.add_note(meeting, 100.0 + n, "snapshot", f"Shot {n} " + "of it " * 100)
+    store.add_note(meeting, 50.0, "note", "Long note " + "of it " * 300)
+    for write in (
+        lambda: local_summary.document(store, meeting, "ticket", "small:4b"),
+        lambda: local_summary.answer(store, meeting, ASKED, "small:4b"),
+    ):
+        write()
+        said = model.calls[-1].user
+        told = said[said.index("Notes You took") :].split("Question:")[0]
+        assert 2500 < len(told) < 7000 and "Note 199 of it" in told
+        listed = [line.split()[2] for line in told.splitlines() if "] Note " in line]
+        assert 15 < len(listed) < 80 and listed == sorted(listed, key=int)
+        assert max(len(line) for line in told.splitlines() if line.startswith("[")) < 520
 
 
 def test_a_question_about_a_short_meeting_is_answered_from_all_of_it(store, model):
@@ -556,6 +1234,47 @@ def test_a_question_about_a_long_meeting_is_answered_from_the_lines_that_say_its
         store, meeting, local_summary.lines_of(store, meeting), "word line", 2000
     )
     assert 0 < sum(len(line.said()) + 1 for line in few) <= 2000 + len(few)
+
+
+def test_the_line_that_says_it_comes_before_the_lines_around_it(store):
+    turns = [f"Turn {i} " + "word " * 170 for i in range(40)]
+    turns[20] = "The warehouse printer jams. " + "word " * 170
+    turns[30] = "The printer is fine. " + "word " * 170
+    meeting = add_meeting(store, [(i * 100.0, "Dana", text) for i, text in enumerate(turns)])
+    lines = local_summary.lines_of(store, meeting)
+
+    def about(most: int) -> list[int]:
+        question = "What about the warehouse printer?"
+        found = local_summary.lines_about(store, meeting, lines, question, most)
+        return [int(line.start) // 100 for line in found]
+
+    assert about(1000) == [20]  # the one that says more of it
+    assert about(2000) == [20, 30]
+    assert about(4000) == [19, 20, 21, 30]  # then those around the best, the nearest first
+    assert about(9500) == [17, 18, 19, 20, 21, 22, 23, 29, 30, 31]
+
+
+def test_a_question_about_a_talk_without_a_pause_finds_where_it_was_said(store, model):
+    meeting = add_meeting(store, [(1502.0, "Dana", "That's it."), (1510.0, "Sam", "Thanks.")])
+    words = " ".join(f"word{i}" for i in range(3600)).split("word1800 ")
+    said = "We reset every password on Friday."
+    talk = f"{words[0]}{said} {words[1]} And the password list goes to Priya."
+    add_talk(store, meeting, talk, 0.0, 1500.0)
+    model.answer = lambda call: "On Friday."
+
+    local_summary.answer(store, meeting, "When is the password reset?", "small:4b")
+
+    [call] = model.calls
+    assert said in call.user and "And the password list goes to Priya." in call.user
+    assert len(call.user) < local_summary.PART_CHARS * 1.25
+    lines = local_summary.lines_of(store, meeting)
+    best = local_summary.lines_about(store, meeting, lines, "When is the password reset?", 1200)
+    assert said in best[0].text  # the piece that says both words
+    # What the search finds and these words don't (an accent) is still there.
+    add_talk(store, meeting, "The caf\u00e9 is closed. " + "word " * 900, 2000.0, 2400.0)
+    lines = local_summary.lines_of(store, meeting)
+    best = local_summary.lines_about(store, meeting, lines, "What about the cafe?", 1200)
+    assert best[-1].start == 2000.0 and len(best[-1].text) > 900
 
 
 def test_a_question_about_someone_is_answered_from_what_they_said(store, model):

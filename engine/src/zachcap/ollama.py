@@ -18,12 +18,19 @@ from dataclasses import dataclass
 
 HOST = "127.0.0.1"
 PORT = 11434  # Ollama's own
-QUICK = 4.0  # seconds for a question about models
+QUICK = 4.0  # seconds for a question about models, all in all
 # A model is loaded and reads the whole prompt before its first word, minutes on a CPU; then
 # the words come one by one.
 FIRST_WORD = 20 * 60.0
 NEXT_WORD = 3 * 60.0
 REPLY_MAX = 4_000_000  # bytes of one answer about models, and characters of one written
+NOT_OLLAMA = "What answers on Ollama's port isn't Ollama."
+# What Ollama and what it runs models with say of a text that is too long for the model. A
+# "context deadline exceeded" is about time.
+TOO_LONG = re.compile(
+    r"(?is)(?:exceed|longer|larger|too long).*context (?:length|size|window)"
+    r"|context (?:length|size|window).*exceed"
+)
 
 
 class NotRunning(RuntimeError):
@@ -36,6 +43,10 @@ class Failed(RuntimeError):
 
 class TooLong(Failed):
     """The text doesn't fit in the model's memory of one call."""
+
+
+class NotHere(Failed):
+    """The model isn't on this PC (any more), or Ollama runs it in its cloud."""
 
 
 class Cancelled(RuntimeError):
@@ -126,52 +137,74 @@ def _reason(status: int, data: bytes) -> Failed:
     except (ValueError, AttributeError):
         said = None
     said = str(said or f"it answered {status}")[:500]
-    too_long = "context" in said.lower() and "exceed" in said.lower()
-    return (TooLong if too_long else Failed)(f"Ollama: {said}")
+    kind = NotHere if status == 404 else TooLong if TOO_LONG.search(said) else Failed
+    return kind(f"Ollama: {said}")
 
 
-def _ask(method: str, path: str, body: dict | None = None, timeout: float = QUICK) -> dict:
-    connection = _connection(timeout)
+def _object(data: bytes) -> dict:
+    """The JSON object an answer is."""
     try:
-        sent = json.dumps(body) if body is not None else None
-        connection.request(method, path, sent, {"Content-Type": "application/json"})
-        response = connection.getresponse()
-        data = response.read(REPLY_MAX)
-    except (OSError, http.client.HTTPException) as exc:
-        raise _not_running(exc) from exc
+        answer = json.loads(data)
+    except (ValueError, RecursionError):
+        answer = None
+    if not isinstance(answer, dict):
+        raise Failed(NOT_OLLAMA)
+    return answer
+
+
+def _number(said) -> int:
+    return said if isinstance(said, int) else 0
+
+
+def _ask(method: str, path: str, body: dict | None = None) -> dict:
+    connection = _connection(QUICK)
+    # The timeout is for each read, and a byte at a time would go on past it: it's hung up then.
+    late = Cancel()
+    timer = threading.Timer(QUICK, late.cancel)
+    timer.daemon = True
+    timer.start()
+    try:
+        connection.connect()
+        with late.watching(connection.sock):
+            sent = json.dumps(body) if body is not None else None
+            connection.request(method, path, sent, {"Content-Type": "application/json"})
+            response = connection.getresponse()
+            data = response.read(REPLY_MAX)
+    except (OSError, http.client.HTTPException, Cancelled) as exc:
+        raise _not_running(TimeoutError("timed out") if late.asked else exc) from exc
     finally:
+        timer.cancel()
         connection.close()
     if response.status != 200:
         raise _reason(response.status, data)
-    try:
-        answer = json.loads(data)
-    except ValueError:
-        answer = None
-    if not isinstance(answer, dict):
-        raise Failed("What answers on Ollama's port isn't Ollama.")
-    return answer
+    return _object(data)
 
 
 def models() -> list[Model]:
     """The models on this PC that can write, smallest first. Raises NotRunning."""
-    found = []
-    for entry in _ask("GET", "/api/tags").get("models") or []:
-        can = entry.get("capabilities")
-        if in_cloud(entry) or (can is not None and "completion" not in can):
-            continue
-        details = entry.get("details") or {}
-        if can is None and "bert" in str(details.get("family", "")):
-            continue  # an older Ollama doesn't say what a model can do; these only embed
-        found.append(
-            Model(
-                name=str(entry.get("name") or entry.get("model")),
-                size=int(entry.get("size") or 0),
-                parameters=str(details.get("parameter_size") or ""),
-                context=details.get("context_length") or None,
-                thinks="thinking" in (can or ()),
-            )
-        )
-    return sorted(found, key=lambda model: (model.size, model.name))
+    answer = _ask("GET", "/api/tags")
+    try:
+        found = [_model(entry) for entry in answer.get("models") or []]
+    except (AttributeError, TypeError) as exc:
+        raise Failed(NOT_OLLAMA) from exc
+    return sorted(filter(None, found), key=lambda model: (model.size, model.name))
+
+
+def _model(entry: dict) -> Model | None:
+    """A model as Ollama lists it, if it is on this PC and can write."""
+    can = entry.get("capabilities")
+    details = entry.get("details") or {}
+    if in_cloud(entry) or (can is not None and "completion" not in can):
+        return None
+    if can is None and "bert" in str(details.get("family", "")):
+        return None  # an older Ollama doesn't say what a model can do; these only embed
+    return Model(
+        name=str(entry.get("name") or entry.get("model")),
+        size=_number(entry.get("size")),
+        parameters=str(details.get("parameter_size") or ""),
+        context=details.get("context_length") or None,
+        thinks="thinking" in (can or ()),
+    )
 
 
 def model(name: str) -> Model:
@@ -180,9 +213,9 @@ def model(name: str) -> Model:
     known = {m.name: m for m in models()}
     found = known.get(name) or known.get(f"{name}:latest")
     if found is None:
-        raise Failed(f"Ollama doesn't have {name} on this PC. Choose another model in Settings.")
+        raise NotHere(f"Ollama doesn't have {name} on this PC. Choose another model in Settings.")
     if in_cloud({**_ask("POST", "/api/show", {"model": found.name}), "name": found.name}):
-        raise Failed(f"{name} runs in Ollama's cloud, not on this PC.")
+        raise NotHere(f"{name} runs in Ollama's cloud, not on this PC.")
     return found
 
 
@@ -241,12 +274,15 @@ def chat(
                 raise _reason(response.status, response.read(REPLY_MAX))
             while line := response.readline(REPLY_MAX):
                 sock.settimeout(NEXT_WORD)
-                part = json.loads(line)
+                part = _object(line)
                 if "error" in part:
                     raise _reason(200, line)
                 if part.get("remote_host"):
-                    raise Failed(f"{on.name} runs in Ollama's cloud, not on this PC.")
-                said = (part.get("message") or {}).get("content") or ""
+                    raise NotHere(f"{on.name} runs in Ollama's cloud, not on this PC.")
+                message = part.get("message") or {}
+                said = (message.get("content") or "") if isinstance(message, dict) else None
+                if not isinstance(said, str):
+                    raise Failed(NOT_OLLAMA)
                 text.append(said)
                 size += len(said)
                 last = part
@@ -264,8 +300,8 @@ def chat(
         raise Failed(f"{on.name} stopped before it was done.")
     return Reply(
         text="".join(text).strip(),
-        read=int(last.get("prompt_eval_count") or 0),
-        written=int(last.get("eval_count") or 0),
+        read=_number(last.get("prompt_eval_count")),
+        written=_number(last.get("eval_count")),
         cut_off=last.get("done_reason") == "length",
     )
 

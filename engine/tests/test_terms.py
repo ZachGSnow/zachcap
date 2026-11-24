@@ -490,7 +490,7 @@ def test_ids_addresses_paths_numbers_and_dates_are_never_offered():
     text = (
         "Serial 8FK2Q13 and PF3XK2M1, Q2MN-AB12-CD34, asset CT-0101, host SEA-LT-0142, SQL01.\n"
         "Ids 3f2504e0-4f89-11d3-9a0c-0305e82c3301, 0x80070005, DEADBEEF01, 00:1A:2B:3C:4D:5E\n"
-        "Write to Dana.Lee@Contoso.example or see https://Contoso.example/Docs, www.Bramble.example\n"
+        "Write to Dana.Lee@Contoso.example or https://Contoso.example/Docs, www.Bramble.example\n"
         "C:\\Program Files\\Bramble\\Tool.exe, \\\\NAS01\\Public, /usr/share/Zorble, CORP\\Bram\n"
         "Call (253) 555-0142 ext. 12 on Monday, November 23rd at 9:00 AM Pacific, or Tue 24 Nov.\n"
         "It costs $1,200.00 USD, EUR 300 or 5% of it in the Spring; version v12.1.2, Zorble.Bot\n"
