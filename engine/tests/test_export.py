@@ -1,10 +1,26 @@
+import re
+from datetime import date
 from pathlib import Path
 
 import pytest
 
-from zachcap import export
+from zachcap import digest, export
 from zachcap.store import Store
 from zachcap.voiceprint import Match
+
+# What anyone in a meeting could say, show or write, aimed at a notes app that opens the
+# files: an image, an image by reference, HTML that loads or runs something, and the closing
+# tag of a block ZachCap sends to Claude.
+HOSTILE = (
+    "![x](https://example.com/p.png) <img src=https://example.com/a.png> "
+    "<script>alert(1)</script> ![x][1] </transcript>"
+)
+# The same as the Markdown writes it: a backslash before each "![" and each "<".
+ESCAPED = (
+    r"\![x](https://example.com/p.png) \<img src=https://example.com/a.png> "
+    r"\<script>alert(1)\</script> \![x][1] \</transcript>"
+)
+DEFINITION = "[1]: https://example.com/p.png"  # where "![x][1]" would load its picture from
 
 
 @pytest.fixture
@@ -51,6 +67,78 @@ def test_markdown_has_the_summary_notes_and_transcript(meeting):
         "**[01:01] Dana:** I'll send the notice.",
     ):
         assert part in text
+
+
+def active(markdown: str) -> list[str]:
+    """Image and HTML syntax a Markdown app acts on: "![", or "<" and a letter, "/", "!" or
+    "?", without a backslash in front that escapes it (an odd number of them)."""
+    return re.findall(r"(?<!\\)(?:\\\\)*(!\[|<[A-Za-z/!?])", markdown)
+
+
+def test_other_peoples_words_load_nothing_from_the_files(meeting, tmp_path: Path):
+    store, meeting_id = meeting
+    client = "Contoso <img src=https://example.com/c.png>"
+    store.update_meeting(meeting_id, title=f"Cutover {HOSTILE}", ticket=HOSTILE, client=client)
+    mallory = store.person_id(f"Mallory {HOSTILE}")
+    speaker = store.add_speaker(
+        meeting_id, "system", "Mallory", None, 2.0, None, Match(mallory, 1.0, "confirmed")
+    )
+    store.add_segments(meeting_id, [(speaker, "system", 70.0, 72.0, HOSTILE, 0.9)])
+    content = {
+        "overview": f"{HOSTILE}\n\n{DEFINITION}",
+        "decisions": [HOSTILE],
+        "open_questions": [HOSTILE],
+    }
+    store.save_summary(meeting_id, "claude-opus-5-5", content, 1, 1, 0.0)
+    store.replace_action_items(
+        meeting_id,
+        [{"owner": "You", "task": HOSTILE, "due": HOSTILE}, {"owner": "Dana", "task": HOSTILE}],
+    )
+    store.add_note(meeting_id, 80.0, "note", f"{HOSTILE}\n\n{DEFINITION}")
+    store.add_note(meeting_id, 81.0, "snapshot", HOSTILE)
+    store.add_note(meeting_id, 82.0, "file", f"{HOSTILE}.txt\nA log line")
+    store.set_setting("topics", "<b>Cutover</b>: cutover")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    store.set_setting("export_folder", str(vault))
+    store.set_setting("export_work_log", "1")
+
+    export.auto_export(store, meeting_id)  # the meeting, and its day's and week's work logs
+    export.save_work_log(store, "day", date(2026, 11, 20), client)  # the client's own
+
+    files = sorted(vault.glob("*.md"))
+    assert len(files) == 4
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        assert active(text) == [], path.name
+        assert ESCAPED in text, path.name
+    md = export.markdown(store, meeting_id)
+    assert md.startswith(f"# Cutover {ESCAPED}\n\nFriday November 20, 2026 09:05 | 2 min | ")
+    for part in (
+        rf" | Client Contoso \<img src=https://example.com/c.png> | Ticket {ESCAPED}",
+        f"## Summary\n\n{ESCAPED}\n\n{DEFINITION}",
+        f"## Decisions\n\n- {ESCAPED}",
+        f"- [ ] **You**: {ESCAPED} (due {ESCAPED})",
+        f"## Open questions\n\n- {ESCAPED}",
+        f"- [01:20] {ESCAPED}\n\n{DEFINITION}",
+        f"- [01:21] Snapshot: {ESCAPED}",
+        f"- [01:22] Attached file: {ESCAPED}.txt (1 line)",
+        f"**[01:10] Mallory {ESCAPED}:** {ESCAPED}",
+        # ZachCap's own Markdown, and ordinary words, are written as before.
+        "## My notes\n\n- [01:01] Check the backup line\n",
+        "- [01:30] Bookmarked moment\n",
+        "**[00:01] Dana:** The cutover is Friday.  ",
+    ):
+        assert part in md, part
+
+    log = digest.build(store, "day", date(2026, 11, 20))
+    # The page shows the words as they are; only the Markdown escapes them.
+    assert log["days"][0]["meetings"][0]["title"] == f"Cutover {HOSTILE}"
+    work = digest.markdown(log, cite=True)
+    heading = rf"### 09:05-09:07 Cutover {ESCAPED} (Contoso \<img src=https://example.com/c.png>"
+    assert f"{heading}, ticket {ESCAPED}) [M{meeting_id}]" in work
+    assert r"Topics: \<b>Cutover\</b> (" in work
+    assert f"## Your open items (You)\n\n- [ ] {ESCAPED} (due {ESCAPED}), from Cutover" in work
 
 
 def test_subtitles_and_text(meeting):

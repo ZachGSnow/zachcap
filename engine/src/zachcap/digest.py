@@ -3,7 +3,8 @@ and a draft time entry for each meeting.
 
 Built from what ZachCap already has (summaries, action items, named speakers), without a
 call to Claude, so it is free, instant and can't invent anything. Time entries round each
-meeting up to the quarter hour, the usual billing increment.
+meeting up to the quarter hour, the usual billing increment. In its Markdown, every title,
+name and text goes through export.inert(), as in a meeting's own file.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import math
 import re
 from datetime import date, datetime, timedelta
 
+from .export import inert
 from .store import Store
 
 BILLING_MINUTES = 15
@@ -152,21 +154,23 @@ def _duration(seconds: float) -> str:
 
 
 def _cell(text: str) -> str:
-    return text.replace("|", "\\|").replace("\n", " ")
+    return inert(text).replace("|", "\\|").replace("\n", " ")
 
 
 def _item(item: dict, with_owner: bool = True, with_meeting: bool = False) -> str:
     box = "x" if item["status"] == "done" else " "
-    owner = f"**{item['owner']}**: " if with_owner else ""
-    due = f" (due {item['due']})" if item.get("due") else ""
-    where = f", from {item['meeting_title']}" if with_meeting else ""
-    return f"- [{box}] {owner}{item['task']}{due}{where}"
+    owner = f"**{inert(item['owner'])}**: " if with_owner else ""
+    due = f" (due {inert(item['due'])})" if item.get("due") else ""
+    where = f", from {inert(item['meeting_title'])}" if with_meeting else ""
+    return f"- [{box}] {owner}{inert(item['task'])}{due}{where}"
 
 
 def markdown(log: dict, cite: bool = False) -> str:
-    """The log as Markdown. ``cite`` adds each meeting's id ([M12]) for Claude to cite."""
+    """The log as Markdown. ``cite`` adds each meeting's id ([M12]) for Claude to cite. Only
+    the log's own headings, tables and marks are written as they are; every title, name and
+    text goes through inert()."""
     totals = log["totals"]
-    lines = [f"# {log['title']}", ""]
+    lines = [f"# {inert(log['title'])}", ""]
     if not totals["meetings"]:
         return "\n".join(lines + ["No meetings recorded."]) + "\n"
     count = f"{totals['meetings']} meeting{'' if totals['meetings'] == 1 else 's'}"
@@ -213,22 +217,22 @@ def markdown(log: dict, cite: bool = False) -> str:
                 *([m["client"]] if m.get("client") and not log.get("client") else []),
                 *([f"ticket {m['ticket']}"] if m.get("ticket") else []),
             ]
-            more = f" ({', '.join(about)})" if about else ""
-            heading = f"{'####' if week else '###'} {m['time']} {m['title']}{more}"
+            more = f" ({inert(', '.join(about))})" if about else ""
+            heading = f"{'####' if week else '###'} {m['time']} {inert(m['title'])}{more}"
             lines += ["", heading + (f" [M{m['id']}]" if cite else ""), ""]
             if m["people"]:
-                lines += [f"With {', '.join(m['people'])}.", ""]
-            lines.append(m["overview"] or "Not summarized yet.")
+                lines += [f"With {inert(', '.join(m['people']))}.", ""]
+            lines.append(inert(m["overview"]) or "Not summarized yet.")
             if m.get("topics"):
-                named = ", ".join(f"{t['topic']} ({t['count']})" for t in m["topics"])
+                named = ", ".join(f"{inert(t['topic'])} ({t['count']})" for t in m["topics"])
                 lines += ["", f"Topics: {named}."]
             if m["decisions"]:
-                lines += ["", "Decisions:"] + [f"- {d}" for d in m["decisions"]]
+                lines += ["", "Decisions:"] + [f"- {inert(d)}" for d in m["decisions"]]
             if m["items"]:
                 lines += ["", "Action items:"] + [_item(i) for i in m["items"]]
 
     if log["your_items"]:
-        lines += ["", f"## Your open items ({log['me']})", ""]
+        lines += ["", f"## Your open items ({inert(log['me'])})", ""]
         lines += [_item(i, with_owner=False, with_meeting=True) for i in log["your_items"]]
     if log["waiting_on"]:
         lines += ["", "## Waiting on others", ""]
