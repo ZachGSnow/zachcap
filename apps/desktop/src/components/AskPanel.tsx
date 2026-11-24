@@ -1,13 +1,14 @@
 import { ArrowUp, Loader2, MessageCircleQuestion } from "lucide-react";
-import { memo, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { Answer } from "@/components/Answer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api } from "@/lib/engine";
+import { api, type AnswerResult, type Writing } from "@/lib/engine";
 import { reason } from "@/lib/feedback";
 import { costLabel } from "@/lib/writer";
+import { earlier, isHere, outcome, tell, type Asked } from "@/lib/writing";
 
 type Exchange = {
   id: number;
@@ -22,43 +23,73 @@ type Exchange = {
 
 const STARTERS = ["What did I commit to?", "What was decided?", "Were there any risks or blockers?", "Who owns the next steps?"];
 
+/** The questions the model on this PC was asked before the page was opened. */
+function before(written: Writing[] | undefined, writing: Writing | null): Exchange[] {
+  return earlier("answer", written, writing).map((one, index) => {
+    const result = one.result as AnswerResult | null;
+    return {
+      id: index + 1,
+      question: one.about ?? "",
+      here: true,
+      answer: result?.answer,
+      model: result?.model,
+      cost: result?.cost_usd,
+    };
+  });
+}
+
 // Memoized: the panel stays mounted on the meeting page, which re-renders as audio plays.
 /** Questions about one meeting. ``here`` is the model on this PC that answers for a private one
- * (Claude answers for the others), and ``answering`` whether it is on a question now, which may
- * be one from before the page was left. ``children`` go in place of the question box, when
- * nobody may answer. */
+ * (Claude answers for the others); ``writing`` and ``written`` are what it's on, and what it
+ * wrote, as the page was opened. ``children`` go in place of the question box, when nobody may
+ * answer. */
 export const AskPanel = memo(function AskPanel({
   meetingId,
+  title,
   here,
-  answering,
+  writing,
+  written,
+  onStarted,
   onSeek,
   children,
 }: {
   meetingId: number;
+  title: string;
   here: string | null;
-  answering: boolean;
+  writing: Writing | null;
+  written: Writing[] | undefined;
+  /** The model on this PC is on a question now. */
+  onStarted: () => void;
   onSeek: (seconds: number) => void;
   children?: ReactNode;
 }) {
   const [question, setQuestion] = useState("");
-  const [history, setHistory] = useState<Exchange[]>([]);
+  const [history, setHistory] = useState<Exchange[]>(() => before(written, writing));
   const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
-  const nextId = useRef(1);
+  const nextId = useRef(history.length + 1);
+  const onPage = useRef(true);
+  useEffect(() => {
+    onPage.current = true;
+    return () => {
+      onPage.current = false;
+    };
+  }, []);
 
-  const ask = async (text: string) => {
-    if (!text.trim() || inFlight.current) return;
-    inFlight.current = true;
-    const id = nextId.current++;
+  /** An exchange's answer, once there is one. */
+  const answered = async (id: number, get: () => Promise<Asked<AnswerResult>>) => {
     const update = (patch: Partial<Exchange>) => setHistory((h) => h.map((e) => (e.id === id ? { ...e, ...patch } : e)));
-    setQuestion("");
+    inFlight.current = true;
     setBusy(true);
-    setHistory((h) => [...h, { id, question: text.trim(), here: here !== null }]);
     try {
-      const result = await api<{ answer: string; model: string; cost_usd: number }>(`/api/meetings/${meetingId}/ask`, {
-        method: "POST",
-        json: { question: text.trim() },
-      });
+      const asked = await get();
+      let result;
+      if (isHere(asked)) {
+        update({ here: true });
+        onStarted();
+        result = await outcome<AnswerResult>(asked.writing);
+        void tell(asked.writing, "Answer ready", title, onPage.current);
+      } else result = asked;
       update({ answer: result.answer, model: result.model, cost: result.cost_usd });
     } catch (error) {
       if (reason(error) === "Stopped.") toast("Stopped");
@@ -68,6 +99,24 @@ export const AskPanel = memo(function AskPanel({
       inFlight.current = false;
       setBusy(false);
     }
+  };
+
+  // One asked before the page was left, and still being answered.
+  useEffect(() => {
+    if (writing?.what !== "answer" || inFlight.current) return;
+    const id = history.findLast((e) => !e.answer)?.id;
+    if (id !== undefined) void answered(id, () => Promise.resolve({ writing: writing.id }));
+    // Only as the page opens: later ones are followed as they're asked.
+  }, []);
+
+  const ask = async (text: string) => {
+    if (!text.trim() || inFlight.current) return;
+    const id = nextId.current++;
+    setQuestion("");
+    setHistory((h) => [...h, { id, question: text.trim(), here: false }]);
+    await answered(id, () =>
+      api<Asked<AnswerResult>>(`/api/meetings/${meetingId}/ask`, { method: "POST", json: { question: text.trim() } }),
+    );
   };
 
   const stop = (
@@ -80,8 +129,6 @@ export const AskPanel = memo(function AskPanel({
       Stop
     </Button>
   );
-  // One asked before the page was left: its answer has nowhere to go any more.
-  const earlier = answering && !history.some((e) => e.here && !e.answer && !e.failed);
 
   return (
     <div>
@@ -138,13 +185,6 @@ export const AskPanel = memo(function AskPanel({
           </div>
         ))}
       </div>
-      {earlier && (
-        <p role="status" className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="size-3.5 animate-spin" />
-          The model on this PC is still on a question asked before.
-          {stop}
-        </p>
-      )}
       {children || (
         <form
           className="sticky bottom-0 mt-5 flex gap-2 bg-background pb-1"
@@ -165,7 +205,7 @@ export const AskPanel = memo(function AskPanel({
             size="icon"
             className="size-10 shrink-0"
             aria-label="Ask"
-            disabled={busy || earlier || !question.trim()}
+            disabled={busy || !question.trim()}
           >
             {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
           </Button>

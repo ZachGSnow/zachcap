@@ -63,12 +63,14 @@ import {
   type Segment,
   type Settings,
   type Speaker,
+  type Summary,
 } from "@/lib/engine";
 import { announce, attempt, copyText, reason } from "@/lib/feedback";
 import { clock, colorMap, day, minutes, when } from "@/lib/format";
 import { kindShown, pickAfterSummary } from "@/lib/kinds";
 import { relatedKey } from "@/lib/related";
 import { modelLabel, writerFor, type Writer } from "@/lib/writer";
+import { isHere, outcome, type Asked } from "@/lib/writing";
 import { StatusBadge } from "@/views/MeetingsView";
 
 type Track = "mix" | "mic" | "system";
@@ -133,8 +135,6 @@ export function MeetingView({
   const [kind, setKind] = useState<string | null>(null);
   // Who writes, when picked here: Claude or the model on this PC (null: the usual one).
   const [writerPicked, setWriterPicked] = useState<Writer | null>(null);
-  // Asked of the model on this PC from here, and not done yet.
-  const [writingHere, setWritingHere] = useState(0);
   const [editingTitle, setEditingTitle] = useState(false);
   const [title, setTitle] = useState("");
   const [renaming, setRenaming] = useState<Speaker | null>(null);
@@ -164,7 +164,9 @@ export function MeetingView({
   const processing = progress === "queued" || (meeting?.status === "processing" && progress != null && !failedNow);
   const stalled = !processing && (meeting?.status === "processing" || meeting?.status === "recorded");
   const writing = data?.writing ?? null;
-  const followed = processing || writing !== null || writingHere > 0;
+  const writer = writerFor(writerPicked, meeting?.private ?? false, settings);
+  const picked = meeting?.private ? null : writerPicked; // what it was before is no longer a choice
+  const followed = processing || writing !== null;
   useEffect(() => setBusy(followed), [followed]);
   // Written on this PC for this meeting before its page was opened again: shown once done.
   const summarizingHere = summarizing || writing?.what === "summary";
@@ -314,28 +316,37 @@ export function MeetingView({
     summarizingNow.current = true;
     setTab("summary");
     setSummarizing(true);
-    const by = writerFor(writerPicked, meeting?.private ?? false, settings);
-    const here = by === "local";
-    const toastId = here
-      ? toast("Writing the summary on this PC", { description: "It takes a few minutes. You can go on using ZachCap." })
-      : toast.loading("Summarizing with Claude...");
-    if (here) setWritingHere((count) => count + 1);
+    const toastId = toast.loading(settings && writer !== "local" ? "Summarizing with Claude..." : "Summarizing...");
     const sent = kind;
+    let here = false;
     try {
-      await api(`/api/meetings/${id}/summary`, { method: "POST", json: { template: sent, by } });
-      // Minutes later, the window may be behind others: said where it's seen.
-      if (here) void announce("Summary ready", meeting?.title, "success");
-      else toast.success("Summary ready", { id: toastId });
+      // Who writes is left to the engine unless picked here: it knows the setting before this
+      // page has loaded it.
+      const asked = await api<Asked<Summary>>(`/api/meetings/${id}/summary`, {
+        method: "POST",
+        json: { template: sent, by: picked },
+      });
+      if (isHere(asked)) {
+        here = true;
+        toast.info("Writing the summary on this PC", {
+          id: toastId,
+          description: "It takes a few minutes. You can go on using ZachCap.",
+        });
+        await refresh();
+        await outcome(asked.writing);
+        // Minutes later, the window may be behind others: said where it's seen.
+        void announce("Summary ready", meeting?.title, "success");
+      } else toast.success("Summary ready", { id: toastId });
       await refresh();
       setKind((now) => pickAfterSummary(now, sent));
     } catch (error) {
       const why = reason(error);
       if (here && why === "Stopped.") toast("Stopped", { description: "The summary wasn't changed." });
-      else toast.error("Couldn't create the summary", { id: here ? undefined : toastId, description: why });
+      else if (here) void announce("Couldn't write the summary", `${meeting?.title}: ${why}`, "error");
+      else toast.error("Couldn't create the summary", { id: toastId, description: why });
     } finally {
       summarizingNow.current = false;
       setSummarizing(false);
-      if (here) setWritingHere((count) => count - 1);
     }
   };
 
@@ -431,9 +442,7 @@ export function MeetingView({
             ? "The summary was written before: regenerate it if it mentions this."
             : "",
       ];
-      const again =
-        (done.summary_removed || done.has_summary) &&
-        writerFor(writerPicked, meeting?.private ?? false, settings) !== null;
+      const again = (done.summary_removed || done.has_summary) && writer !== null;
       toast.success(`Redacted ${clock(start)} to ${clock(end)}`, {
         description: changed.filter(Boolean).join(" "),
         duration: 12_000,
@@ -531,7 +540,6 @@ export function MeetingView({
   const participants = named.filter((name) => !/^Speaker \d+|Call audio|Unknown/.test(name));
   const duration = meeting.duration ?? data.segments.at(-1)?.end ?? 0;
   const shownKind = kindShown(kind, meeting, settings?.summary_template);
-  const writer = writerFor(writerPicked, meeting.private ?? false, settings);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -750,7 +758,10 @@ export function MeetingView({
               <AskPanel
                 meetingId={id}
                 here={meeting.private && writer === "local" ? (settings?.local_model ?? null) : null}
-                answering={writing?.what === "answer"}
+                title={meeting.title}
+                writing={writing}
+                written={data.written}
+                onStarted={refresh}
                 onSeek={seek}
               >
                 {writer === null && (
@@ -784,8 +795,10 @@ export function MeetingView({
                   local: `${settings?.local_model ?? ""} on this PC`,
                 }}
                 onWriterChange={settings?.local_model && !meeting.private ? setWriterPicked : null}
+                picked={picked}
                 writing={writing}
-                onWritingHere={(on) => setWritingHere((count) => count + (on ? 1 : -1))}
+                written={data.written}
+                onStarted={() => void refresh()}
                 onStop={() => void stopWriting()}
                 summarizing={summarizingHere}
                 onSummarize={() => void summarize()}

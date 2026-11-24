@@ -1,5 +1,5 @@
 import { Check, Copy, FileText, Loader2, Mail, Megaphone, MessageSquareQuote, RotateCw, Sparkles, Ticket } from "lucide-react";
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import { PrivateNote } from "@/components/PrivateNote";
 import { PersonAvatar } from "@/components/Visuals";
@@ -22,6 +22,7 @@ import { clock, toSeconds, type SpeakerColor } from "@/lib/format";
 import { summaryMarkdown } from "@/lib/markdown";
 import { cn } from "@/lib/utils";
 import { costLabel, modelLabel, writingLabel, type Writer } from "@/lib/writer";
+import { earlier, isHere, outcome, tell, type Asked } from "@/lib/writing";
 
 function Section({ title, count, children }: { title: string; count?: number; children: ReactNode }) {
   return (
@@ -194,6 +195,17 @@ type RecipeRun = {
   refining?: boolean;
 };
 
+/** The documents the model on this PC was asked for before the page was opened. */
+function before(written: Writing[] | undefined, writing: Writing | null): Record<string, RecipeRun> {
+  const runs: Record<string, RecipeRun> = {};
+  for (const one of earlier("document", written, writing)) {
+    const recipe = { id: one.about ?? "", label: "Document" };
+    const result = (one.result as RecipeResult | null) ?? runs[recipe.id]?.result;
+    runs[recipe.id] = { id: 0, recipe, result, text: result?.text, refining: one.state === "writing" && !!result };
+  }
+  return runs;
+}
+
 /** A document written from the meeting, ready to copy. */
 function RecipeDialog({
   open,
@@ -326,8 +338,10 @@ export function SummaryPanel({
   writer,
   writerNames,
   onWriterChange,
+  picked,
   writing,
-  onWritingHere,
+  written,
+  onStarted,
   onStop,
   summarizing,
   onSummarize,
@@ -359,10 +373,14 @@ export function SummaryPanel({
   writer: Writer | null;
   writerNames: Record<Writer, string>;
   onWriterChange: ((writer: Writer) => void) | null;
-  /** What the model on this PC is writing for this meeting now. */
+  /** Who writes, when picked on this page (null: the engine's to settle). */
+  picked: Writer | null;
+  /** What the model on this PC is writing for this meeting now, and the documents it wrote
+   * before the page was opened. */
   writing: Writing | null;
-  /** A document is asked of the model on this PC (so the page follows how far it is). */
-  onWritingHere: (on: boolean) => void;
+  written: Writing[] | undefined;
+  /** The model on this PC is on a document now (so the page follows how far it is). */
+  onStarted: () => void;
   onStop: () => void;
   /** Owned by the meeting page, so its header button and this panel can't both start one. */
   summarizing: boolean;
@@ -372,11 +390,18 @@ export function SummaryPanel({
 }) {
   // Each document kept per recipe while the page is open: reopening shows the one written (or
   // still being written) instead of paying for another.
-  const [runs, setRuns] = useState<Record<string, RecipeRun>>({});
+  const [runs, setRuns] = useState<Record<string, RecipeRun>>(() => before(written, writing));
   const [shown, setShown] = useState<string | null>(null);
   // Separate from which one is shown, so the dialog keeps its content while it closes.
   const [dialogOpen, setDialogOpen] = useState(false);
   const nextRun = useRef(1);
+  const onPage = useRef(true);
+  useEffect(() => {
+    onPage.current = true;
+    return () => {
+      onPage.current = false;
+    };
+  }, []);
 
   const toggle = async (item: ActionItem) => {
     await toggleAction(item);
@@ -396,19 +421,42 @@ export function SummaryPanel({
     }));
     setShown(recipe.id);
     setDialogOpen(true);
-    if (writer === "local") onWritingHere(true);
-    try {
-      const result = await api<RecipeResult>(`/api/meetings/${meetingId}/recipe`, {
+    await finish(settle, () =>
+      api<Asked<RecipeResult>>(`/api/meetings/${meetingId}/recipe`, {
         method: "POST",
-        json: { recipe: recipe.id, by: writer, ...refine },
-      });
+        json: { recipe: recipe.id, by: picked, ...refine },
+      }),
+    );
+  };
+
+  /** A run's document, once it's written. */
+  const finish = async (
+    settle: (patch: Partial<RecipeRun>) => void,
+    get: () => Promise<Asked<RecipeResult>>,
+  ) => {
+    try {
+      const asked = await get();
+      let result;
+      if (isHere(asked)) {
+        onStarted();
+        result = await outcome<RecipeResult>(asked.writing);
+        void tell(asked.writing, "Document ready", title, onPage.current);
+      } else result = asked;
       settle({ result, text: result.text, refining: false, error: undefined });
     } catch (error) {
       settle({ error: reason(error), refining: false });
-    } finally {
-      if (writer === "local") onWritingHere(false);
     }
   };
+
+  // One asked for before the page was left, and still being written.
+  useEffect(() => {
+    if (writing?.what !== "document" || !writing.about) return;
+    const { id, about } = writing;
+    const settle = (patch: Partial<RecipeRun>) =>
+      setRuns((all) => (all[about]?.id === 0 ? { ...all, [about]: { ...all[about], ...patch } } : all));
+    void finish(settle, () => Promise.resolve({ writing: id }));
+    // Only as the page opens: later ones are followed as they're asked for.
+  }, []);
 
   const edit = (recipe: Choice, text: string) =>
     setRuns((all) => (all[recipe.id] ? { ...all, [recipe.id]: { ...all[recipe.id], text } } : all));
@@ -417,13 +465,15 @@ export function SummaryPanel({
 
   const openRecipe = (recipe: Choice) => {
     const run = runs[recipe.id];
-    if (run && !run.error) {
+    if (run && (!run.error || run.result)) {
+      setRuns((all) => ({ ...all, [recipe.id]: { ...all[recipe.id], recipe } }));
       setShown(recipe.id);
       setDialogOpen(true);
     } else void write(recipe);
   };
 
   const summaryHere = writing?.what === "summary" ? writing : null;
+  const documentHere = writing?.what === "document" ? writing : null;
   const pickers = (asked: boolean) => (
     <>
       {writer !== null && onWriterChange && (
@@ -506,6 +556,7 @@ export function SummaryPanel({
       </div>
 
       {summaryHere && <WritingNote writing={summaryHere} onStop={onStop} className="mt-3" />}
+      {documentHere && !dialogOpen && <WritingNote writing={documentHere} onStop={onStop} className="mt-3" />}
       {isPrivate && (
         <p className="mt-3 text-xs text-muted-foreground">
           {writer === null
@@ -541,7 +592,7 @@ export function SummaryPanel({
         open={dialogOpen}
         run={shown ? (runs[shown] ?? null) : null}
         by={writerNames[writer ?? "claude"]}
-        writing={writing?.what === "document" ? writing : null}
+        writing={documentHere}
         onStop={onStop}
         onClose={() => setDialogOpen(false)}
         onRewrite={(recipe) => void write(recipe)}
