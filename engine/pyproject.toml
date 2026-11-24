@@ -1,6 +1,6 @@
 [project]
 name = "zachcap"
-version = "0.1.0"
+version = "0.2.0"
 description = "ZachCap engine: meeting capture, local transcription, diarization and voiceprints."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
