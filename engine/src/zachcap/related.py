@@ -426,17 +426,21 @@ def _listed(names: tuple[str, ...]) -> str:
     return f"{', '.join(names[:SHOWN_NAMES])} and {len(names) - SHOWN_NAMES} more"
 
 
-def find(store: Store, meeting_id: int, limit: int = LIMIT) -> list[dict]:
+def find(store: Store, meeting_id: int, limit: int = LIMIT, private: bool = True) -> list[dict]:
     """The meetings most related to this one, best first, at most ``limit``: {"id", "title",
     "started_at", "score", "reasons"}, the reasons in plain words ("Ticket 1234567", "Contoso",
-    "Dana Lee, Mark Ruiz", "Topic: Firewall", "Also about: VPN profile, cutover")."""
+    "Dana Lee, Mark Ruiz", "Topic: Firewall", "Also about: VPN profile, cutover"). With
+    ``private`` off, for Claude: without private meetings."""
     meeting = store.meeting(meeting_id)
     if meeting is None:
         return []
+    hidden = set() if private else store.private_meetings()
     others = [
         other
         for other in store.meetings()
-        if other["id"] != meeting_id and other["status"] not in UNFINISHED
+        if other["id"] != meeting_id
+        and other["status"] not in UNFINISHED
+        and other["id"] not in hidden
     ]
     client_of = clients.of_meetings(store, [meeting, *others])
     ticket = (store.column(meeting, "ticket") or "").strip().upper()

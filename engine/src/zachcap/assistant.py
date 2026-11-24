@@ -251,10 +251,12 @@ def related_list(store: Store, meeting_id: int) -> str:
     meeting = store.meeting(meeting_id)
     if meeting is None or meeting["status"] == "recording":
         return f"There is no meeting M{meeting_id}."
+    if privacy.is_private(store, meeting):
+        return private_meeting(meeting_id)
     lines = [
         f'M{found["id"]} {_day(found["started_at"])} "{found["title"]}": '
         f"{'; '.join(found['reasons'])}"
-        for found in related.find(store, meeting_id)
+        for found in related.find(store, meeting_id, private=False)
     ]
     if not lines:
         return f"No other meeting seems to be about the same thing as M{meeting_id}."
