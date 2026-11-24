@@ -29,6 +29,15 @@ waits for a go on stdin first. Its time limit follows how far it gets (_Patience
 a file that hangs FFmpeg, which keeps the CPU busy and "took too long to read", from a drive
 that has stopped answering, which doesn't (audio.Stalled: the watch folder tries it again).
 
+The job is for files that crash or hang FFmpeg. It is no sandbox: code that a crafted file
+got to run in it could do all the user can, other than start a program. So once the child has
+the file open, and before FFmpeg sees any of it, it gives up its integrity and its privileges
+(_give_up_rights). From then on Windows lets it change nothing of the user's on this PC (their
+files and registry, ZachCap's install), and neither read nor change another program's memory
+(the engine's, say). It can still read the user's files, use the network, shares on it
+included, and end other programs: this limits an attack, and doesn't rule one out. Where
+Windows refuses, the file is decoded all the same and the engine's log says so.
+
 The engine's own tracks (audio.TRACKS: the FLAC chunks it recorded, the playback cache,
 redaction) are still decoded in the engine's process: ZachCap wrote them itself.
 """
@@ -89,8 +98,8 @@ GONE = 30.0  # the most to wait for an ended child to be gone (a network drive c
 # its decode may just be starting or ending.
 SETTLED = 600.0
 LEFT = "-left"  # what its name then ends with
-# Tests make the child misbehave part-way through a file with this ("crash", "hang", "stall"
-# or "unwritable"), to check that the engine copes.
+# Tests make the child misbehave part-way through a file with this ("crash", "hang", "stall",
+# "unwritable", or "write" and a path), to check that the engine copes.
 TEST_HOOK = "ZACHCAP_DECODE_TEST"
 
 
@@ -244,6 +253,8 @@ def _collect(source: Path, out: BinaryIO, said: BinaryIO, room: int, code: int) 
             raise RuntimeError(f"the decoder stopped reading {source.name}: {_text(lines[-1])}")
         ended = f"0x{code:08X}" if code >= 0x80000000 else f"exit code {code}"
         raise audio.Refused(f"{source.name} crashed the decoder ({ended})")
+    if kept := _text(result.get("kept")):
+        print(f"The decoder kept the user's rights: {kept}")
     kind = result.get("result")
     if kind == "ok":
         return _audio(source, out)
@@ -468,6 +479,7 @@ def _kernel32() -> ctypes.WinDLL:
             [wintypes.LPCWSTR, DWORD, DWORD, ctypes.c_void_p, DWORD, DWORD, HANDLE],
             HANDLE,
         ),
+        (kernel32.GetCurrentProcess, [], HANDLE),
         (kernel32.CloseHandle, [HANDLE], BOOL),
     ):
         function.argtypes, function.restype = argtypes, restype
@@ -538,7 +550,15 @@ def main() -> None:
     room, source = int(sys.argv[1]), Path(sys.argv[2])
     if sys.stdin.buffer.read() != GO:
         return  # the engine went away before this process was in its job
-    result = _decode(source, sys.stdout.buffer, room)
+    import av  # noqa: F401  (FFmpeg's libraries, loaded before the rights go)
+
+    try:
+        file = open(source, "rb")
+    except OSError as exc:
+        result = _unreadable(exc)
+    else:
+        kept = _give_up_rights()
+        result = _decode(source, file, sys.stdout.buffer, room) | {"kept": kept}
     print(RESULT + json.dumps(result), file=sys.stderr)
 
 
@@ -549,10 +569,10 @@ class _TooBig(Exception):
         self.size = size
 
 
-def _decode(source: Path, out: BinaryIO, room: int) -> dict:
-    """Decodes ``source`` into ``out``, a piece at a time (the engine follows how far it has
-    got), and says how it went. A file that says it holds more than ``room`` bytes of audio
-    isn't decoded."""
+def _decode(source: Path, file: BinaryIO, out: BinaryIO, room: int) -> dict:
+    """Decodes ``source``, which is open as ``file``, into ``out``, a piece at a time (the
+    engine follows how far it has got), and says how it went. A file that says it holds more
+    than ``room`` bytes of audio isn't decoded."""
     import av
 
     hook = os.environ.get(TEST_HOOK)
@@ -563,7 +583,7 @@ def _decode(source: Path, out: BinaryIO, room: int) -> dict:
             raise _TooBig(size)
 
     try:
-        for piece in audio.decode_pieces(source, audio.IMPORTS, starting):
+        for piece in audio.decode_pieces(source, audio.IMPORTS, starting, file):
             try:
                 out.write(piece.tobytes())
                 if hook:
@@ -582,15 +602,8 @@ def _decode(source: Path, out: BinaryIO, room: int) -> dict:
         damaged = isinstance(exc, PermissionError)
         why = f"the audio in {source.name} is damaged" if damaged else str(exc)
         return {"result": "failed", "message": why}
-    except OSError as exc:  # can't be read right now: in use, or on a drive that's offline
-        return {
-            "result": "unreadable",
-            "errno": exc.errno,
-            "strerror": exc.strerror,
-            "filename": None if exc.filename is None else str(exc.filename),
-            "winerror": getattr(exc, "winerror", None),
-            "message": str(exc),
-        }
+    except OSError as exc:
+        return _unreadable(exc)
     except Exception as exc:
         return {"result": "failed", "message": str(exc) or type(exc).__name__}
     try:
@@ -605,6 +618,19 @@ def _unwritten(exc: OSError) -> dict:
     return {"result": "unwritten", "message": exc.strerror or type(exc).__name__}
 
 
+def _unreadable(exc: OSError) -> dict:
+    """The result when the file can't be read right now: it's in use, say, or on a drive that's
+    offline."""
+    return {
+        "result": "unreadable",
+        "errno": exc.errno,
+        "strerror": exc.strerror,
+        "filename": None if exc.filename is None else str(exc.filename),
+        "winerror": getattr(exc, "winerror", None),
+        "message": str(exc),
+    }
+
+
 def _misbehave(hook: str, out: BinaryIO) -> None:
     """What the tests make the child do once it has written some audio (TEST_HOOK)."""
     if hook == "crash":  # an access violation, as a crafted file can make FFmpeg have
@@ -616,6 +642,75 @@ def _misbehave(hook: str, out: BinaryIO) -> None:
         time.sleep(60)
     elif hook == "unwritable":  # every write fails from here on, as on a full drive
         os.close(out.fileno())
+    elif hook.startswith("write "):  # as code from a crafted file could
+        Path(hook.removeprefix("write ")).write_bytes(b"planted")
+
+
+# The child's rights -----------------------------------------------------------------------
+
+TOKEN_QUERY, TOKEN_ADJUST_PRIVILEGES, TOKEN_ADJUST_DEFAULT = 0x0008, 0x0020, 0x0080
+TOKEN_PRIVILEGES, TOKEN_INTEGRITY_LEVEL = 3, 25  # the information classes of those names
+SE_PRIVILEGE_REMOVED = 0x0004
+SE_GROUP_INTEGRITY = 0x0020
+# The lowest integrity there is, S-1-16-0 ("untrusted", what browsers give the processes that
+# show pages). The one above it, low, may still write to AppData\LocalLow.
+UNTRUSTED = bytes((1, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0))
+
+
+class SID_AND_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+
+@functools.cache
+def _advapi32() -> ctypes.WinDLL:
+    """This module's own copy of advapi32, as _kernel32 is of kernel32."""
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    BOOL, DWORD, HANDLE = wintypes.BOOL, wintypes.DWORD, wintypes.HANDLE
+    pointer = ctypes.c_void_p
+    for function, argtypes in (
+        (advapi32.OpenProcessToken, [HANDLE, DWORD, pointer]),
+        (advapi32.GetTokenInformation, [HANDLE, ctypes.c_int, pointer, DWORD, pointer]),
+        (advapi32.SetTokenInformation, [HANDLE, ctypes.c_int, pointer, DWORD]),
+        (advapi32.AdjustTokenPrivileges, [HANDLE, BOOL, pointer, DWORD, pointer, pointer]),
+    ):
+        function.argtypes, function.restype = argtypes, BOOL
+    return advapi32
+
+
+def _give_up_rights() -> str:
+    """Takes this process's integrity and privileges away, for good: only ever called in the
+    child, with all it needs open already. Returns why Windows refused, or ''."""
+    kernel32, advapi32 = _kernel32(), _advapi32()
+    token, size = wintypes.HANDLE(), wintypes.DWORD()
+    access = TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES | TOKEN_ADJUST_DEFAULT
+    sid = ctypes.create_string_buffer(UNTRUSTED, len(UNTRUSTED))
+    label = SID_AND_ATTRIBUTES(ctypes.addressof(sid), SE_GROUP_INTEGRITY)
+    # A TOKEN_PRIVILEGES: how many there are, then each one's number (two of these) and state.
+    held = (wintypes.DWORD * 256)()
+
+    def check(ok: int) -> None:
+        if not ok:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        check(advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), access, ctypes.byref(token)))
+        length = ctypes.sizeof(label) + len(UNTRUSTED)
+        check(
+            advapi32.SetTokenInformation(token, TOKEN_INTEGRITY_LEVEL, ctypes.byref(label), length)
+        )
+        check(
+            advapi32.GetTokenInformation(
+                token, TOKEN_PRIVILEGES, held, ctypes.sizeof(held), ctypes.byref(size)
+            )
+        )
+        for number in range(held[0]):
+            held[3 * number + 3] = SE_PRIVILEGE_REMOVED
+        check(advapi32.AdjustTokenPrivileges(token, False, held, 0, None, None))
+    except OSError as exc:
+        return str(exc)
+    finally:
+        kernel32.CloseHandle(token)
+    return ""
 
 
 if __name__ == "__main__":

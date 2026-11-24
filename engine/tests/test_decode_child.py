@@ -25,6 +25,8 @@ from zachcap import audio, decode_child
 
 RATE = 16000
 SYNCHRONIZE, WAIT_TIMEOUT = 0x00100000, 0x102
+PROCESS_QUERY_LIMITED_INFORMATION, TOKEN_QUERY = 0x1000, 0x8
+TOKEN_PRIVILEGES, TOKEN_INTEGRITY_LEVEL = 3, 25
 GENERIC_READ, OPEN_EXISTING = 0x80000000, 3
 NO_HANDLE = (None, 2**64 - 1)  # what CreateFileW gives on failure: NULL or INVALID_HANDLE_VALUE
 
@@ -486,14 +488,14 @@ def test_audio_that_isnt_what_a_file_can_hold_isnt_used(tmp_path: Path, monkeypa
 def test_what_ffmpeg_calls_a_permission_error_isnt_a_file_to_try_again(monkeypatch):
     # FFmpeg's word for some damaged AAC is EPERM, and PyAV makes that a PermissionError. The
     # watch folder would read such a file again every 30 s, as if it were in use.
-    def damaged(source, allowed, starting):
+    def damaged(source, allowed, starting, file):
         raise av.error.PermissionError(1, "Operation not permitted", "avcodec_send_packet()")
         yield
 
     monkeypatch.setattr(audio, "decode_pieces", damaged)
     assert isinstance(av.error.PermissionError(1, ""), PermissionError)
 
-    assert decode_child._decode(Path("call.m4a"), io.BytesIO(), 2**30) == {
+    assert decode_child._decode(Path("call.m4a"), io.BytesIO(), io.BytesIO(), 2**30) == {
         "result": "failed",
         "message": "the audio in call.m4a is damaged",
     }
@@ -559,6 +561,98 @@ def test_the_decoder_and_its_audio_go_when_the_engine_does(tmp_path: Path, files
 
         assert eventually(lambda: not running(decoder), seconds=10)
         assert eventually(lambda: list(files.iterdir()) == [], seconds=10)
+
+
+def rights(pid: int) -> tuple[int, int]:
+    """A process's integrity (0 untrusted, 0x1000 low, 0x2000 as programs have), and how many
+    privileges it has."""
+    windows, advapi32 = kernel32(), ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.OpenProcessToken.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p]
+    advapi32.GetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+    advapi32.GetTokenInformation.argtypes += [ctypes.c_uint32, ctypes.c_void_p]
+    token, size = ctypes.c_void_p(), ctypes.c_uint32()
+    process = ctypes.c_void_p(windows.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid))
+    try:
+        assert advapi32.OpenProcessToken(process, TOKEN_QUERY, ctypes.byref(token))
+        try:
+            told = []
+            for kind in (TOKEN_INTEGRITY_LEVEL, TOKEN_PRIVILEGES):
+                buffer = ctypes.create_string_buffer(4096)
+                assert advapi32.GetTokenInformation(token, kind, buffer, 4096, ctypes.byref(size))
+                told.append(buffer.raw[: size.value])
+        finally:
+            windows.CloseHandle(token)
+    finally:
+        windows.CloseHandle(process)
+    # The label ends with its SID, and that with the level; the privileges start with how many.
+    return int.from_bytes(told[0][-4:], "little"), int.from_bytes(told[1][:4], "little")
+
+
+def test_the_child_has_no_rights_left_when_it_reads_the_file(tmp_path: Path, files):
+    own_integrity, own_privileges = rights(os.getpid())
+    assert own_integrity >= 0x2000 and own_privileges > 0
+
+    with another_engine(recording(tmp_path / "call.wav"), files) as (engine, said):
+        decoder = int(said())
+        assert eventually(lambda: written(files) > 0)  # it has decoded some
+        assert rights(decoder) == (0, 0)
+        assert rights(engine.pid) == (own_integrity, own_privileges)
+
+
+@pytest.mark.parametrize("what", ["a new file", "the recording itself", "the install"])
+def test_code_in_the_child_cant_change_what_is_the_users(
+    tmp_path: Path, files, monkeypatch, what: str
+):
+    # A crafted file that got its own code to run in the decoder would be held to this.
+    source = recording(tmp_path / "call.wav")
+    before = source.read_bytes()
+    target = {
+        "a new file": tmp_path / "planted.txt",
+        "the recording itself": source,
+        "the install": Path(decode_child.__file__).with_name("planted.py"),
+    }[what]
+    monkeypatch.setenv(decode_child.TEST_HOOK, f"write {target}")
+    try:
+        with pytest.raises(PermissionError):
+            decode_child.decode(source)
+        assert source.read_bytes() == before
+        assert target == source or not target.exists()
+    finally:
+        if target != source:
+            target.unlink(missing_ok=True)
+
+
+def test_a_child_that_kept_its_rights_is_still_used_and_logged(tmp_path: Path, capsys):
+    samples = np.arange(4, dtype=np.int16)
+    kept = result(result="ok", kept="[WinError 5] Access is denied")
+
+    assert np.array_equal(collect(tmp_path, kept, samples.tobytes()), samples)
+    assert capsys.readouterr().out == (
+        "The decoder kept the user's rights: [WinError 5] Access is denied\n"
+    )
+
+    collect(tmp_path, result(result="ok", kept=""), samples.tobytes())  # as a rule
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    "refused",
+    ["OpenProcessToken", "SetTokenInformation", "GetTokenInformation", "AdjustTokenPrivileges"],
+)
+def test_why_the_child_couldnt_give_up_its_rights_is_known(monkeypatch, refused: str):
+    # Never the real ones here: they would take this process's rights.
+    def answer(name: str):
+        def call(*args) -> int:
+            ctypes.set_last_error(5 if name == refused else 0)
+            return name != refused
+
+        return call
+
+    names = ["OpenProcessToken", "SetTokenInformation", "GetTokenInformation"]
+    fakes = {name: answer(name) for name in [*names, "AdjustTokenPrivileges"]}
+    monkeypatch.setattr(decode_child, "_advapi32", lambda: SimpleNamespace(**fakes))
+
+    assert decode_child._give_up_rights().startswith("[WinError 5] ")
 
 
 def test_a_decode_under_way_in_another_process_is_left_alone(tmp_path: Path, files):

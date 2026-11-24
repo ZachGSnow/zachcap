@@ -418,6 +418,19 @@ def test_a_path_is_never_taken_for_a_url_or_a_protocol(tmp_path: Path):
             audio.import_media(Path(url), tmp_path / "out.flac")
 
 
+def test_a_file_that_is_open_already_is_read_from_there(tmp_path: Path):
+    # The decoder's child opens it, then gives up the rights to open anything (decode_child).
+    source = media(tmp_path / "call.mp4")
+    whole = np.concatenate(list(audio.decode_pieces(source, audio.IMPORTS)))
+
+    with open(source, "rb") as file:
+        elsewhere = tmp_path / "gone" / "call.mp4"  # what it's called doesn't matter
+        pieces = list(audio.decode_pieces(elsewhere, audio.IMPORTS, file=file))
+        assert not file.closed  # it's the caller's
+
+    assert np.array_equal(np.concatenate(pieces), whole)
+
+
 def test_a_file_over_the_size_cap_is_refused_before_ffmpeg_sees_it(tmp_path: Path, monkeypatch):
     # Here, where the caps are checked: an import does it in a child process, which a cap
     # changed by a test doesn't reach.

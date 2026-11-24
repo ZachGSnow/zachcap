@@ -9,11 +9,11 @@ import re
 import shutil
 import stat
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from math import gcd
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, BinaryIO, NamedTuple
 
 import numpy as np
 import soundfile as sf
@@ -167,9 +167,12 @@ def parse_time(value: str | None) -> float | None:
 
 
 @contextmanager
-def open_media(path: Path, allowed: Allowed) -> Iterator[InputContainer]:
+def open_media(
+    path: Path, allowed: Allowed, file: BinaryIO | None = None
+) -> Iterator[InputContainer]:
     """The file opened with FFmpeg, kept to the ``allowed`` kinds of file and decoders and
-    to local files. Everything ZachCap decodes with FFmpeg is opened here.
+    to local files. Everything ZachCap decodes with FFmpeg is opened here. ``file`` is the
+    file, if it's open already.
 
     Python opens the file and FFmpeg reads it through that file object, so the path is never
     taken for a URL, a protocol ("http:", "concat:", "subfile,") or a numbered image
@@ -183,7 +186,7 @@ def open_media(path: Path, allowed: Allowed) -> Iterator[InputContainer]:
     """
     import av
 
-    with open(path, "rb") as file:
+    with open(path, "rb") if file is None else nullcontext(file) as file:
         info = os.fstat(file.fileno())
         if not stat.S_ISREG(info.st_mode):
             raise Refused(f"{path.name} isn't a file")
@@ -210,18 +213,22 @@ def open_media(path: Path, allowed: Allowed) -> Iterator[InputContainer]:
 
 
 def decode_pieces(
-    source: Path, allowed: Allowed, starting: Callable[[float], object] | None = None
+    source: Path,
+    allowed: Allowed,
+    starting: Callable[[float], object] | None = None,
+    file: BinaryIO | None = None,
 ) -> Iterator[np.ndarray]:
     """The first audio stream of a media file as 16 kHz mono int16, a piece at a time as
     FFmpeg decodes it. ``starting`` is told how long the file says it is, in seconds (0 if it
-    doesn't say), before any of it is decoded. Raises Refused for a file open_media won't
-    open, one with no audio or with audio that isn't allowed, and one that holds over
-    MAX_SECONDS of audio (once that much has come out, if the file doesn't say so first)."""
+    doesn't say), before any of it is decoded; ``file`` is the file, if it's open already.
+    Raises Refused for a file open_media won't open, one with no audio or with audio that
+    isn't allowed, and one that holds over MAX_SECONDS of audio (once that much has come out,
+    if the file doesn't say so first)."""
     import av
 
     too_long = f"{source.name} is over {MAX_SECONDS // 3600} hours, too long to import"
     pieces = 0
-    with open_media(source, allowed) as container:
+    with open_media(source, allowed, file) as container:
         stream = next((s for s in container.streams if s.type == "audio"), None)
         if stream is None:
             raise Refused(f"{source.name} has no audio")
