@@ -264,7 +264,7 @@ export type LiveState = {
   lines: LiveLine[];
   /** Lines up to the cursor left out as echo since: the panel takes them away. */
   dropped: number[];
-  /** Waiting for the GPU while an earlier meeting is transcribed. */
+  /** Waiting while an earlier meeting is processed (it has the GPU, or the cores). */
   waiting: boolean;
   error: string | null;
   /** Seconds not transcribed live to keep up (a slow GPU on battery). */

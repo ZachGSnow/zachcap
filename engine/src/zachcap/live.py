@@ -4,16 +4,18 @@ The recorder hands each track's audio over as it writes it (capture.ChunkWriter)
 thread turns it into 16 kHz, finds where each person stopped talking (Silero VAD, the filter
 Whisper itself uses) and transcribes each stretch of speech as soon as it ends, so a line
 shows a second or two after it was said. Your microphone's lines are yours; the call's are
-the others'.
+the others'. The speech models run in a child process (live_child).
 
-The mic can hear the speakers (echo), and none of that may show as something you said. A mic
-stretch whose loudness follows the call's at the same moments, allowing the speakers' delay
-into the mic, is left out before it's transcribed. Some laptops' audio chips cancel most of
-the echo, and what's left doesn't follow the call closely; Whisper hears stock phrases in it
-("Thank you."). So while the call plays, a mic line that both Whisper and Silero doubt is
-speech is left out too: only real speech over the call gets through, and with the call
-quiet every word said into the mic does. A mic line that repeats what the call said at the
-same moment is left out as well.
+The mic can hear the speakers (echo), and none of that may show as something you said, while
+everything you did say must. So a mic stretch is cut where the call starts or stops playing
+(you answer right after them, and they right after you), and each piece is judged by itself:
+one whose loudness follows the call's at the same moments, allowing the speakers' delay into
+the mic, is left out before it's transcribed (echo.py). Some laptops' audio chips cancel most
+of the echo, and what's left doesn't follow the call closely; Whisper hears stock phrases in
+it ("Thank you."). So while the call plays, a mic line that both Whisper and Silero doubt is
+speech is left out too: only real speech over the call gets through, and with the call quiet
+every word said into the mic does. A mic line that repeats what the call said meanwhile is
+left out as well, unless you started it first.
 
 This is for glancing at during the call: the live panel, its notes, being asked something.
 The transcript kept with the meeting is still made after the call by the full pipeline.
@@ -21,14 +23,16 @@ Everything here stays in memory, until the next recording starts.
 
 None of it may put the recording at risk. The recorder's threads only queue audio here,
 never waiting on the worker, and at most BEHIND seconds of a track wait (the oldest goes
-when the worker can't keep up); whatever goes wrong is caught and shown on the panel; and
-meetings being processed come first on the GPU (GpuTurns).
+when the worker can't keep up); whatever goes wrong is caught and shown on the panel, the
+speech models' process crashing or hanging included; the worker needs nothing but numpy, so
+it imports nothing while a recording runs; and meetings being processed come first on the
+GPU (GpuTurns).
 """
 
 from __future__ import annotations
 
-import gc
 import threading
+import time
 import traceback
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -38,9 +42,10 @@ from math import gcd
 
 import numpy as np
 
-from . import cuda, transcript
+from . import asr, cpu, dictation, echo, live_child, transcript
 
 SETTING = "live_transcript"  # "1": a live transcript during recordings; unset: see api.live_on
+GPU_SETTING = "live_gpu"  # "1": the last look found a CUDA GPU (GpuCheck), until the next one
 RATE = 16000
 TICK = 0.5  # how often the worker looks for speech that ended
 END_SILENCE = 0.7  # this much quiet after speech: the person stopped talking
@@ -51,13 +56,15 @@ BEHIND = 120.0  # more audio than this waiting: the GPU can't keep up, skip ahea
 CAUGHT_UP = 20.0  # ... to this much
 PAD = 3200  # 0.2 s of audio either side of the speech, as Whisper likes it
 LINES_KEPT = 2000
+REDACT_PAD = 1.0  # seconds either side of a redacted moment whose lines go as well
 GPU_WAIT = 30.0  # a meeting waits this long at most for the live transcript to let go
-# The echo check compares loudness, RMS per 10 ms, on the recording's timeline.
-HOP = RATE // 100
-ECHO_DELAY = 0.25  # the speakers reach the mic at most this late (the audio buffers)
-ECHO_LIKE = 0.7  # a mic stretch's loudness following the call's this closely: the speakers
-PLAYING_DBFS = -70.0  # the call plays something (capture.CALL_SPEECH_DBFS: a quiet call too)
+LINGER = 5.0  # ... whose line under way has this long to come out
+ANSWER = 120.0  # the speech child has this long to answer, or it hangs
+FIRST = 120.0  # ... and this much more while it starts, and while its model loads
+RESTARTS = 5  # times it's started again in one recording after crashing, hanging or failing
+NONSENSE = "an answer that makes no sense"
 HISTORY = BEHIND + SEARCH  # seconds of the call's loudness kept to compare the mic with
+OWN_VOICE = 10.0  # dB: a piece quieter than your voice beside it by this isn't your voice
 
 
 @dataclass
@@ -67,19 +74,41 @@ class Line:
     start: float  # seconds into the recording
     end: float
     text: str
-    echo: bool = False  # the mic hearing the speakers: left out
+    gone: bool = False  # left out: the mic hearing the speakers, or redacted
+
+
+def low_pass(up: int, down: int) -> np.ndarray:
+    """The filter scipy.signal.resample_poly uses: a Kaiser-windowed sinc."""
+    half = 10 * max(up, down)
+    taps = np.sinc(np.arange(-half, half + 1) / max(up, down)) * np.kaiser(2 * half + 1, 5.0)
+    return (taps * up / taps.sum()).astype(np.float32)
+
+
+def resample(audio: np.ndarray, up: int, down: int, taps: np.ndarray) -> np.ndarray:
+    """Audio at up/down times its rate, as scipy.signal.resample_poly makes it. In numpy alone:
+    importing scipy takes most of a second and holds up the recorder's threads meanwhile."""
+    half, width = len(taps) // 2, (len(taps) - 1) // up + 1
+    at = np.arange(-(-len(audio) * up // down)) * down  # each output sample, at up times the rate
+    first = -((half - at) // up)  # the first audio sample its filter reaches...
+    over = first * up - at + half  # ... and how far past the filter's start that one is
+    reach = half // up + 1
+    windows = np.lib.stride_tricks.sliding_window_view(np.pad(audio, (reach, width)), width)
+    index = 2 * half - np.arange(up)[:, None] - up * np.arange(width)
+    table = np.where(index >= 0, taps[index], 0)
+    return np.einsum("ij,ij->i", windows[first + reach], table[over])
 
 
 class Resampler:
     """Turns blocks at a device's rate into 16 kHz with no seams where blocks meet: each
     piece is resampled with some audio either side of it, and only its own part kept."""
 
-    RIGHT = 64  # native samples held back for the right edge (the filter is shorter)
-
     def __init__(self, rate: int) -> None:
         self.rate = rate
         common = gcd(rate, RATE)
         self.up, self.down = RATE // common, rate // common
+        self._taps = low_pass(self.up, self.down)
+        # Native samples held back for the right edge: what the filter reaches, and some.
+        self._right = max(64, len(self._taps) // 2 // self.up + 1)
         # Left context: a whole number of ``down`` steps, so every piece's output starts on
         # the same grid as resampling the whole recording at once would.
         self._left = self.down * max(1, -(-512 // self.down))
@@ -90,7 +119,7 @@ class Resampler:
         if self.rate == RATE:
             return np.asarray(block, np.float32)
         self._held = np.concatenate([self._held, np.asarray(block, np.float32)])
-        ready = len(self._held) - self.RIGHT
+        ready = len(self._held) - self._right
         ready -= ready % self.down  # whole output samples only
         if ready <= 0:
             return np.zeros(0, np.float32)
@@ -102,10 +131,8 @@ class Resampler:
         return self._turn(len(self._held), final=True)
 
     def _turn(self, count: int, final: bool = False) -> np.ndarray:
-        from scipy.signal import resample_poly
-
         window = np.concatenate([self._context, self._held])
-        out = resample_poly(window, self.up, self.down).astype(np.float32)
+        out = resample(window, self.up, self.down, self._taps)
         skip = len(self._context) * self.up // self.down
         keep = len(out) - skip if final else count * self.up // self.down
         piece = out[skip : skip + keep]
@@ -137,93 +164,23 @@ class TrackState:
     next_frame: int | None = None  # where the next block starts (native rate), if no gap
 
 
-def loudness(audio: np.ndarray) -> np.ndarray:
-    """RMS per 10 ms of 16 kHz audio (whole frames only)."""
-    frames = len(audio) // HOP
-    power = (audio[: frames * HOP].reshape(frames, HOP).astype(np.float64) ** 2).mean(axis=1)
-    return np.sqrt(power).astype(np.float32)
+@dataclass
+class Piece:
+    """Part of a stretch of speech, in samples of the recording's timeline."""
 
-
-class Loudness:
-    """A track's loudness on the recording's timeline, RMS per 10 ms, for the last HISTORY
-    seconds: the call's, which the echo check compares mic stretches with. NaN where nothing
-    arrived (audio let go when the worker couldn't keep up)."""
-
-    def __init__(self) -> None:
-        self.first = 0  # the timeline frame (10 ms) of values[0]
-        self.values = np.zeros(0, np.float32)
-        self._rest = np.zeros(0, np.float32)  # the samples of a frame not whole yet
-        self._next: int | None = None  # the timeline sample the next audio should start at
-
-    def add(self, audio: np.ndarray, at: int) -> None:
-        """16 kHz audio starting at timeline sample ``at``."""
-        if at != self._next:
-            # The first audio, or the first after a gap: frames from the next 10 ms on.
-            skip = -at % HOP
-            audio, at = audio[skip:], at + skip
-            self._rest = np.zeros(0, np.float32)
-            frame, end = at // HOP, self.first + len(self.values)
-            if not len(self.values) or frame < end:
-                self.first, self.values = frame, np.zeros(0, np.float32)
-            else:
-                gap = np.full(frame - end, np.nan, np.float32)
-                self.values = np.concatenate([self.values, gap])
-        self._next = at + len(audio)
-        rest = np.concatenate([self._rest, np.asarray(audio, np.float32)])
-        whole = len(rest) // HOP * HOP
-        if whole:
-            self.values = np.concatenate([self.values, loudness(rest[:whole])])
-        self._rest = rest[whole:]
-        excess = len(self.values) - int(HISTORY * 100)
-        if excess > 0:
-            self.values = self.values[excess:]
-            self.first += excess
-
-    def span(self, start: int, end: int) -> np.ndarray:
-        """Frames ``start`` to ``end`` (exclusive), NaN for any not known."""
-        out = np.full(end - start, np.nan, np.float32)
-        low, high = max(start, self.first), min(end, self.first + len(self.values))
-        if low < high:
-            out[low - start : high - start] = self.values[low - self.first : high - self.first]
-        return out
-
-
-def echo_measure(mic: np.ndarray, call: np.ndarray) -> float:
-    """How closely a mic stretch's loudness follows the call's, allowing for the speakers'
-    delay into the mic: the best correlation over the delays the call allows. ``mic`` and
-    ``call`` are RMS per 10 ms, ``call`` starting up to ECHO_DELAY earlier (NaN where it
-    isn't known). Near 1 for the speakers heard through the mic; low for someone speaking,
-    alone or over the call; 0 with nothing to compare (the call quiet)."""
-    delays = len(call) - len(mic)
-    best = 0.0
-    for delay in range(delays + 1):
-        theirs = call[delays - delay : delays - delay + len(mic)]
-        known = ~np.isnan(theirs)
-        if known.sum() < max(10, len(mic) // 2):
-            continue
-        mine, theirs = mic[known], theirs[known]
-        if mine.std() < 1e-9 or theirs.std() < 1e-9:
-            continue  # flat: nothing follows anything
-        best = max(best, float(np.corrcoef(mine, theirs)[0, 1]))
-    return best
-
-
-def call_playing(call: np.ndarray, frames: int) -> bool:
-    """Whether the call played something during most of a mic stretch ``frames`` long (its
-    sound could reach the mic up to ECHO_DELAY later). ``call`` as for echo_measure."""
-    if frames <= 0:
-        return False
-    on = np.nan_to_num(call, nan=0.0) > 10 ** (PLAYING_DBFS / 20)
-    window = len(call) - frames + 1
-    heard = np.lib.stride_tricks.sliding_window_view(on, window)[:frames].any(axis=1)
-    return bool(heard.mean() >= 0.5)
+    start: int
+    end: int
+    playing: bool = False  # in the mic, while the call played: it may be the speakers
+    speakers: bool = False  # it's the speakers: not transcribed
+    level: float = 0.0  # how loud it gets (RMS)
 
 
 class GpuTurns:
     """The GPU, shared by the meetings being processed (the worker in api.py) and the live
     transcript, with one model on it at a time: a 4 GB GPU can't hold both. Meetings come
     first: while one waits or is processed, the live transcript lets go of its model, and it
-    takes the GPU again once none is left."""
+    takes the GPU again once none is left. With no GPU it's the processor they take turns at:
+    a meeting uses every core, so the live transcript waits then too (it holds no turn)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()  # held by whoever has a model on the GPU now
@@ -260,28 +217,34 @@ class GpuTurns:
 
 
 class GpuCheck:
-    """Whether a CUDA GPU is usable (cuda.prepare), looked up once: the live transcript is on
-    by default only then (see api.py). The first look imports torch, which takes seconds, so
-    the engine starts it in the background as it starts; a recording never waits for it."""
+    """Whether a CUDA GPU is usable, looked up once: the live transcript runs on it, and is on
+    by default only then (see api.py). The look takes seconds where there's an NVIDIA driver
+    (live_child.gpu_usable), so the engine starts it as it starts, and nothing waits for it
+    but a live transcript's own worker."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._usable: bool | None = None
 
     def look(self) -> bool:
-        """Whether there's one, waiting for the look if it's under way (Settings asks)."""
+        """Whether there's one, waiting for the look if it's under way."""
         with self._lock:
             if self._usable is None:
                 try:
-                    self._usable = cuda.prepare()
-                except Exception:  # a broken CUDA install: no GPU, then
+                    self._usable = live_child.gpu_usable()
+                except Exception:  # a broken CUDA install, or driver: no GPU, then
                     traceback.print_exc()
                     self._usable = False
             return self._usable
 
-    def known(self) -> bool:
-        """What the look found, without waiting: no GPU until it's done."""
-        return bool(self._usable)
+    def known(self) -> bool | None:
+        """What the look found, without waiting: None until it's done."""
+        return self._usable
+
+
+class NotNow(Exception):
+    """The speech models had to go before they answered (a meeting is to be processed, or the
+    recording stopped): the audio waits."""
 
 
 class Live:
@@ -289,9 +252,10 @@ class Live:
     recorder's writer threads; ``start`` runs the worker; ``lines`` is what the page reads.
 
     ``transcribe(audio, track)`` turns a stretch of 16 kHz speech into text (a Heard, or a
-    plain str), and ``speech(audio)`` finds the speech in it as (start, end) sample pairs:
-    given, so tests can pretend. ``transcribe`` may have a ``ready()`` (False: not now, the
-    audio waits) and a ``close()``, which the worker calls as it ends."""
+    plain str), and ``speech(audio)`` finds the speech in it as (start, end) sample pairs (its
+    ``find``, unless given): tests pretend. ``transcribe`` may have a ``ready()`` (False: not
+    now, the audio waits), ``failed`` (why there will be no more lines), a ``stop()`` (not to
+    go on past the line it's on) and a ``close()``, which the worker calls as it ends."""
 
     def __init__(
         self,
@@ -299,31 +263,44 @@ class Live:
         speech: Callable[[np.ndarray], list[tuple[int, int]]] | None = None,
     ) -> None:
         self._transcribe = transcribe
-        self._speech = speech or find_speech
+        self._speech = speech or transcribe.find
         self._feeding = threading.Lock()  # the audio arriving: the recorder's threads
         self._arriving: dict[str, Arriving] = {}
         self._lock = threading.Lock()  # the lines
         self._tracks: dict[str, TrackState] = {}  # the worker's own
-        self._call = Loudness()  # the call's loudness, to tell the speakers in the mic
+        self._call = echo.Loudness(HISTORY)  # the call's, to tell the speakers in the mic
+        self._speakers = echo.Speakers()
         self._lines: list[Line] = []
         self._next_id = 1
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
         self._closed = False
-        self.error: str | None = None  # the last thing that went wrong, for the page
-        self.waiting = False  # for the GPU: a meeting is being processed
-        self._dropped = 0.0  # seconds let go before the worker took them (feed)
-        self._behind = 0.0  # seconds skipped to catch up (the worker)
+        self.error: str | None = None  # what goes wrong, for the page: until a line comes out
+        self.waiting = False  # for a meeting being processed
+        # Seconds of each track let go before the worker took them (feed), and skipped to
+        # catch up (the worker).
+        self._dropped: dict[str, float] = {}
+        self._behind: dict[str, float] = {}
 
     @property
     def skipped(self) -> float:
-        """Seconds of audio not transcribed, to keep up with the call."""
-        return self._dropped + self._behind
+        """Seconds of the call not transcribed, to keep up with it: the track's that lost the
+        most, as the two mostly lose the same ones."""
+        tracks = {*self._dropped, *self._behind}
+        return max(
+            (self._dropped.get(name, 0.0) + self._behind.get(name, 0.0) for name in tracks),
+            default=0.0,
+        )
 
     @property
     def on(self) -> bool:
         """Running, or about to: not stopped."""
         return not self._done.is_set()
+
+    @property
+    def missing(self) -> str | None:
+        """The speech model it couldn't load: to be downloaded once the call is over."""
+        return getattr(self._transcribe, "missing", None)
 
     # From the recorder --------------------------------------------------------------
 
@@ -331,8 +308,8 @@ class Live:
         """Audio as the recorder writes it: ``frame`` is where the block starts on the
         recording's timeline, at ``rate``. Called from the writer threads, so it only queues
         the audio, and never waits on the worker: at most BEHIND seconds of a track wait,
-        and the oldest goes first. Once stopped, nothing is kept."""
-        if self._done.is_set():
+        and the oldest goes first. Once stopped (or failed for good), nothing is kept."""
+        if self._done.is_set() or self._closed:
             return
         audio = np.array(block, np.float32, copy=True)
         with self._feeding:
@@ -344,7 +321,8 @@ class Live:
             while arriving.frames > BEHIND * arriving.rate and len(arriving.blocks) > 1:
                 _, gone = arriving.blocks.popleft()
                 arriving.frames -= len(gone)
-                self._dropped += len(gone) / arriving.rate
+                lost = self._dropped.get(track, 0.0)
+                self._dropped[track] = lost + len(gone) / arriving.rate
 
     # The worker -----------------------------------------------------------------------
 
@@ -356,6 +334,9 @@ class Live:
         """Ends the worker after the line it's on; it frees the speech model as it goes.
         Doesn't wait for it: called with the recording's lock held."""
         self._done.set()
+        stop = getattr(self._transcribe, "stop", None)
+        if stop is not None:
+            stop()
         if self._thread is None:  # never started
             self._close()
 
@@ -371,13 +352,19 @@ class Live:
             while not self._done.wait(TICK):
                 try:
                     self.step()
+                except NotNow:  # the audio waits
+                    self.waiting = True
                 except Exception as exc:  # the live transcript must never touch the recording
                     self._went_wrong(exc)
+                if getattr(self._transcribe, "failed", None) is not None:
+                    self.error, self.waiting = self._transcribe.failed, False
+                    return  # for good: the recording goes on without it
         finally:
             self._close()
 
     def _close(self) -> None:
-        """Frees the speech model (on the worker's thread, which alone uses it)."""
+        """Frees the speech model (on the worker's thread, which alone uses it), and lets go
+        of the audio."""
         if self._closed:
             return
         self._closed = True
@@ -387,6 +374,9 @@ class Live:
                 close()
             except Exception:
                 traceback.print_exc()
+        with self._feeding:
+            self._arriving.clear()
+        self._tracks.clear()
 
     def _went_wrong(self, exc: Exception) -> None:
         """Said on the panel; in the log once, not on every tick it happens again."""
@@ -425,7 +415,7 @@ class Live:
                 # The first audio of the track, or the first after some was let go (feed):
                 # it starts over there, without what was waiting from before the gap.
                 if state.next_frame is not None:
-                    self._behind += sum(len(piece) for piece in pieces) / RATE
+                    self._skip(state, sum(len(piece) for piece in pieces))
                 state.resampler = Resampler(state.resampler.rate)
                 state.offset = at = round(frame * RATE / state.resampler.rate)
                 pieces = []
@@ -446,7 +436,7 @@ class Live:
             # rather than fall further behind; the meeting's own transcript has every word.
             behind = len(state.audio) - int(CAUGHT_UP * RATE)
             self._advance(state, behind)
-            self._behind += behind / RATE
+            self._skip(state, behind)
         while len(state.audio):
             if not self._may_say(final):
                 return  # the audio waits: stopping, or the GPU is a meeting's for now
@@ -484,25 +474,54 @@ class Live:
             cut_short = too_long and not ended
             if cut_short:
                 last = min(last, first + int(LONGEST * RATE))
-            speakers, playing = self._against_call(state, first, last)
-            if not speakers:  # the speakers heard through the mic aren't transcribed at all
-                self._say(state, first, last, pad_end=not cut_short, while_call=playing)
-            self._advance(state, last)
+            pieces = self._pieces(state, spans, first, last)
+            for piece in pieces:
+                start, end = piece.start - state.offset, piece.end - state.offset
+                if not piece.speakers:
+                    whole = piece is pieces[-1] and not cut_short
+                    self._say(state, start, end, pad_end=whole, while_call=piece.playing)
+                self._advance(state, end)
 
-    def _against_call(self, state: TrackState, start: int, end: int) -> tuple[bool, bool]:
-        """For a mic stretch (samples of its audio): whether it's the speakers heard through
-        the mic, its loudness following the call's (echo_measure), and whether the call was
-        playing then (call_playing). The call's own stretches: neither."""
-        if state.name != "mic":
-            return False, False
-        first = -(-(state.offset + start) // HOP)  # its whole 10 ms frames on the timeline
-        last = (state.offset + end) // HOP
-        if last - first < 10:  # under 0.1 s: nothing to tell
-            return False, False
-        mic = loudness(state.audio[first * HOP - state.offset : last * HOP - state.offset])
-        call = self._call.span(first - round(ECHO_DELAY * 100), last)
-        speakers = echo_measure(mic, call) >= ECHO_LIKE
-        return speakers, call_playing(call, len(mic))
+    def _pieces(
+        self, state: TrackState, spans: list[tuple[int, int]], first: int, last: int
+    ) -> list[Piece]:
+        """A stretch of the speech found (``spans``) as it's transcribed. The call's is whole.
+        A mic stretch is cut where the call started or stopped playing (echo.cuts) and each
+        piece judged on its own: the speakers heard through the mic are left out, and what
+        you said right before or after them isn't. Pieces that are both yours are joined
+        again, so a word the other side puts in doesn't split your sentence."""
+        stretch = Piece(state.offset + first, state.offset + last)
+        hop = echo.HOP
+        low, high = -(-stretch.start // hop), stretch.end // hop  # its whole 10 ms frames
+        if state.name != "mic" or high - low < 10:  # under 0.1 s: nothing to tell
+            return [stretch]
+        mic = echo.loudness(state.audio[low * hop - state.offset : high * hop - state.offset])
+        call = self._call.span(low - echo.LATE, high)
+        edges = [0, *echo.cuts(mic, call), len(mic)]
+        pieces: list[Piece] = []
+        for a, b in zip(edges, edges[1:], strict=False):
+            piece = Piece((low + a) * hop, (low + b) * hop)
+            spoken = [
+                state.offset + start
+                for start, end in spans
+                if state.offset + start < piece.end and state.offset + end > piece.start
+            ]
+            before = pieces[-1] if pieces else None
+            if not spoken and before:  # nothing said in it
+                before.end = piece.end
+                continue
+            piece.playing = echo.call_playing(call[a : b + echo.LATE], b - a)
+            piece.speakers = self._speakers.heard(mic[a:b], call[a : b + echo.LATE])
+            piece.level = echo.level(mic[a:b])
+            if before and _both_yours(before, piece):
+                start = before.start // hop - low
+                before.playing = echo.call_playing(call[start : b + echo.LATE], b - start)
+                before.end, before.level = piece.end, max(before.level, piece.level)
+            else:
+                piece.start = max([piece.start, *spoken[:1]])  # cut a moment before it, maybe
+                pieces.append(piece)
+        pieces[0].start, pieces[-1].end = stretch.start, stretch.end
+        return pieces
 
     def _may_say(self, final: bool) -> bool:
         """Whether to go on transcribing now: not once stopping (the rest isn't needed),
@@ -517,6 +536,9 @@ class Live:
         state.audio = state.audio[samples:]
         state.offset += samples
 
+    def _skip(self, state: TrackState, samples: int) -> None:
+        self._behind[state.name] = self._behind.get(state.name, 0.0) + samples / RATE
+
     def _say(
         self,
         state: TrackState,
@@ -530,17 +552,21 @@ class Live:
         clip = state.audio[max(0, start - PAD) : end + (PAD if pad_end else 0)]
         try:
             heard = self._transcribe(clip, state.name)
+        except NotNow:
+            raise
         except Exception as exc:  # this line is lost; the next ones aren't
             self._went_wrong(exc)
             return
+        self.error = None  # it works (again)
         text = str(heard).strip()
         if not text:
             return
-        if while_call and getattr(heard, "doubtful", False):
-            # What's left of the speakers once the audio chip cancelled the echo: neither
-            # Whisper nor Silero takes it for speech (Heard), and the call was playing. Real
-            # speech over the call convinces them, and with the call quiet nothing in the
-            # mic can be echo, so every word said into it is kept then.
+        if getattr(heard, "doubtful", False) and (while_call or state.name == "system"):
+            # Neither Whisper nor Silero takes it for speech (Heard). In the mic while the
+            # call plays, it's what's left of the speakers once the audio chip cancelled the
+            # echo; on the call, music or noise. Real speech over the call convinces them,
+            # and with the call quiet nothing in the mic can be echo, so every word said
+            # into it is kept then.
             return
         line = Line(0, state.name, (state.offset + start) / RATE, (state.offset + end) / RATE, text)
         with self._lock:
@@ -551,23 +577,28 @@ class Live:
             self._mark_echo(line)
 
     def _mark_echo(self, line: Line) -> None:
-        """Mic lines that repeat the call at the same moment are the mic hearing the
-        speakers. Whichever of the two arrives second does the check."""
-        near = [
-            other
-            for other in self._lines[-60:]
-            if other.track != line.track
-            and other.start <= line.end + 1.5
-            and other.end >= line.start - 1.5
-        ]
-        mics = [line] if line.track == "mic" else [o for o in near if o.track == "mic"]
-        calls = near if line.track == "mic" else [line]
-        if not mics or not calls:
-            return
-        theirs = [_utterance("system", o) for o in calls]
-        for mine in mics:
-            _, echo = transcript.drop_echo([_utterance("mic", mine)], theirs)
-            mine.echo = mine.echo or bool(echo)
+        """Mic lines that repeat what the call said meanwhile are the mic hearing the
+        speakers: only while the call played, and never one you started first. Whichever of
+        the two lines arrives second does the check."""
+        recent = self._lines[-60:]
+        for mine in [line] if line.track == "mic" else [o for o in recent if o.track == "mic"]:
+            theirs = [
+                other
+                for other in recent
+                if other.track == "system"
+                and other.start <= mine.end
+                and other.end + echo.ECHO_DELAY >= mine.start
+            ]
+            if line not in (mine, *theirs) or not theirs or not self._call_played(mine):
+                continue
+            if mine.start >= min(other.start for other in theirs) - transcript.ECHO_EARLY:
+                said = " ".join(other.text for other in theirs)
+                mine.gone = mine.gone or transcript.repeats(mine.text, said)
+
+    def _call_played(self, line: Line) -> bool:
+        """Whether the call played during most of a line."""
+        low, high = round(line.start * 100), round(line.end * 100)
+        return echo.call_playing(self._call.span(low - echo.LATE, high), high - low)
 
     # What the page reads --------------------------------------------------------------
 
@@ -575,7 +606,7 @@ class Live:
         """The lines after ``after`` (an id), in the order they were said: a line comes when
         its speaker stops, so one that started earlier can come later."""
         with self._lock:
-            found = [line for line in self._lines if line.id > after and not line.echo]
+            found = [line for line in self._lines if line.id > after and not line.gone]
         return [
             {
                 "id": line.id,
@@ -588,10 +619,18 @@ class Live:
         ]
 
     def dropped(self, upto: int) -> list[int]:
-        """The lines up to ``upto`` left out as echo. One can be found to be echo after the
-        panel read it (the call's line came after the mic's): the panel takes it away."""
+        """The lines up to ``upto`` left out. One can be found to be echo after the panel read
+        it (the call's line came after the mic's), or be redacted: the panel takes it away."""
         with self._lock:
-            return [line.id for line in self._lines if line.echo and line.id <= upto]
+            return [line.id for line in self._lines if line.gone and line.id <= upto]
+
+    def forget(self, start: float, end: float) -> None:
+        """Lets go of what was said from ``start`` to ``end`` (seconds), redacted from the
+        meeting, and a little either side: a line's times aren't exact."""
+        with self._lock:
+            for line in self._lines:
+                if line.start < end + REDACT_PAD and line.end > start - REDACT_PAD:
+                    line.gone, line.text = True, ""
 
     def text(self, me: str = "You", them: str = "Call") -> str:
         """The live transcript so far as plain lines ("[mm:ss] You: ..."), for the notes."""
@@ -603,174 +642,179 @@ class Live:
         return "\n".join(out)
 
 
-def _utterance(track: str, line: Line) -> transcript.Utterance:
-    word = transcript.Word(line.start, line.end, line.text)
-    return transcript.Utterance(track, None, line.start, line.end, [word])
-
-
-def speech_peak(audio: np.ndarray) -> float:
-    """How sure Silero VAD is, at its surest (each 32 ms), that 16 kHz audio has speech."""
-    from faster_whisper.vad import get_vad_model
-
-    if len(audio) < 512:
-        return 0.0
-    padded = np.pad(audio, (0, -len(audio) % 512))
-    return float(np.max(get_vad_model()(padded)))
-
-
-def find_speech(audio: np.ndarray) -> list[tuple[int, int]]:
-    """Where people speak in 16 kHz audio, as (start, end) samples (Silero VAD)."""
-    from faster_whisper.vad import VadOptions, get_speech_timestamps
-
-    if len(audio) < 512:
-        return []
-    found = get_speech_timestamps(
-        audio,
-        VadOptions(min_silence_duration_ms=300, speech_pad_ms=100, min_speech_duration_ms=200),
-    )
-    return [(span["start"], span["end"]) for span in found]
+def _both_yours(before: Piece, piece: Piece) -> bool:
+    """Whether two pieces of a mic stretch, one after the other, are both your voice. One
+    while the call played that's much quieter than the one beside it isn't: it's the
+    speakers, though not following the call closely enough to be told by that."""
+    if before.speakers or piece.speakers:
+        return False
+    if before.playing == piece.playing:
+        return True
+    quiet, over = (piece, before) if before.playing else (before, piece)
+    return over.level > quiet.level * 10 ** (-OWN_VOICE / 20)
 
 
 class Heard(str):
     """The text Speech made of a stretch, knowing whether it's doubtful that it was speech at
-    all (``doubtful``, see DOUBT_LOGPROB); a transcriber may return a plain str instead."""
+    all (``doubtful``, see live_child.DOUBT_LOGPROB); a transcriber may return a plain str."""
 
     doubtful = False
 
 
-# A line is doubtful when two judges agree it isn't speech: Whisper, its words this unlikely
-# in every segment (avg_logprob; its no_speech_prob is no help, always 0 with large-v3-turbo),
-# and Silero VAD, never this sure of speech anywhere in the clip. Measured on a laptop whose
-# audio chip cancels echo (2026-11-24, large-v3-turbo and small.en): what got through of the
-# call into the mic came out as "Thank you.", "Hello.", "Ready?" and the like, at -0.54 to
-# -1.31 and Silero 0.70 at most; "Yes.", "No.", "Thanks.", "Okay." said into the mic, alone
-# or over the call and as quietly as that leak, at -0.05 to -0.64 and Silero 0.90 or more.
-DOUBT_LOGPROB = -0.5
-SURE_SPEECH = 0.8
-
-
 class Speech:
-    """Whisper for the live transcript, loaded when the first speech needs it: the meeting
-    model on the GPU, one pass without beam search (a second or less a line), or the small
-    dictation model on the CPU when there's no GPU. Used by the live worker's thread only.
+    """The speech models for the live transcript, in a child process (live_child) that's
+    started when there's audio to look at: the meeting model on the GPU, one pass without beam
+    search (a second or less a line), or the small dictation model on the CPU when there's no
+    GPU. Used by the live worker's thread only (but for stop).
 
-    On the GPU it takes its turn (``gpu``): while a meeting is being processed it lets go of
-    its model and waits (``ready()`` is False), and loads it again after. It only loads a
-    model already on this PC; one that isn't is downloaded once it stops (close). Each line
-    says whether it's doubtful that it was speech at all (Heard)."""
+    While a meeting is being processed there's no child (ending it is what frees the GPU's
+    memory) and it waits (``ready()`` is False); it's started again after. On the GPU it's only
+    there while this holds its turn (``gpu``). A child that crashes, hangs or fails a line is
+    ended and started again, RESTARTS times at most (then ``failed``). It only loads a model
+    already on this PC; ``missing`` names one that didn't load, to be downloaded after the
+    call. Each line says whether it's doubtful that it was speech at all (Heard)."""
 
     def __init__(
-        self, language: str | None, hotwords: str | None, gpu: GpuTurns | None = None
+        self,
+        language: str | None,
+        hotwords: str | None,
+        gpu: GpuTurns | None = None,
+        check: GpuCheck | None = None,
+        start: Callable[..., live_child.Child] | None = None,
     ) -> None:
         self.language = language
         self.hotwords = hotwords or None
         self.gpu = gpu
         self.device: str | None = None
-        self._model = None
+        self.failed: str | None = None  # why there will be no more lines: not tried again
+        self.missing: str | None = None  # the model, when it didn't load
+        self._check = check
+        self._start = start or live_child.Child
+        self._child: live_child.Child | None = None
+        self._asked: set[str] = set()  # what this child has been asked before
+        self._stops = 0  # times a child stopped, hung or failed
         self._turn = False  # holds the GPU's turn
-        self._failed: str | None = None  # why the model didn't load: not tried again
-        self._missing: str | None = None  # the model, when it isn't on this PC yet
+        self._stopping = threading.Event()
         self._closed = False
-        self.fetching: threading.Thread | None = None  # downloading the missing model
 
     def ready(self) -> bool:
-        if self._closed:
+        if self._closed or self.failed is not None:
+            return False
+        if self.gpu is not None and self.gpu.wanted():
+            self._let_go()  # a meeting waits for the GPU, or uses every core without one
             return False
         if self.device is None:
-            try:
-                self.device = "cuda" if cuda.prepare() else "cpu"
-            except Exception:  # a broken CUDA install: the CPU, then
-                traceback.print_exc()
-                self.device = "cpu"
+            self.device = "cuda" if self._check is not None and self._check.look() else "cpu"
         if self.device == "cpu" or self.gpu is None:
             return True
-        if self.gpu.wanted():
-            self._let_go()  # a meeting is waiting for the GPU
-            return False
         if not self._turn:
             self._turn = self.gpu.take()
         return self._turn
 
-    def _load(self):
-        from . import asr, cpu, dictation, models
+    def find(self, audio: np.ndarray) -> list[tuple[int, int]]:
+        """Where people speak in 16 kHz audio, as (start, end) samples."""
+        answer = self._ask("find", audio)
+        if "spans" not in answer:
+            raise self._stopped(answer.get("error", NONSENSE))
+        return [(int(start), int(end)) for start, end in answer["spans"]]
 
-        if self._failed is not None:  # one failed load a recording, not one a line
-            raise RuntimeError(self._failed)
+    def __call__(self, audio: np.ndarray, track: str) -> Heard:
+        answer = self._ask("hear", audio, **self._settings())
+        if "load" in answer:
+            self.missing = self._settings()["model"]
+            self.failed = (
+                "its speech model isn't on this PC yet; it's downloaded after this call, "
+                "for the next one"
+                if answer["load"] == "missing"
+                else f"its speech model didn't load ({answer.get('error', '')}); what's missing "
+                "of it is downloaded after this call"
+            )
+            raise RuntimeError(self.failed)
+        if "text" not in answer:  # after a GPU error every line fails: a fresh one has the next
+            raise self._stopped(answer.get("error", NONSENSE))
+        heard = Heard(answer["text"])
+        heard.doubtful = bool(answer.get("doubtful"))
+        return heard
+
+    def stop(self) -> None:
+        """Not to go on past the line it's on. From any thread."""
+        self._stopping.set()
+
+    def close(self) -> None:
+        """Frees the GPU for the meeting's own transcript, which starts next. Never starts a
+        child again after this."""
+        self._closed = True
+        self._let_go()
+
+    def _settings(self) -> dict:
+        """The model, and how it's used, for the child."""
         if self.device == "cuda":
-            name = asr.DEFAULT_MODEL
+            model = asr.DEFAULT_MODEL
             options = {"device": "cuda", "compute_type": "int8_float16"}
         else:
             # Half the cores: the call app and the recorder run on the rest, and the call
             # matters more than its live transcript.
-            name = dictation.model_for(self.language)
+            model = dictation.model_for(self.language)
             threads = max(1, cpu.physical_cores() // 2)
             options = {"device": "cpu", "compute_type": "int8", "cpu_threads": threads}
-        try:
-            # Only from this PC: a download now (1.6 GB for the meeting model) would take the
-            # call's bandwidth. One that isn't here yet is downloaded once this one stops.
-            self._model = models.whisper(name, local_files_only=True, **options)
-        except FileNotFoundError as exc:
-            self._missing = name
-            self._failed = (
-                "its speech model isn't on this PC yet; it's downloaded after this call, "
-                "for the next one"
-            )
-            raise RuntimeError(self._failed) from exc
-        except Exception as exc:
-            self._failed = f"its speech model didn't load ({exc})"
-            raise RuntimeError(self._failed) from exc
-        return self._model
+        return {
+            "model": model,
+            "options": options,
+            "language": self.language,
+            "hotwords": self.hotwords,
+        }
 
-    def __call__(self, audio: np.ndarray, track: str) -> Heard:
-        if self._closed:
-            raise RuntimeError("The live transcript has stopped")
+    def _ask(self, do: str, audio: np.ndarray, **more) -> dict:
+        """What the child (started now if there's none) answers. Raises NotNow when it has to
+        go before it does, and RuntimeError when it crashed, hung or couldn't be started."""
+        if self._closed or self.failed is not None:
+            raise RuntimeError(self.failed or "The live transcript has stopped")
         if self.device is None and not self.ready():
-            raise RuntimeError("The GPU is busy with a meeting")
-        model = self._model or self._load()
-        segments, _ = model.transcribe(
-            audio,
-            language=self.language,
-            beam_size=1,
-            vad_filter=False,  # already cut at the speech
-            condition_on_previous_text=False,
-            without_timestamps=True,
-            hotwords=self.hotwords,
+            raise NotNow
+        try:
+            if self._child is None:
+                self._child = self._start(*(["cuda"] if self.device == "cuda" else []))
+                self._asked.clear()
+            limit = ANSWER + (0 if do in self._asked else FIRST)
+            self._asked.add(do)
+            self._child.send(do, audio, **more)
+            return self._answer(limit)
+        except (live_child.Gone, OSError) as exc:
+            raise self._stopped(str(exc)) from exc
+
+    def _answer(self, limit: float) -> dict:
+        asked, hurry = time.monotonic(), None
+        while (answer := self._child.answer(0.1)) is None:
+            now = time.monotonic()
+            if self._stopping.is_set() or (self.gpu is not None and self.gpu.wanted()):
+                hurry = hurry or now
+                if now - hurry > LINGER:
+                    self._let_go()
+                    raise NotNow
+            if now - asked > limit:
+                raise live_child.Gone(f"no answer for {limit:.0f} seconds")
+        return answer
+
+    def _stopped(self, why: str) -> RuntimeError:
+        """The child crashed, hung or failed: it's ended, and the next thing to do starts
+        another, a few times. What to say about it."""
+        if self._child is not None:
+            self._child.end()
+            self._child = None
+        self._stops += 1
+        if self._stops <= RESTARTS:
+            return RuntimeError(f"its speech model stopped ({why}) and is starting again")
+        self.failed = (
+            f"its speech model stopped {self._stops} times ({why}), so there are no more lines "
+            "for this call"
         )
-        segments = list(segments)
-        heard = Heard(" ".join(segment.text.strip() for segment in segments).strip())
-        heard.doubtful = (
-            bool(segments)
-            and all(segment.avg_logprob <= DOUBT_LOGPROB for segment in segments)
-            and speech_peak(audio) < SURE_SPEECH
-        )
-        return heard
+        return RuntimeError(self.failed)
 
     def _let_go(self) -> None:
-        """Frees the model, and the GPU's turn with it."""
-        if self._model is not None:
-            self._model = None
-            gc.collect()
+        """Ends the child, and gives the GPU's turn back once it's gone."""
+        if self._child is not None:
+            self._child.end()
+            self._child = None
         if self._turn:
             self._turn = False
             self.gpu.give_back()
-
-    def close(self) -> None:
-        """Frees the GPU for the meeting's own transcript, which starts next. Never loads
-        again after this. A model that wasn't on this PC is downloaded now, on its own thread,
-        so the next call has it."""
-        self._closed = True
-        self._let_go()
-        if self._missing is not None:
-            self.fetching = threading.Thread(
-                target=_download, args=(self._missing,), name="live-model", daemon=True
-            )
-            self.fetching.start()
-
-
-def _download(name: str) -> None:
-    from . import models
-
-    try:
-        models.download_whisper(name)
-    except Exception:  # no network, say: tried again after the next call
-        traceback.print_exc()

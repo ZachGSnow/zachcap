@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import apikeys, audio, transcript, vocabulary, voiceprint
+from . import apikeys, audio, echo, transcript, vocabulary, voiceprint
 from .store import Store
 
 MIN_SPEAKER_SECONDS = 1.5  # shorter clusters are usually noise or cross-talk
@@ -47,9 +47,11 @@ def process(store: Store, meeting_id: int, log: Log = print) -> str:
             for name, result in diarized.items()
         }
         if "mic" in utterances and "system" in utterances:
-            utterances["mic"], echo = transcript.drop_echo(utterances["mic"], utterances["system"])
-            if echo:
-                log(f"dropped {len(echo)} mic lines that were echo of the speakers")
+            utterances["mic"], heard = transcript.drop_echo(
+                utterances["mic"], utterances["system"], _call_playing(tracks["system"])
+            )
+            if heard:
+                log(f"dropped {len(heard)} mic lines that were echo of the speakers")
 
         from .diarize import EMBEDDING_MODEL
 
@@ -78,6 +80,22 @@ def process(store: Store, meeting_id: int, log: Log = print) -> str:
             keep = had_results and previous in ("ready", "needs_names")
             store.update_meeting(meeting_id, status=previous if keep else "failed")
         raise
+
+
+def _call_playing(call: np.ndarray) -> Callable[[float, float], bool]:
+    """Whether the computer audio had sound in a stretch (seconds into the meeting): only then
+    can the mic have heard the speakers."""
+    level = echo.Loudness(len(call) / audio.RATE)
+    minute = 60 * audio.RATE  # a copy of the whole call could take a GB
+    for at in range(0, len(call), minute):
+        level.add(call[at : at + minute], at)
+
+    def playing(start: float, end: float) -> bool:
+        first = int(start * 100)
+        last = max(first + 1, round(end * 100))
+        return echo.call_playing(level.span(first - echo.LATE, last), last - first)
+
+    return playing
 
 
 def _transcribe(

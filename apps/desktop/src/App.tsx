@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { AudioLines, FileUp, Loader2, RotateCw, TriangleAlert } from "lucide-react";
+import { AudioLines, FileUp, Loader2, RotateCw, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -23,6 +23,7 @@ import { Label } from "@/components/ui/label";
 import { useLibraryAsk } from "@/hooks/useLibraryAsk";
 import { usePoll } from "@/hooks/usePoll";
 import { api, connect, isTauri, waitForEngine, type Meeting, type Stats } from "@/lib/engine";
+import { backText, stoppedText, type EngineExit } from "@/lib/engineStops";
 import { notify, reason } from "@/lib/feedback";
 import { ActionsView } from "@/views/ActionsView";
 import { AskView } from "@/views/AskView";
@@ -78,8 +79,9 @@ function Startup({ error, setup, onRetry }: { error?: string; setup?: string; on
   );
 }
 
-/** Shown when the engine stops after startup (a crash): one click starts it again. */
-function EngineStopped({ message, onRestarted }: { message: string; onRestarted: () => void }) {
+/** Shown when the engine stops after startup (a crash): the shell starts it again by itself,
+ * or, when it keeps stopping, one click does. */
+function EngineStopped({ exit, onRestarted }: { exit: EngineExit; onRestarted: () => void }) {
   const [restarting, setRestarting] = useState(false);
   const restart = async () => {
     setRestarting(true);
@@ -99,11 +101,32 @@ function EngineStopped({ message, onRestarted }: { message: string; onRestarted:
       <TriangleAlert className="size-4 shrink-0 text-destructive" />
       <span className="min-w-0 flex-1">
         <span className="font-medium">The ZachCap engine stopped.</span>{" "}
-        <span className="text-muted-foreground">{message}</span>
+        <span className="text-muted-foreground">{stoppedText(exit)}</span>
       </span>
-      <Button size="sm" disabled={restarting} onClick={() => void restart()}>
-        {restarting ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
-        Restart engine
+      {exit.restarting ? (
+        <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
+      ) : (
+        <Button size="sm" disabled={restarting} onClick={() => void restart()}>
+          {restarting ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
+          Restart engine
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/** Shown once the shell has started a stopped engine again, until it's closed: a recording
+ * may have been cut off while nobody looked. */
+function EngineBack({ recording, onClose }: { recording: boolean; onClose: () => void }) {
+  return (
+    <div className="flex items-center gap-3 border-b bg-amber-500/10 px-5 py-2.5 text-sm">
+      <TriangleAlert className="size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+      <span className="min-w-0 flex-1">
+        <span className="font-medium">The ZachCap engine stopped and was started again.</span>{" "}
+        <span className="text-muted-foreground">{backText(recording)}</span>
+      </span>
+      <Button size="icon-sm" variant="ghost" aria-label="Close" onClick={onClose}>
+        <X />
       </Button>
     </div>
   );
@@ -184,22 +207,37 @@ function Shell() {
   const [view, setView] = useState<View>({ name: "meetings" });
   const [importPath, setImportPath] = useState<string | null>(null);
   const { data: stats, error: engineError } = usePoll(() => api<Stats>("/api/stats"), 5000);
-  const [engineStopped, setEngineStopped] = useState<string | null>(null);
+  const [engineStopped, setEngineStopped] = useState<EngineExit | null>(null);
+  const [engineBack, setEngineBack] = useState<{ recording: boolean } | null>(null);
   // Kept here, so the conversation (and an answer still on its way) survives looking at
   // a meeting it cited.
   const library = useLibraryAsk();
 
   useEffect(() => {
     if (!isTauri()) return;
-    let unlisten: (() => void) | undefined;
+    const stops: (() => void)[] = [];
     let cancelled = false;
-    void listen<string>("engine-exited", (event) => setEngineStopped(event.payload)).then((stop) => {
-      if (cancelled) stop();
-      else unlisten = stop;
+    const on = <T,>(name: string, heard: (payload: T) => void) =>
+      void listen<T>(name, (event) => heard(event.payload)).then((stop) => {
+        if (cancelled) stop();
+        else stops.push(stop);
+      });
+    on<EngineExit>("engine-exited", (exit) => {
+      setEngineStopped(exit);
+      setEngineBack(null);
+    });
+    on<boolean>("engine-restarted", (recording) => {
+      // Asked where it is now: a restarted engine has a port and a token of its own.
+      void waitForEngine()
+        .then(() => {
+          setEngineStopped(null);
+          setEngineBack({ recording });
+        })
+        .catch(() => undefined); // it stopped again: the next engine-exited says so
     });
     return () => {
       cancelled = true;
-      unlisten?.();
+      for (const stop of stops) stop();
     };
   }, []);
 
@@ -257,7 +295,8 @@ function Shell() {
           onImport={() => void chooseFile()}
         />
         <main className="flex min-w-0 flex-1 flex-col">
-          {engineStopped && <EngineStopped message={engineStopped} onRestarted={() => setEngineStopped(null)} />}
+          {engineStopped && <EngineStopped exit={engineStopped} onRestarted={() => setEngineStopped(null)} />}
+          {engineBack && <EngineBack recording={engineBack.recording} onClose={() => setEngineBack(null)} />}
           <RecordingBar />
           <CallWatcher />
           <GlobalKeys />

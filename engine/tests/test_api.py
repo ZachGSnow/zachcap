@@ -1,3 +1,4 @@
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -236,6 +237,7 @@ def test_startup_finishes_what_a_crash_left_behind(tmp_path: Path, monkeypatch):
     (deleted / "recording.json").write_text('{"complete": true}', encoding="utf-8")
 
     client = TestClient(create_app("test-token"), base_url=LOCAL)
+    client.app.state.process_left(0.01)  # as serve() does, on a thread
     deadline = time.monotonic() + 5
     while len(processed) < 3 and time.monotonic() < deadline:
         time.sleep(0.02)
@@ -246,9 +248,73 @@ def test_startup_finishes_what_a_crash_left_behind(tmp_path: Path, monkeypatch):
     assert sorted(processed) == sorted([cut_off, busy, recovered["id"]])
 
 
-def test_the_player_never_gets_a_half_written_file(tmp_path: Path):
-    import threading
+class StandInRecorder:
+    """A recorder that records nothing."""
 
+    def __init__(self, folder: Path, listener=None, **devices) -> None:
+        self.folder = folder
+        self.elapsed, self.tracks, self.paused, self.started_at = 3.0, {}, False, None
+
+    def start(self) -> None:
+        self.folder.mkdir(parents=True)
+
+    def mute_mic(self, muted: bool = True) -> None:
+        pass
+
+    def stop(self) -> dict:
+        return {"duration": 3.0}
+
+
+def test_after_a_crash_mid_call_the_rest_is_recorded_before_the_start_is_processed(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    monkeypatch.setattr(capture, "Recorder", StandInRecorder)
+    processed: list[int] = []
+    monkeypatch.setattr(
+        pipeline, "process", lambda store, meeting_id, log: processed.append(meeting_id)
+    )
+    store = Store()
+    cut_off = store.create_meeting(
+        "Teams call", "2026-11-22T09:00:00", tmp_path / "cut", status="recording"
+    )
+    store.close()
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
+    # The call goes on: its app still has the mic, and the engine records the rest.
+    rest = client.post("/api/record/start", headers=AUTH, json={}).json()["meeting_id"]
+    left = threading.Thread(target=client.app.state.process_left, args=(0.01,), daemon=True)
+    left.start()
+    time.sleep(0.3)
+    assert processed == []  # loading its models would hold the recorder up
+    listed = {m["id"]: m["progress"] for m in client.get("/api/meetings", headers=AUTH).json()}
+    assert listed[cut_off] == "queued"  # "Waiting its turn..."
+    client.post("/api/record/stop", headers=AUTH)
+    left.join(5)
+    deadline = time.monotonic() + 5
+    while len(processed) < 2 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert sorted(processed) == sorted([cut_off, rest])
+
+
+def test_what_a_quit_between_calls_left_is_processed_at_once(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    processed: list[int] = []
+    monkeypatch.setattr(
+        pipeline, "process", lambda store, meeting_id, log: processed.append(meeting_id)
+    )
+    store = Store()
+    waiting = store.create_meeting(
+        "Waiting", "2026-11-22T09:00:00", tmp_path / "a", status="recorded"
+    )
+    store.close()
+    create_app("test-token")
+    deadline = time.monotonic() + 5
+    while not processed and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert processed == [waiting]
+
+
+def test_the_player_never_gets_a_half_written_file(tmp_path: Path):
     import numpy as np
     import soundfile as sf
 

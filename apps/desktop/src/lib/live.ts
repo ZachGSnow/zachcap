@@ -41,9 +41,18 @@ export function speaker(line: Pick<LiveLine, "track">, me: string | null | undef
 }
 
 /** The recording's clock now: what the engine last said, moved on by the time since (the
- * panel asks once a second, and ticks in between). */
-export function elapsedNow(elapsed: number | null, saidAt: number, now: number): number | null {
-  return elapsed === null ? null : elapsed + Math.max(0, now - saidAt) / 1000;
+ * panel asks once a second, and ticks in between). It stands still while the engine can't be
+ * reached: nobody knows then whether it's still recording. */
+export function elapsedNow(elapsed: number | null, saidAt: number, now: number, unreachable: string | null = null): number | null {
+  if (elapsed === null || unreachable !== null) return elapsed;
+  return elapsed + Math.max(0, now - saidAt) / 1000;
+}
+
+/** The panel's dot: red while it's recording, amber while that's paused; off (grey) when it
+ * isn't, or when the engine can't be reached to say. */
+export function dot(state: Pick<LiveState, "recording" | "paused"> | null, unreachable: string | null): "recording" | "paused" | "off" {
+  if (!state?.recording || unreachable !== null) return "off";
+  return state.paused ? "paused" : "recording";
 }
 
 /** Whether a scrolled list is at its end (within `slack` pixels): new lines keep it there. */
@@ -66,7 +75,7 @@ export function notices(state: LiveState | null, unreachable: string | null): Li
     said.push({
       key: "waiting",
       tone: "info",
-      text: "Waiting for the GPU: an earlier meeting is being transcribed. Lines carry on once it's done.",
+      text: "Waiting while an earlier meeting is processed. Lines carry on once that's done.",
     });
   }
   if (state.on && state.paused) {
