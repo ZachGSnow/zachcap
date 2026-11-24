@@ -86,7 +86,9 @@ def _call_playing(call: np.ndarray) -> Callable[[float, float], bool]:
     """Whether the computer audio had sound in a stretch (seconds into the meeting): only then
     can the mic have heard the speakers."""
     level = echo.Loudness(len(call) / audio.RATE)
-    level.add(call, 0)
+    minute = 60 * audio.RATE  # a copy of the whole call could take a GB
+    for at in range(0, len(call), minute):
+        level.add(call[at : at + minute], at)
 
     def playing(start: float, end: float) -> bool:
         first = int(start * 100)
