@@ -101,13 +101,15 @@ def test_a_reset_name_cant_collide_with_your_own(store: Store):
 def test_deleting_a_kind_sends_its_meetings_back_to_the_usual_one(store: Store, tmp_path: Path):
     mine = prompts.add(store, "template", "Vendor call", "Focus on quotes and lead times.")
     meeting = store.create_meeting("Vendor", "2026-11-23T09:00:00", tmp_path)
-    store.update_meeting(meeting, template=mine["id"])
+    store.update_meeting(meeting, template=mine["id"], template_source="auto")
     store.set_setting("summary_template", mine["id"])
 
     prompts.delete(store, mine["id"])
 
     assert store.meeting(meeting)["template"] is None
-    assert store.setting("summary_template") is None
+    assert store.meeting(meeting)["template_source"] is None
+    # A usual kind you chose stays one you chose: General, not Automatic.
+    assert store.setting("summary_template") == "general"
     assert prompts.get(store, "template", mine["id"]) is None
     with pytest.raises(prompts.UnknownPrompt):
         prompts.delete(store, mine["id"])
@@ -123,6 +125,23 @@ def test_an_older_database_gets_the_prompts_table(tmp_path: Path):
 
     assert prompts.add(store, "recipe", "Works", "Write it.")["label"] == "Works"
     store.close()
+
+
+def test_the_kind_pickers_start_with_automatic(store: Store):
+    assert prompts.choices(store, "template")[:2] == [
+        {"id": "auto", "label": "Automatic"},
+        {"id": "general", "label": "General"},
+    ]
+    assert [choice["id"] for choice in prompts.choices(store, "recipe")] == [
+        "email",
+        "status",
+        "ticket",
+    ]
+    assert "auto" not in [entry["id"] for entry in prompts.library(store, "template")]
+    with pytest.raises(ValueError, match="already a kind of meeting called Automatic"):
+        prompts.add(store, "template", "automatic", "Focus on everything.")
+    with pytest.raises(ValueError, match="already a kind of meeting called Automatic"):
+        prompts.update(store, "standup", label="Automatic")
 
 
 def test_only_the_general_kind_may_have_no_instructions(store: Store):

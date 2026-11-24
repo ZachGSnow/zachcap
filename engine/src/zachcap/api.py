@@ -107,7 +107,7 @@ class QuestionBody(BaseModel):
 
 
 class SummaryBody(BaseModel):
-    template: str | None = None
+    template: str | None = None  # a kind of meeting, or "auto" (Automatic) to have one picked
 
 
 class RecipeBody(BaseModel):
@@ -1617,7 +1617,8 @@ def create_app(token: str) -> FastAPI:
                     }
                     for model, label in MODELS.items()
                 ],
-                # The usual kind, as a summary would use it (a deleted one reads as general).
+                # The usual kind, as a summary would use it (a deleted one reads as general):
+                # "auto", Automatic, in a library where none was chosen.
                 "summary_template": meeting_template(store, {"template": None}),
                 "export_folder": export_folder,
                 "watch_folder": watch_folder,
@@ -1692,9 +1693,10 @@ def create_app(token: str) -> FastAPI:
                     changed.append(meeting["id"])
             export_soon(store, changed)
         if body.summary_template is not None:
-            if prompts.get(store, "template", body.summary_template) is None:
+            kind = body.summary_template
+            if kind != prompts.AUTOMATIC and prompts.get(store, "template", kind) is None:
                 raise HTTPException(status_code=400, detail="Unknown kind of meeting")
-            store.set_setting("summary_template", body.summary_template)
+            store.set_setting("summary_template", kind)
         if body.keep_audio_days is not None:
             if body.keep_audio_days not in KEEP_AUDIO_CHOICES:
                 raise HTTPException(

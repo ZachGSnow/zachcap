@@ -896,7 +896,7 @@ export function SettingsView() {
           </Row>
           <Row
             label="Usual kind of meeting"
-            help="What summaries focus on unless you pick another kind for a meeting: action items, a customer's asks, an incident's timeline..."
+            help="What summaries focus on unless you pick another kind for a meeting: action items, a customer's asks, an incident's timeline... Automatic picks one for each meeting: from its title, its client or who was in it when they make it clear, else Claude Haiku reads the start of the transcript and picks (under a tenth of a cent, added to the summary's cost)."
           >
             <Select
               label="Usual kind of meeting"

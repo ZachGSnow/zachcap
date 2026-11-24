@@ -18,7 +18,10 @@ export type Meeting = {
   participants: string[];
   /** Lines by others that say your name. */
   mentions?: number;
+  /** The kind of meeting its summary was written as. */
   template?: string | null;
+  /** "auto" when ZachCap picked that kind (Automatic); otherwise it was chosen. */
+  template_source?: string | null;
   /** Set when the recording was deleted by the "keep recordings" setting. */
   audio_removed_at?: string | null;
   /** The service ticket it was about, if any. */
