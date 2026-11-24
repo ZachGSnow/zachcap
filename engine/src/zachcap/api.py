@@ -21,7 +21,7 @@ import time
 import traceback
 from collections.abc import Callable
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -147,6 +147,10 @@ class RecordBody(BaseModel):
 
 class PauseBody(BaseModel):
     paused: bool
+
+
+class RecordingRef(BaseModel):
+    meeting_id: int | None = None  # the recording the page showed the button for
 
 
 class AttachBody(BaseModel):
@@ -318,7 +322,9 @@ def create_app(token: str) -> FastAPI:
         language = store.setting("language", "en")
         return None if language == "auto" else language
 
-    lock = threading.Lock()
+    # The recording: started, stopped, and read together. Reentrant, so a discard can look at
+    # the recording and stop it in one go (finish_recording takes it again).
+    lock = threading.RLock()
 
     def leave_dictation_out(listening: bool) -> None:
         """While you dictate during a recording, its mic track records silence: a ticket
@@ -332,6 +338,8 @@ def create_app(token: str) -> FastAPI:
 
     startup = Store()
     try:
+        # A recording cut off by a crash or a quit: a call on the mic now is still that call.
+        cut_off = bool(startup.meetings_with_status("recording"))
         recover(startup, worker.submit)
         if startup.setting(dictation.SETTING) == "1":  # ready before the keys are first held
             dictator.transcriber.warm_up(language_of(startup))
@@ -352,10 +360,13 @@ def create_app(token: str) -> FastAPI:
 
     threading.Thread(target=remove_old_audio, name="zachcap-retention", daemon=True).start()
 
-    def finish_recording() -> int | None:
+    def finish_recording(meeting_id: int | None = None) -> int | None:
         """Stop the recorder, if one is running, and save its meeting. Returns the meeting id.
-        Used by Stop, and by the engine itself when the app goes away mid-recording."""
+        Used by Stop, and by the engine itself when the app goes away mid-recording. With a
+        ``meeting_id``, only that recording: None when another one runs (or none does)."""
         with lock:
+            if meeting_id is not None and recording.get("meeting_id") != meeting_id:
+                return None  # stopped already, maybe with another one started since
             recorder = recording.pop("recorder", None)
             meeting_id = recording.pop("meeting_id", None)
             watch = recording.pop("watch", None)
@@ -388,7 +399,13 @@ def create_app(token: str) -> FastAPI:
                 raise HTTPException(status_code=409, detail="Already recording")
             if recording.get("checking"):
                 raise HTTPException(status_code=409, detail="A sound check is running")
-            folder = paths.meetings_dir() / datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            # A folder of its own: one started the same second (a Stop and a Start at once)
+            # would otherwise be written into, its audio lost. The next free second, then.
+            stamp = datetime.now()
+            folder = paths.meetings_dir() / stamp.strftime("%Y-%m-%d_%H%M%S")
+            while folder.exists():
+                stamp += timedelta(seconds=1)
+                folder = paths.meetings_dir() / stamp.strftime("%Y-%m-%d_%H%M%S")
             recorder = Recorder(
                 folder,
                 mic_name=store.setting("mic_device") or None,
@@ -430,24 +447,40 @@ def create_app(token: str) -> FastAPI:
             )
         return meeting_id
 
-    def stop_recording() -> int | None:
-        """Stops and saves the recording, then transcribes it. None if not recording."""
-        meeting_id = finish_recording()
+    def stop_recording(meeting_id: int | None = None) -> int | None:
+        """Stops and saves the recording (that meeting's, when given), then transcribes it.
+        None if not recording (or another recording runs)."""
+        meeting_id = finish_recording(meeting_id)
         if meeting_id is not None:
             worker.submit(meeting_id)
         return meeting_id
 
-    def discard_recording() -> None:
-        """Stops the recording and deletes it, audio and all: Don't record, or a call app
-        that let go of the mic within a minute (not a call after all)."""
-        meeting_id = finish_recording()
-        if meeting_id is None:
-            return
+    def heard(recorder, track: str) -> bool:
+        """Whether anyone was heard on that track ("system": the other side of a call)."""
+        return getattr(getattr(recorder, "tracks", {}).get(track), "heard_at", None) is not None
+
+    def discard_recording(meeting_id: int, only_if_worthless: bool = False) -> str:
+        """Stops that recording and deletes it, audio and all: Don't record, or a call app
+        that let go of the mic within a minute (not a call after all). Returns "deleted", or
+        "gone" when it isn't the one recording any more (a Stop, or another one started).
+        ``only_if_worthless`` (deleted on its own): "kept" instead when it has a note, a
+        bookmark or a snapshot, or the other side of the call was heard, after all; it's
+        then saved and transcribed like any recording."""
+        with lock:  # looked at and stopped together: a Stop or a Start then isn't lost
+            recorder = recording.get("recorder")
+            if recorder is None or recording.get("meeting_id") != meeting_id:
+                return "gone"
+            call_heard = heard(recorder, "system")
+            finish_recording(meeting_id)
         store = Store()
         try:
+            # The notes as saved: one typed a moment ago may not be counted yet.
+            if only_if_worthless and (call_heard or store.notes(meeting_id)):
+                worker.submit(meeting_id)
+                return "kept"
             meeting = store.meeting(meeting_id)
             if meeting is None:
-                return
+                return "deleted"
             folder = Path(meeting["folder"]).resolve()
             store.delete_meeting(meeting_id)
             store.scrub_deleted_text()
@@ -455,6 +488,7 @@ def create_app(token: str) -> FastAPI:
                 shutil.rmtree(folder, ignore_errors=True)
         finally:
             store.close()
+        return "deleted"
 
     def recording_now() -> dict | None:
         """What the call watch needs to know about the recording running now, if any."""
@@ -462,6 +496,7 @@ def create_app(token: str) -> FastAPI:
             recorder = recording.get("recorder")
             watch = recording.get("watch")
             meeting_id = recording.get("meeting_id")
+            notes = recording.get("notes", 0)
         if recorder is None:
             return None
         status = watch.status() if watch is not None else {}
@@ -470,35 +505,51 @@ def create_app(token: str) -> FastAPI:
             "paused": recorder.paused,
             "call": status.get("call") or {},
             "quiet_for": status.get("quiet_for", 0.0),
+            # The call's side only: talk in the room doesn't keep a finished call going.
+            "call_quiet_for": watch.quiet_for("system") if watch is not None else None,
             "call_seen": list(watch.call_seen) if watch is not None else [],
             "heard": any(
                 getattr(track, "heard_at", None) is not None
                 for track in getattr(recorder, "tracks", {}).values()
             ),
+            "call_heard": heard(recorder, "system"),
+            "notes": notes,  # notes, bookmarks and snapshots: never deleted on its own then
         }
 
     # Settings the call watch reads every couple of seconds: from the database at most every
-    # ten seconds, and at once after Settings saves.
+    # ten seconds, and at once after Settings saves. Read and cleared under a lock: a save at
+    # that moment can neither hand the watch nothing nor put back what it replaced.
     watch_settings: dict = {"at": float("-inf"), "value": None}
+    watch_settings_lock = threading.Lock()
 
     def call_settings() -> dict:
-        if time.monotonic() - watch_settings["at"] > 10 or watch_settings["value"] is None:
-            store = Store()
-            try:
-                watch_settings["value"] = {
-                    "auto": store.setting(autorecord.SETTING, "1") == "1",
-                    "apps": autorecord.chosen(store.setting(autorecord.APPS_SETTING)),
-                    "stop": store.setting("stop_when_call_ends", "1") == "1",
-                }
-            finally:
-                store.close()
-            watch_settings["at"] = time.monotonic()
-        return watch_settings["value"]
+        with watch_settings_lock:
+            value = watch_settings["value"]
+            if value is None or time.monotonic() - watch_settings["at"] > 10:
+                store = Store()
+                try:
+                    value = {
+                        "auto": store.setting(autorecord.SETTING, "1") == "1",
+                        "apps": autorecord.chosen(store.setting(autorecord.APPS_SETTING)),
+                        "stop": store.setting("stop_when_call_ends", "1") == "1",
+                    }
+                finally:
+                    store.close()
+                watch_settings.update(value=value, at=time.monotonic())
+            return value
+
+    def call_settings_changed() -> None:
+        with watch_settings_lock:
+            watch_settings["value"] = None  # read again at the next look
 
     def start_for_call(app_name: str) -> int:
         store = Store()
         try:
             return begin_recording(store, f"{app_name} call {datetime.now():%b %d %H:%M}")
+        except HTTPException as exc:
+            if exc.status_code == 409:  # a sound check, or a recording starting: next look
+                raise autorecord.Busy(exc.detail) from exc
+            raise RuntimeError(exc.detail) from exc  # said as is, without "500:" in front
         finally:
             store.close()
 
@@ -508,6 +559,7 @@ def create_app(token: str) -> FastAPI:
         start=start_for_call,
         stop=stop_recording,
         discard=discard_recording,
+        continuing=cut_off,
     )
 
     app.state.finish_recording = finish_recording
@@ -1253,17 +1305,23 @@ def create_app(token: str) -> FastAPI:
     # recording ----------------------------------------------------------------
 
     @app.get("/api/record", dependencies=auth)
-    def record_status():
-        # Recordings started and stopped for calls: the one this is (if it started it), the
-        # countdown to stop, and the latest thing done on its own (for a notification).
-        auto = call_watch.status()
+    def record_status(boot: str | None = None, after: int | None = None):
+        # What was done on its own for calls (started, stopped, deleted), each said once by
+        # the page: the events after its cursor (``after``, an id from the engine's run
+        # ``boot``), or all those kept when the cursor is from an engine that has stopped.
+        events = {"boot": call_watch.boot, "events": call_watch.events_after(boot, after)}
+        meeting_id = recording.get("meeting_id")  # read first: Stop takes the recorder first
         recorder = recording.get("recorder")
-        if recorder is None:
-            return {"recording": False, "event": auto["event"]}
+        if recorder is None or meeting_id is None:
+            return {"recording": False, **events}
         watch = recording.get("watch")
         return {
-            **auto,
+            **events,
+            # The recording it started (if it's this one) and this one's countdown to stop:
+            # never another's, read a moment before this one started.
+            **call_watch.status(meeting_id),
             "recording": True,
+            "meeting_id": meeting_id,
             "title": recording.get("title"),
             "elapsed": round(recorder.elapsed, 1),
             "levels": recorder.levels(),
@@ -1310,17 +1368,17 @@ def create_app(token: str) -> FastAPI:
         return {"meeting_id": meeting_id}
 
     @app.post("/api/record/keep", dependencies=auth)
-    def record_keep():
+    def record_keep(body: RecordingRef | None = None):
         """Keep recording: calls off the countdown to stop (the call ended, or a long
         quiet) until the call app is back or someone speaks."""
-        return {"kept": call_watch.keep()}
+        return {"kept": call_watch.keep(body.meeting_id if body else None)}
 
     @app.post("/api/record/decline", dependencies=auth)
-    def record_decline():
+    def record_decline(body: RecordingRef | None = None):
         """Don't record: deletes the recording ZachCap started on its own for a call, and
-        doesn't record that app again until it lets go of the mic."""
+        doesn't record the calls on the mic again until their apps let go of it."""
         try:
-            return call_watch.decline()
+            return call_watch.decline(body.meeting_id if body else None)
         except LookupError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -1430,7 +1488,10 @@ def create_app(token: str) -> FastAPI:
         except OSError:
             apps = []
         chosen = call_settings()
-        on_their_own = [a for a in apps if chosen["auto"] and a in chosen["apps"]]
+        failed = call_watch.failed()  # couldn't start one for this call: offered instead
+        on_their_own = [
+            a for a in apps if chosen["auto"] and a in chosen["apps"] and a not in failed
+        ]
         return {"apps": apps, "auto": on_their_own}
 
     @app.get("/api/mcp", dependencies=auth)
@@ -1571,6 +1632,13 @@ def create_app(token: str) -> FastAPI:
     def put_settings(body: SettingsBody, store: Store = Depends(db)):
         from .summarize import MODELS
 
+        if body.auto_record_apps is not None:  # before anything: an app it refuses changes nothing
+            unknown = set(body.auto_record_apps) - set(autorecord.choosable())
+            if unknown:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Not a call app ZachCap can record on its own: {sorted(unknown)[0]}",
+                )
         if body.shortcuts:  # first: keys that can't be used change nothing
             try:
                 shortcuts.change(store, body.shortcuts)
@@ -1612,15 +1680,9 @@ def create_app(token: str) -> FastAPI:
             store.set_setting("stop_when_call_ends", "1" if body.stop_when_call_ends else "0")
         if body.auto_record is not None:
             store.set_setting(autorecord.SETTING, "1" if body.auto_record else "0")
-        if body.auto_record_apps is not None:
-            unknown = set(body.auto_record_apps) - set(autorecord.choosable())
-            if unknown:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Not a call app ZachCap can record on its own: {sorted(unknown)[0]}",
-                )
+        if body.auto_record_apps is not None:  # checked above
             store.set_setting(autorecord.APPS_SETTING, ", ".join(sorted(body.auto_record_apps)))
-        watch_settings["value"] = None  # the call watch reads the new ones at its next look
+        call_settings_changed()  # the call watch reads the new ones at its next look
         if body.dictation_snippets is not None:
             try:
                 dictation.snippets(body.dictation_snippets)

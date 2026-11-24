@@ -42,6 +42,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { SoundCheck } from "@/components/SoundCheck";
 import { usePoll } from "@/hooks/usePoll";
 import { useReturnFocus } from "@/hooks/useReturnFocus";
+import { choiceList } from "@/lib/choices";
 import {
   api,
   isTauri,
@@ -676,6 +677,17 @@ export function SettingsView() {
       toast.error("Couldn't save", { description: reason(error) });
     }
   };
+  // The call apps that record on their own: a second click before the first is saved builds
+  // on it, and the saves go out in order, so neither is lost.
+  const saveNow = useRef(save);
+  saveNow.current = save;
+  const [, showApps] = useState(0);
+  const [callApps] = useState(() =>
+    choiceList(
+      (apps) => saveNow.current({ auto_record_apps: apps }),
+      () => showApps((shown) => shown + 1),
+    ),
+  );
 
   const saveName = async () => {
     if (!settings || !name.trim() || name.trim() === settings.me.name) return;
@@ -793,7 +805,7 @@ export function SettingsView() {
           </Row>
           <Row
             label="Record calls on their own"
-            help="When a call app below takes your microphone, ZachCap starts recording at once and stops when the call ends. Under a minute (a mic test) isn't kept, and Don't record deletes it. Calls in a web browser are offered instead: any website using the mic would start one."
+            help="When a call app below takes your microphone, ZachCap starts recording at once and stops when the call ends, whatever Stop when the call ends says. Under a minute with nobody on the other end (a mic test) isn't kept, unless you added a note; Don't record deletes it. Calls in a web browser are offered instead: any website using the mic would start one."
           >
             <Switch
               className="ml-auto"
@@ -805,8 +817,8 @@ export function SettingsView() {
           {(settings?.auto_record ?? true) && (
             <div className="flex flex-wrap gap-1.5 px-4 pb-3.5" role="group" aria-label="Call apps recorded on their own">
               {(settings?.auto_record_choices ?? []).map((app) => {
-                const chosen = settings?.auto_record_apps.includes(app) ?? false;
-                const apps = settings?.auto_record_apps ?? [];
+                const saved = settings?.auto_record_apps ?? [];
+                const chosen = callApps.shown(saved).includes(app);
                 return (
                   <Button
                     key={app}
@@ -814,7 +826,10 @@ export function SettingsView() {
                     variant={chosen ? "secondary" : "outline"}
                     className={chosen ? "" : "text-muted-foreground"}
                     aria-pressed={chosen}
-                    onClick={() => void save({ auto_record_apps: chosen ? apps.filter((a) => a !== app) : [...apps, app] })}
+                    onClick={() => {
+                      callApps.toggle(saved, app);
+                      showApps((shown) => shown + 1);
+                    }}
                   >
                     {app}
                   </Button>
@@ -824,7 +839,7 @@ export function SettingsView() {
           )}
           <Row
             label="Stop when the call ends"
-            help="When Teams or another call app lets go of your microphone, ZachCap stops a few seconds later; after ten quiet minutes in a room, a minute later. Keep recording calls it off."
+            help="For recordings you start: once Teams or another call app lets go of your microphone and nobody has spoken for ten seconds, ZachCap stops a few seconds later; after ten quiet minutes in a room, a minute later. Keep recording calls it off."
           >
             <Switch
               className="ml-auto"

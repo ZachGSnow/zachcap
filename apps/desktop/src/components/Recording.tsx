@@ -16,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { usePoll } from "@/hooks/usePoll";
+import { newEvents, recordPath, type EventCursor } from "@/lib/callEvents";
 import { api, isTauri, type CallEvent, type RecordState } from "@/lib/engine";
 import { announce, copyText, notify, windowInFront } from "@/lib/feedback";
 import { clock, levelPercent } from "@/lib/format";
@@ -68,9 +69,11 @@ const Context = createContext<RecordingContext | null>(null);
 
 export function RecordingProvider({ children, onSaved }: { children: ReactNode; onSaved: (meetingId: number) => void }) {
   const [fast, setFast] = useState(false);
+  // How far the page has said what the engine did on its own (asked for from there on).
+  const cursor = useRef<EventCursor | null>(null);
   const { data: state, refresh } = usePoll(
     async () => {
-      const next = await api<RecordState>("/api/record");
+      const next = await api<RecordState>(recordPath(cursor.current));
       setFast(next.recording);
       return next;
     },
@@ -218,42 +221,48 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
 
   // The engine stops a recording on its own when the call ends (the call app let go of the
   // mic) or after ten quiet minutes in a room, after a short countdown that Keep recording
-  // calls off. A note being typed is saved as the countdown starts.
+  // calls off. As it starts, a note being typed is saved, and the countdown is said: as a
+  // Windows notification when the window is behind the call, so there's time to keep it.
   const autoStop = state?.recording ? (state.stopping ?? null) : null;
-  const counting = autoStop !== null;
+  const countdown = autoStop?.reason ?? null;
+  const autoStopNow = useRef(autoStop);
+  autoStopNow.current = autoStop;
   useEffect(() => {
-    if (counting) void saveDraft();
-  }, [counting, saveDraft]);
+    if (!countdown) return;
+    void saveDraft();
+    const seconds = Math.max(1, Math.ceil(autoStopNow.current?.in ?? 0));
+    void announce(
+      countdown === "call" ? "The call ended" : "Nothing heard for ten minutes",
+      `The recording stops in ${seconds} seconds unless you press Keep recording in ZachCap.`,
+    );
+  }, [countdown, saveDraft]);
+  // The buttons act on the recording they were shown for, never one started since.
+  const meetingId = state?.recording ? state.meeting_id : null;
   const keepRecording = useCallback(() => {
-    void api("/api/record/keep", { method: "POST" })
+    void api("/api/record/keep", { method: "POST", json: { meeting_id: meetingId } })
       .then(() => refresh())
       .catch((error) => void announce("Couldn't keep recording", String(error), "error"));
-  }, [refresh]);
+  }, [refresh, meetingId]);
   const decline = useCallback(async () => {
     try {
-      await api("/api/record/decline", { method: "POST" });
+      await api("/api/record/decline", { method: "POST", json: { meeting_id: meetingId } });
       setDraft("");
       await refresh();
     } catch (error) {
       void announce("Couldn't delete the recording", String(error), "error");
     }
-  }, [refresh, setDraft]);
+  }, [refresh, setDraft, meetingId]);
 
-  // What the engine did on its own: said once each, as a Windows notification when the window
-  // is behind the call. What happened before this page loaded is old news.
-  const seen = useRef<number | null>(null);
-  const event = state?.event ?? null;
-  const loaded = state !== undefined;
+  // What the engine did on its own: said once each, oldest first, as a Windows notification
+  // when the window is behind the call. What happened before this page loaded is old news;
+  // all that an engine started again did is news, though it numbers its events from 1 again.
+  const boot = state?.boot;
+  const events = state?.events;
   useEffect(() => {
-    if (!loaded) return;
-    if (seen.current === null) {
-      seen.current = event?.id ?? 0;
-      return;
-    }
-    if (!event || event.id <= seen.current) return;
-    seen.current = event.id;
-    said(event);
-  }, [loaded, event, opened]);
+    const { cursor: next, fresh } = newEvents(cursor.current, boot, events);
+    cursor.current = next;
+    for (const event of fresh) said(event);
+  }, [boot, events, opened]);
   function said(event: CallEvent) {
     const app = event.app ?? "The call app";
     if (event.kind === "started") {
@@ -551,7 +560,7 @@ export function RecordingBar() {
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          {state.auto && state.elapsed < DECLINE_WITHIN && (
+          {state.auto?.meeting_id === state.meeting_id && state.elapsed < DECLINE_WITHIN && (
             <Button
               size="sm"
               variant="outline"

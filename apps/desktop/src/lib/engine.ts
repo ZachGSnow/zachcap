@@ -193,10 +193,16 @@ export type CallEvent = {
   detail?: string;
 };
 
+/** What was done on its own since the page's cursor (see callEvents.ts): ``boot`` names this
+ * run of the engine, whose event ids count from 1. */
+type CallEvents = { boot?: string; events?: CallEvent[] };
+
 export type RecordState =
-  | { recording: false; event?: CallEvent | null }
-  | {
+  | ({ recording: false } & CallEvents)
+  | ({
       recording: true;
+      /** The meeting it's recording into. */
+      meeting_id: number;
       title: string | null;
       elapsed: number;
       levels: { mic: number; system: number };
@@ -210,12 +216,12 @@ export type RecordState =
       call?: { apps: string[]; ended_for: number | null };
       /** Seconds since anyone was heard on either track. */
       quiet_for?: number;
-      /** Started on its own when a call app took the mic; confirmed once it held it a minute. */
+      /** Started on its own when a call app took the mic; confirmed once it held it a minute.
+       * Only ever about this recording. */
       auto?: { app: string; meeting_id: number; confirmed: boolean } | null;
       /** Counting down to stop on its own: the call ended, or nobody was heard for ten minutes. */
       stopping?: { reason: "call" | "quiet"; in: number } | null;
-      event?: CallEvent | null;
-    };
+    } & CallEvents);
 
 /** A snapshot's text is what Windows read in the picture of the call. */
 export type Note = {
