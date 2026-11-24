@@ -86,6 +86,8 @@ type SettingsChange = Partial<{
   keep_audio_days: number;
   mask_before_claude: boolean;
   stop_when_call_ends: boolean;
+  auto_record: boolean;
+  auto_record_apps: string[];
   export_work_log: boolean;
   dictation: boolean;
   dictation_snippets: string;
@@ -790,8 +792,39 @@ export function SettingsView() {
             </Button>
           </Row>
           <Row
+            label="Record calls on their own"
+            help="When a call app below takes your microphone, ZachCap starts recording at once and stops when the call ends. Under a minute (a mic test) isn't kept, and Don't record deletes it. Calls in a web browser are offered instead: any website using the mic would start one."
+          >
+            <Switch
+              className="ml-auto"
+              aria-label="Record calls on their own"
+              checked={settings?.auto_record ?? true}
+              onCheckedChange={(on) => void save({ auto_record: on })}
+            />
+          </Row>
+          {(settings?.auto_record ?? true) && (
+            <div className="flex flex-wrap gap-1.5 px-4 pb-3.5" role="group" aria-label="Call apps recorded on their own">
+              {(settings?.auto_record_choices ?? []).map((app) => {
+                const chosen = settings?.auto_record_apps.includes(app) ?? false;
+                const apps = settings?.auto_record_apps ?? [];
+                return (
+                  <Button
+                    key={app}
+                    size="sm"
+                    variant={chosen ? "secondary" : "outline"}
+                    className={chosen ? "" : "text-muted-foreground"}
+                    aria-pressed={chosen}
+                    onClick={() => void save({ auto_record_apps: chosen ? apps.filter((a) => a !== app) : [...apps, app] })}
+                  >
+                    {app}
+                  </Button>
+                );
+              })}
+            </div>
+          )}
+          <Row
             label="Stop when the call ends"
-            help="When Teams or another call app lets go of your microphone and it goes quiet, or after ten quiet minutes in a room, ZachCap counts down and stops. Keep recording cancels it."
+            help="When Teams or another call app lets go of your microphone, ZachCap stops a few seconds later; after ten quiet minutes in a room, a minute later. Keep recording calls it off."
           >
             <Switch
               className="ml-auto"
