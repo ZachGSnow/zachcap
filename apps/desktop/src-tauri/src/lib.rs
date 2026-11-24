@@ -72,8 +72,11 @@ fn trim_log(log: &Path, limit: u64) {
     if !std::fs::metadata(log).is_ok_and(|meta| meta.len() > limit) {
         return;
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(log)
+    // Emptied through one handle, the note added through another that appends, so a line the
+    // engine wrote in between isn't written over.
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(log)
         && file.set_len(0).is_ok()
+        && let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(log)
     {
         let _ = writeln!(
             file,
@@ -652,8 +655,18 @@ fn set_up(engine: &Engine) -> Result<(), String> {
     let venv = launch.engine.join(".venv");
     let marker = venv.join("zachcap-build.txt");
     let build = std::fs::read_to_string(launch.engine.join("BUILD")).unwrap_or_default();
-    if !build.is_empty() && std::fs::read_to_string(&marker).is_ok_and(|done| done == build) {
+    // A venv without its pyvenv.cfg was half removed (an uninstall while it ran): its python.exe
+    // would quietly run uv's shared Python instead, so it's set up again from scratch.
+    let whole = venv.join("pyvenv.cfg").is_file();
+    if whole
+        && !build.is_empty()
+        && std::fs::read_to_string(&marker).is_ok_and(|done| done == build)
+    {
         return Ok(());
+    }
+    if venv.exists() && !whole {
+        std::fs::remove_dir_all(&venv)
+            .map_err(|error| format!("Couldn't clear the old speech engine ({error})."))?;
     }
     *engine.setup.lock().unwrap() = Some("Getting ready...".to_string());
     let mut command = Command::new(&launch.uv);
@@ -670,6 +683,10 @@ fn set_up(engine: &Engine) -> Result<(), String> {
             "--reinstall-package",
             "zachcap",
         ])
+        // Only the project's own settings: no uv.toml from the user's or the machine's config
+        // folders (another account can write C:\ProgramData), and a Python uv manages, not
+        // whatever Python 3.12 happens to be installed.
+        .args(["--no-config", "--managed-python"])
         .env("UV_PROJECT_ENVIRONMENT", &venv)
         .env_remove("VIRTUAL_ENV")
         .stdin(Stdio::null())
@@ -732,7 +749,10 @@ fn start_engine(launch: &Launch, token: &str, port_file: &Path) -> std::io::Resu
                 .join("Scripts")
                 .join("python.exe"),
         );
-        command.args(["-m", "zachcap.cli"]);
+        // Isolated (-I): no current folder, PYTHONPATH or user site-packages ahead of the
+        // venv's own code; -u because -I also ignores PYTHONUNBUFFERED.
+        command.args(["-I", "-u", "-m", "zachcap.cli"]);
+        command.current_dir(&launch.engine);
         command
     } else {
         let mut command = Command::new(&launch.uv);
