@@ -14,14 +14,16 @@
 !macroend
 
 ; The engine's venv is set up on first launch (a few GB) next to the program, so uninstalling
-; removes it too. That happens after the uninstaller has closed ZachCap, and a moment later, so
-; the engine (which exits with the app) isn't running from it; a venv left half removed is set
-; up again on the next start (set_up in lib.rs). An update keeps it. Your meetings, voices and
-; settings in %LOCALAPPDATA%\ZachCap are never touched.
+; removes it too, with what's left of one that was replaced. That happens after the uninstaller
+; has closed ZachCap, and a moment later, so the engine (which exits with the app) isn't running
+; from it; a venv left half removed is set up again on the next start (set_up in lib.rs). An
+; update keeps it. Your meetings, voices and settings in %LOCALAPPDATA%\ZachCap are never
+; touched.
 !macro NSIS_HOOK_POSTUNINSTALL
   ${If} $UpdateMode <> 1
     Sleep 3000
     RMDir /r "$INSTDIR\engine\.venv"
+    RMDir /r "$INSTDIR\engine\.venv-old"
     ; The uninstaller tried these while the venv was still in them; only removed when empty.
     RMDir "$INSTDIR\engine"
     RMDir "$INSTDIR"

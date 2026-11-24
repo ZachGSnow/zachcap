@@ -6,8 +6,9 @@ The Rust side starts the Python engine on a free 127.0.0.1 port with a random pe
 and hands both to the UI through the `engine_info` command. In development that's the repo's
 engine (`../../engine`) with `uv run zachcap serve`; an installed copy runs the engine that came
 with the installer, from a venv it sets up on first launch with the uv bundled next to it (the
-startup screen shows the setup; `engine_setup` reports it). It also puts ZachCap in the tray:
-closing the window keeps it running.
+startup screen shows the setup; `engine_setup` reports it). An update changes what's different in
+that venv; one that may not be whole (a setup cut short, an engine that couldn't start from it) is
+built again from scratch. It also puts ZachCap in the tray: closing the window keeps it running.
 
 ## Installer
 
