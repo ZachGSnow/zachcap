@@ -172,7 +172,8 @@ Researched and planned in [docs/PLAN.md](docs/PLAN.md#13-next-from-competitor-re
 - Capture health warnings, keeping the PC awake while recording, and a smart stop when the call ends
 - Your own summary templates and one-click documents; redact a moment (a password read aloud); fix a line's words
 - A daily and weekly digest with draft time entries; markers where your name was said; a watch folder for recordings
-- Later: a "ticket note" dictation mode that tidies what you said with Claude, live transcript, signed installer
+- Shipped since: a live transcript during calls, the kind of meeting picked automatically, an installer (v0.2.0, v0.3.0)
+- Next: related past calls; later, a "ticket note" dictation mode that tidies what you said with Claude, summaries on this PC, a signed installer
 
 ## License
 
