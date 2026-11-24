@@ -16,7 +16,7 @@ import threading
 from datetime import date, datetime
 from pathlib import Path
 
-from . import clients
+from . import clients, paths
 from .store import Store
 
 FORMATS = {"md": "Markdown", "txt": "Text", "srt": "Subtitles (SRT)", "vtt": "Subtitles (WebVTT)"}
@@ -161,8 +161,9 @@ def _own_copies(folder: Path, meeting_id: int) -> list[Path]:
 
 
 def _export_folder(store: Store) -> Path | None:
-    folder = store.setting("export_folder")
-    return Path(folder) if folder and Path(folder).is_dir() else None
+    """The export folder, if one is set and there now (never one on another computer)."""
+    folder = paths.saved_folder(store.setting("export_folder"))
+    return folder if folder is not None and folder.is_dir() else None
 
 
 def _write_whole(target: Path, content: str) -> bool:

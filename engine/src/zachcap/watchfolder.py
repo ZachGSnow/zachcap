@@ -1,20 +1,21 @@
 """A watch folder: recordings saved there import themselves.
 
-For a softphone's or phone system's exports, or Teams recordings downloaded from the web.
-Every 30 seconds ZachCap looks at the folder (not its subfolders) for audio and video files
-that have stopped changing: the same size and modified time on two looks, and untouched for
-30 seconds, so a file still being written or copied is left alone. Each one is imported once
-and queued for processing.
+For a softphone's or phone system's exports, or Teams recordings downloaded from the web,
+in a folder on this PC (Settings refuses one on the network). Every 30 seconds ZachCap
+looks at the folder (not its subfolders) for audio and video files that have stopped
+changing: the same size and modified time on two looks, and untouched for 30 seconds, so a
+file still being written or copied is left alone. Each one is imported once and queued for
+processing.
 
 What was seen is remembered by path, size and modified time: a file exported again with new
 content imports again, and a meeting deleted in ZachCap doesn't come back. A file that isn't
 a recording ZachCap can read is noted with the reason (shown in Settings, with a Retry) and
 not tried again until it changes. So is one whose reading never finished: each file is
 noted before it is read, so one that crashes or hangs FFmpeg isn't read again on every look
-or every start. One that can't be opened right now (open in another program, a network
-share or cloud file offline) is simply tried again on the next look. Turning the folder
-off, or choosing another, stops a run between files. The user's files are only ever read:
-never moved, renamed or deleted.
+or every start. One that can't be opened right now (open in another program, or a cloud
+file offline) is simply tried again on the next look. Turning the folder off, or choosing
+another, stops a run between files. The user's files are only ever read: never moved,
+renamed or deleted.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import traceback
 from collections.abc import Callable
 from pathlib import Path
 
+from . import paths
 from .imports import MEDIA, import_recording
 from .store import Store
 
@@ -40,7 +42,7 @@ UNFINISHED = "ZachCap stopped while reading it"
 def media_files(folder: Path) -> dict[str, tuple[int, int]]:
     """Audio and video files directly in the folder: path -> (size, modified time in ns).
     One directory listing (os.scandir has each file's size and time from it on Windows), so
-    a big folder or a network share costs one round trip, not two per file."""
+    a big folder costs one listing, not two more calls per file."""
     found = {}
     with os.scandir(folder) as entries:
         for entry in entries:
@@ -105,11 +107,14 @@ class FolderWatch:
     def check(self, store: Store) -> list[int]:
         """Imports the files that have stopped changing; returns the new meetings' ids."""
         folder = store.setting(SETTING)
-        if not folder or not Path(folder).is_dir():  # off, or a drive that isn't there now
+        # Off, on another computer (saved before Settings checked them), or on a drive that
+        # isn't there now.
+        local = paths.saved_folder(folder)
+        if local is None or not local.is_dir():
             self.reset()
             return []
         now = self._clock()
-        current = media_files(Path(folder))
+        current = media_files(local)
         imported = []
         for path, (size, mtime_ns) in sorted(current.items()):
             if store.setting(SETTING) != folder:
@@ -142,7 +147,7 @@ class FolderWatch:
             self.reset()
             return imported
         self._last = current
-        self.failures = self._failures(store, Path(folder), current)
+        self.failures = self._failures(store, local, current)
         return imported
 
     def _failures(self, store: Store, folder: Path, current: dict) -> list[dict]:

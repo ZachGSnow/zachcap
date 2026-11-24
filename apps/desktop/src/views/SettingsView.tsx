@@ -116,7 +116,7 @@ function WatchFolderRow({
 }) {
   const [asking, setAsking] = useState<{ path: string; count: number } | null>(null);
   // Files that aren't recordings ZachCap can read wait for a change or Retry; files that
-  // couldn't be opened (in use, a share offline) are tried on every look anyway.
+  // couldn't be opened (in use, a cloud file offline) are tried on every look anyway.
   const broken = failed.filter((file) => !file.retrying);
   const busy = failed.filter((file) => file.retrying);
 

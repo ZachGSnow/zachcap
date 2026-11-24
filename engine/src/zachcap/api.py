@@ -608,6 +608,21 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=404, detail="No such meeting")
         return meeting
 
+    def on_this_pc(path: str, what: str = "file") -> Path:
+        """A path the app sent, checked before anything looks at it (paths.on_this_pc): a 400
+        with the reason when it's on another computer, a device, or not a plain path."""
+        try:
+            return paths.on_this_pc(path, what)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def existing_folder(path: str) -> Path:
+        """A folder the app sent: on this PC, and there now."""
+        folder = on_this_pc(path, "folder")
+        if not folder.is_dir():
+            raise HTTPException(status_code=400, detail="That folder doesn't exist")
+        return folder
+
     # One change at a time per meeting: a summary written from the transcript while a
     # redaction removes words from it would bring them back, and so would reprocessing.
     jobs: dict[int, str] = {}
@@ -943,7 +958,7 @@ def create_app(token: str) -> FastAPI:
         """Write the meeting to the path the user picked in the save dialog."""
         meeting_or_404(store, meeting_id)
         check_format(body.format)
-        target = Path(body.path)
+        target = on_this_pc(body.path)
         if target.suffix.lower() != f".{body.format}" or not target.parent.is_dir():
             raise HTTPException(status_code=400, detail="Pick a file name in an existing folder")
         try:
@@ -991,8 +1006,9 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(
                 status_code=400, detail=f"A meeting has at most {attachments.MAX_FILES} files"
             )
+        source = on_this_pc(body.path)
         try:
-            name, text = attachments.read(Path(body.path))
+            name, text = attachments.read(source)
         except attachments.NotText as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         note_id = store.add_note(meeting_id, 0.0, attachments.KIND, attachments.as_note(name, text))
@@ -1171,7 +1187,7 @@ def create_app(token: str) -> FastAPI:
 
     @app.post("/api/import", dependencies=auth)
     def import_recording(body: ImportBody, store: Store = Depends(db)):
-        source = Path(body.path)
+        source = on_this_pc(body.path)
         if not source.is_file():
             raise HTTPException(status_code=400, detail="That file doesn't exist")
         try:
@@ -1193,10 +1209,7 @@ def create_app(token: str) -> FastAPI:
     @app.get("/api/watch-folder/files", dependencies=auth)
     def watch_folder_files(path: str):
         """How many recordings a folder holds now (to ask whether to import them too)."""
-        folder = Path(path)
-        if not folder.is_dir():
-            raise HTTPException(status_code=400, detail="That folder doesn't exist")
-        return {"count": len(watchfolder.media_files(folder))}
+        return {"count": len(watchfolder.media_files(existing_folder(path)))}
 
     # action items ---------------------------------------------------------------
 
@@ -1595,8 +1608,10 @@ def create_app(token: str) -> FastAPI:
                 ],
                 # The usual kind, as a summary would use it (a deleted one reads as general).
                 "summary_template": meeting_template(store, {"template": None}),
-                "export_folder": store.setting("export_folder", ""),
-                "watch_folder": store.setting(watchfolder.SETTING, ""),
+                # A folder on another computer, saved before Settings checked them, is never
+                # used, so it shows as off.
+                "export_folder": str(paths.saved_folder(store.setting("export_folder")) or ""),
+                "watch_folder": str(paths.saved_folder(store.setting(watchfolder.SETTING)) or ""),
                 # Files there that couldn't be imported, newest first, with the reason.
                 "watch_folder_failed": watch_failures(store),
                 "also_answer_to": store.setting(mentions.ALSO_ANSWER_TO, ""),
@@ -1702,17 +1717,16 @@ def create_app(token: str) -> FastAPI:
                 export.refresh_work_logs(store, date.today())
         if body.export_folder is not None:
             folder = body.export_folder.strip()
-            if folder and not Path(folder).is_dir():
-                raise HTTPException(status_code=400, detail="That folder doesn't exist")
+            if folder:
+                folder = str(existing_folder(folder))
             store.set_setting("export_folder", folder)
             if folder:  # bring the folder up to date with what's already here
                 for meeting in store.meetings():
                     export.auto_export(store, meeting["id"])
         if body.watch_folder is not None:
             folder = body.watch_folder.strip()
-            if folder and not Path(folder).is_dir():
-                raise HTTPException(status_code=400, detail="That folder doesn't exist")
             if folder:
+                folder = str(existing_folder(folder))
                 # Only new recordings by default; or give the ones there now a go as well.
                 if body.watch_existing:
                     watchfolder.retry_existing(store, Path(folder))

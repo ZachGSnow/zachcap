@@ -266,7 +266,7 @@ export type Settings = {
   /** Recordings saved here import themselves; "" when off. */
   watch_folder: string;
   /** Files there that couldn't be imported, newest first. `retrying`: it couldn't be read
-   * (in use, or the network share was away), and is tried again on its own. */
+   * (in use, or a cloud file was offline), and is tried again on its own. */
   watch_folder_failed: { name: string; error: string; retrying: boolean }[];
   /** Other names you answer to, comma-separated (for "said your name"). */
   also_answer_to: string;
