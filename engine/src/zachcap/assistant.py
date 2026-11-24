@@ -6,9 +6,9 @@ what came from the meetings comes in tagged blocks, as data rather than instruct
 from __future__ import annotations
 
 import re
+import time
 from datetime import date, datetime
 
-import anthropic
 from anthropic import beta_tool
 
 from . import apikeys, privacy
@@ -16,6 +16,7 @@ from .store import Store
 from .summarize import (
     MAX_TOKENS,
     _clock,
+    claude,
     notes_text,
     quoted,
     reply_text,
@@ -43,6 +44,10 @@ short list, with names and dates as they were said."""
 # Meeting ids have at most 9 digits: a longer one (transcript text can put anything in an
 # answer) would overflow SQLite and throw the paid answer away.
 CITATION = re.compile(r"\[M(\d{1,9})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?\]")
+NAMED = re.compile(r"\bM(\d{1,9})\b")  # a meeting, in what the tools say
+CHANGED = (
+    "A meeting Claude had read for this was made private, deleted or redacted meanwhile. Ask again."
+)
 TRANSCRIPT_LIMIT = 60_000  # characters of one transcript a tool returns (about 15k tokens)
 MEETINGS_LIMIT = 40
 ACTIONS_LIMIT = 80
@@ -99,7 +104,7 @@ def search(store: Store, query: str, limit: int = 25, meeting_id: int | None = N
     # Other people's names ("Will"); not the user's, which is "You" until they set it.
     names = {
         word
-        for p in store.people()
+        for p in store.people_stats(private=False)
         if not p["is_me"]
         for word in re.findall(r"\w+", p["name"].lower())
     }
@@ -219,7 +224,7 @@ def meeting_detail(store: Store, meeting_id: int, start_at: str | None = None) -
     lines: list[str] = []
     size = 0
     rest = None
-    for r in store.transcript(meeting_id):
+    for r in store.transcript(meeting_id, private=False):
         if begin is not None and r["start"] < begin:
             continue
         line = f"[{_clock(r['start'])}] {r['speaker']}: {r['text']}"
@@ -323,8 +328,15 @@ def work_log(store: Store, period: str = "day", day: str | None = None) -> str:
     )
 
 
-def make_tools(store: Store) -> list:
-    """The library, read-only, as tools for Claude."""
+def make_tools(store: Store, seen: set[int] | None = None) -> list:
+    """The library, read-only, as tools for Claude. The meetings they tell of are added to
+    ``seen``."""
+
+    def out(said: str) -> str:
+        if seen is not None:
+            named = {int(number) for number in NAMED.findall(said)} - seen
+            seen.update(number for number in named if store.meeting(number) is not None)
+        return privacy.outgoing(store, said)
 
     @beta_tool
     def search_transcripts(query: str, limit: int = 25, meeting_id: int | None = None) -> str:
@@ -335,7 +347,7 @@ def make_tools(store: Store) -> list:
             limit: How many lines to return, at most 60.
             meeting_id: Only search this meeting (the number after M).
         """
-        return privacy.outgoing(store, search(store, query, limit, meeting_id))
+        return out(search(store, query, limit, meeting_id))
 
     @beta_tool
     def list_meetings(
@@ -355,8 +367,7 @@ def make_tools(store: Store) -> list:
             ticket: Only meetings about this service ticket number.
             client: Only meetings with this client (the company the people work for).
         """
-        listed = meetings_list(store, since, until, person, ticket, client)
-        return privacy.outgoing(store, listed)
+        return out(meetings_list(store, since, until, person, ticket, client))
 
     @beta_tool
     def get_meeting(meeting_id: int, start_at: str | None = None) -> str:
@@ -367,7 +378,7 @@ def make_tools(store: Store) -> list:
             start_at: For a long transcript, where to go on from (mm:ss or h:mm:ss), as the
                 end of the previous part says.
         """
-        return privacy.outgoing(store, meeting_detail(store, meeting_id, start_at))
+        return out(meeting_detail(store, meeting_id, start_at))
 
     @beta_tool
     def related_meetings(meeting_id: int) -> str:
@@ -378,7 +389,7 @@ def make_tools(store: Store) -> list:
         Args:
             meeting_id: The meeting's id, the number after M.
         """
-        return privacy.outgoing(store, related_list(store, meeting_id))
+        return out(related_list(store, meeting_id))
 
     @beta_tool
     def list_action_items(status: str = "open", owner: str | None = None) -> str:
@@ -388,7 +399,7 @@ def make_tools(store: Store) -> list:
             status: "open", "done" or "all".
             owner: Only items owned by this person.
         """
-        return privacy.outgoing(store, action_items_list(store, status, owner))
+        return out(action_items_list(store, status, owner))
 
     @beta_tool
     def get_work_log(day: str | None = None, period: str = "day") -> str:
@@ -399,7 +410,7 @@ def make_tools(store: Store) -> list:
             day: A date in the period, YYYY-MM-DD; today if not given.
             period: "day", or "week" for Monday to Sunday.
         """
-        return privacy.outgoing(store, work_log(store, period, day))
+        return out(work_log(store, period, day))
 
     return [
         search_transcripts,
@@ -412,18 +423,32 @@ def make_tools(store: Store) -> list:
 
 
 def ask_everything(store: Store, question: str, history: list[dict] | None = None) -> dict:
-    """Answer a question from the whole library. history: earlier {question, answer} turns."""
+    """Answer a question from the whole library. history: earlier {question, answer, used,
+    since} turns, the last two as they were returned ("used", the meetings it was answered
+    from, and "since", when that began). One answered from a meeting that was made private,
+    deleted or redacted since is left out, and a run that has read one ends."""
     key = apikeys.get("anthropic")
     if not key:
         raise RuntimeError("Add your Anthropic API key in Settings to ask questions.")
     if not store.meetings():
         raise RuntimeError("There are no meetings to ask about yet.")
     model = summary_model(store)
+    since = time.time()
+    seen: set[int] = set()
+
+    def allowed() -> None:
+        if not privacy.may_send(store, seen, since):
+            raise RuntimeError(CHANGED)
+
     messages: list[dict] = []
     for turn in (history or [])[-6:]:
+        used = turn.get("used") or []
+        if not privacy.may_send(store, used, turn.get("since") or 0.0):
+            continue
+        seen.update(used)
         messages += [
             {"role": "user", "content": privacy.outgoing(store, turn["question"])},
-            {"role": "assistant", "content": turn["answer"]},
+            {"role": "assistant", "content": privacy.outgoing(store, turn["answer"])},
         ]
     messages.append({"role": "user", "content": privacy.outgoing(store, question)})
 
@@ -436,8 +461,8 @@ def ask_everything(store: Store, question: str, history: list[dict] | None = Non
         "system": SYSTEM.format(me=store.me()["name"], today=f"{date.today():%A %B %d, %Y}")
         + spellings(store),
     }
-    tools = make_tools(store)
-    client = anthropic.Anthropic(api_key=key)
+    tools = make_tools(store, seen)
+    client = claude(key, allowed)
     # The whole conversation goes with every turn (no server-side thread), and is kept here
     # too, so a last turn without tools can follow on from it.
     runner = client.beta.messages.tool_runner(
@@ -480,6 +505,8 @@ def ask_everything(store: Store, question: str, history: list[dict] | None = Non
     return {
         "answer": answer,
         "meetings": cited,
+        "used": sorted(seen),
+        "since": since,
         "model": last.model or model,
         "cost_usd": round(cost, 5),
         "asked_at": datetime.now().astimezone().isoformat(timespec="seconds"),

@@ -208,18 +208,6 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     [refresh],
   );
 
-  const keepFromClaude = useCallback(
-    async (on: boolean) => {
-      try {
-        await api("/api/record/private", { method: "POST", json: { private: on } });
-        await refresh();
-      } catch (error) {
-        void announce("Couldn't change who reads this meeting", String(error), "error");
-      }
-    },
-    [refresh],
-  );
-
   // A picture of the call window and the text in it, as a note at this moment.
   const snapshot = useCallback(async () => {
     try {
@@ -279,6 +267,17 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
       .then(() => refresh())
       .catch((error) => void announce("Couldn't keep recording", String(error), "error"));
   }, [refresh, meetingId]);
+  const keepFromClaude = useCallback(
+    async (on: boolean) => {
+      try {
+        await api("/api/record/private", { method: "POST", json: { private: on, meeting_id: meetingId } });
+        await refresh();
+      } catch (error) {
+        void announce("Couldn't change who reads this meeting", String(error), "error");
+      }
+    },
+    [refresh, meetingId],
+  );
   const decline = useCallback(async () => {
     try {
       await api("/api/record/decline", { method: "POST", json: { meeting_id: meetingId } });

@@ -11,10 +11,21 @@ export type LibraryExchange = {
   meetings?: CitedMeetings;
   cost?: number;
   model?: string;
+  /** The meetings it was answered from, and when that began: sent back with the next question,
+   * so that an answer from a meeting made private since isn't. */
+  used?: number[];
+  since?: number;
   failed?: boolean;
 };
 
-type LibraryAnswer = { answer: string; meetings: CitedMeetings; cost_usd: number; model: string };
+type LibraryAnswer = {
+  answer: string;
+  meetings: CitedMeetings;
+  used: number[];
+  since: number;
+  cost_usd: number;
+  model: string;
+};
 
 export type LibraryAsk = {
   history: LibraryExchange[];
@@ -45,12 +56,14 @@ export function useLibraryAsk(): LibraryAsk {
     const earlier = latest.current
       .filter((e) => e.answer)
       .slice(-6)
-      .map((e) => ({ question: e.question, answer: e.answer! }));
+      .map((e) => ({ question: e.question, answer: e.answer!, used: e.used, since: e.since }));
     const update = (patch: Partial<LibraryExchange>) =>
       setHistory((h) => h.map((e) => (e.id === id ? { ...e, ...patch } : e)));
     setHistory((h) => [...h, { id, question }]);
     void api<LibraryAnswer>("/api/ask", { method: "POST", json: { question, history: earlier } })
-      .then((result) => update({ answer: result.answer, meetings: result.meetings, cost: result.cost_usd, model: result.model }))
+      .then(({ answer, meetings, used, since, cost_usd: cost, model }) =>
+        update({ answer, meetings, used, since, cost, model }),
+      )
       .catch((error) => {
         toast.error("Couldn't get an answer", { description: String(error) });
         update({ failed: true });

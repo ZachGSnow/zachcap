@@ -8,7 +8,15 @@ from fastapi.testclient import TestClient
 
 from zachcap import autorecord, capture, pipeline
 from zachcap.api import create_app
-from zachcap.autorecord import CALL_AFTER, LET_GO, QUIET_FOR, QUIET_STOP_IN, STOP_IN, CallWatch
+from zachcap.autorecord import (
+    CALL_AFTER,
+    LET_GO,
+    QUIET_FOR,
+    QUIET_STOP_IN,
+    SAME_CALL_WITHIN,
+    STOP_IN,
+    CallWatch,
+)
 from zachcap.store import Store
 from zachcap.watchdog import Watch
 
@@ -21,7 +29,7 @@ class Laptop:
     """The apps on the mic, the recording with its own watch (the real one), and what the call
     watch did: all pretend, on one clock, looked at every couple of seconds as the engine does."""
 
-    def __init__(self, continuing: bool = False, **settings) -> None:
+    def __init__(self, continuing: int | None = None, **settings) -> None:
         self.now = 1000.0
         self.apps: list[str] = []
         self.settings = {"auto": True, "apps": set(autorecord.DEFAULT_APPS), "stop": True}
@@ -29,6 +37,7 @@ class Laptop:
         self.recording: dict | None = None
         self.meetings = 0
         self.done: list[tuple] = []
+        self.after: list[int | None] = []  # what each recording came after
         self.talking = False  # someone in the room is speaking: the mic hears it
         self.call_talking = False  # the other side of the call (or music): the computer's audio
         self.watch = CallWatch(
@@ -42,9 +51,10 @@ class Laptop:
             continuing=continuing,
         )
 
-    def start(self, app: str) -> int:
+    def start(self, app: str, after: int | None = None) -> int:
         """A recording starts: by the call watch, or by hand (by_hand)."""
         self.meetings += 1
+        self.after.append(after)
         tracks = {
             "mic": SimpleNamespace(signal_at=self.now, heard_at=None),
             "system": SimpleNamespace(signal_at=self.now, heard_at=None),
@@ -335,7 +345,7 @@ def test_a_nobody_heard_call_with_a_note_is_kept():
 def test_a_recording_that_wont_start_isnt_retried_all_call_long():
     laptop = Laptop()
 
-    def broken(app):
+    def broken(app, after):
         raise RuntimeError("No microphone")
 
     laptop.watch._start = broken
@@ -354,11 +364,11 @@ def test_a_busy_start_is_tried_again_at_the_next_look():
     started = laptop.start
     busy = {"looks": 2}
 
-    def start(app: str) -> int:
+    def start(app: str, after: int | None) -> int:
         if busy["looks"]:
             busy["looks"] -= 1
             raise autorecord.Busy("A sound check is running")
-        return started(app)
+        return started(app, after)
 
     laptop.watch._start = start
     laptop.apps = ["Microsoft Teams"]
@@ -460,13 +470,13 @@ def test_only_the_same_app_back_soon_is_the_same_call():
 
 
 def test_after_a_restart_the_call_on_the_mic_is_the_one_that_was_being_recorded():
-    laptop = Laptop(continuing=True)  # the engine started again mid-call
+    laptop = Laptop(continuing=7)  # the engine started again mid-call
     laptop.talking = True
     laptop.apps = ["Microsoft Teams"]
     laptop.tick(40)
     laptop.apps, laptop.talking = [], False  # its last 40 s
     laptop.tick(60)
-    assert laptop.outcomes() == ["stop"]
+    assert laptop.outcomes() == ["stop"] and laptop.after == [7]
 
     fresh = Laptop()  # started as usual: a mic test then is still a mic test
     fresh.talking = True
@@ -475,6 +485,58 @@ def test_after_a_restart_the_call_on_the_mic_is_the_one_that_was_being_recorded(
     fresh.apps = []
     fresh.tick(60)
     assert fresh.outcomes() == ["discard"]
+
+
+def test_what_a_recording_comes_after():
+    """The meeting its app was recorded in a moment ago, which it's kept as private as."""
+    laptop = Laptop()
+    laptop.call_talking = True
+    laptop.apps = ["3CX"]
+    laptop.tick(5 * 60)
+    laptop.apps, laptop.call_talking = [], False  # on hold
+    laptop.tick(40)
+    laptop.apps, laptop.call_talking = ["3CX"], True  # back
+    laptop.tick(60)
+    laptop.apps = ["3CX", "Microsoft Teams"]  # recorded in the same meeting
+    laptop.tick(60)
+    laptop.apps, laptop.call_talking = [], False
+    laptop.tick(40)
+    laptop.apps = ["Microsoft Teams"]
+    laptop.tick(4)
+    assert laptop.after == [None, 1, 2]
+    laptop.watch.decline(3)  # Don't record
+    laptop.apps = []
+    laptop.tick(10)
+    laptop.apps = ["Zoom"]  # another app
+    laptop.tick(4)
+    assert laptop.after == [None, 1, 2, None]
+    laptop.apps = []
+    laptop.tick(SAME_CALL_WITHIN + 60)
+    laptop.apps = ["3CX"]  # another call, a while later
+    laptop.tick(4)
+    assert laptop.after == [None, 1, 2, None, None]
+
+    quick = Laptop()
+    quick.talking = True
+    quick.apps = ["Microsoft Teams"]  # the preview, closed again
+    quick.tick(20)
+    quick.apps = []
+    quick.tick(20)
+    quick.apps = ["Microsoft Teams"]  # joined, after all
+    quick.tick(4)
+    assert quick.outcomes() == ["discard"] and quick.after == [None, 1]
+
+    stopped = Laptop()
+    stopped.apps = ["3CX"]
+    stopped.by_hand()
+    stopped.tick(10)
+    stopped.stop_by_hand()  # mid-call: not recorded any more, for an hour
+    stopped.tick(3600)
+    stopped.apps = []
+    stopped.tick(40)
+    stopped.apps = ["3CX"]  # back from hold
+    stopped.tick(4)
+    assert stopped.after == [None, 1]
 
 
 def test_dont_record_after_the_call_ended_doesnt_skip_the_next_call():
@@ -706,6 +768,62 @@ def test_through_the_api_a_short_call_with_a_note_is_kept(client: TestClient, mo
     kept = client.get(f"/api/meetings/{started['meeting_id']}", headers=AUTH)
     assert kept.status_code == 200 and kept.json()["meeting"]["status"] != "recording"
     assert client.get("/api/record", headers=AUTH).json()["events"][-1]["kind"] == "stopped"
+
+
+def test_the_rest_of_a_private_call_is_private_too(client: TestClient, monkeypatch):
+    pretend = on_the_mic(client, monkeypatch, [])
+
+    def later(seconds: float, apps: list[str], of: TestClient = client) -> dict:
+        pretend["apps"] = apps
+        for _ in range(int(seconds / 2)):
+            pretend["now"] += 2
+            of.app.state.call_watch.check()
+        return of.get("/api/record", headers=AUTH).json()
+
+    def keep_from_claude(meeting_id: int, on: bool = True) -> None:
+        body = {"private": on, "meeting_id": meeting_id}
+        assert client.post("/api/record/private", headers=AUTH, json=body).json()["private"] is on
+
+    first = later(90, ["3CX"])
+    assert first["private"] is False
+    keep_from_claude(first["meeting_id"])
+    client.post("/api/record/note", headers=AUTH, json={"text": "Keep this one"})
+    assert later(60, [])["recording"] is False  # on hold: saved
+    back = later(4, ["3CX"])
+    assert back["meeting_id"] != first["meeting_id"] and back["private"] is True
+    # Nobody was heard in that one: it's deleted, and the call goes on as private as it was.
+    assert later(60, [])["recording"] is False
+    assert client.get(f"/api/meetings/{back['meeting_id']}", headers=AUTH).status_code == 404
+    again = later(4, ["3CX"])
+    assert again["private"] is True
+    # What the user says of one is what counts for the next.
+    keep_from_claude(again["meeting_id"], on=False)
+    client.post("/api/record/note", headers=AUTH, json={"text": "And this one"})
+    later(60, [])
+    shared = later(4, ["3CX"])
+    assert shared["private"] is False
+
+    # The engine stops mid-call, and is started again.
+    keep_from_claude(shared["meeting_id"])
+    other = TestClient(create_app("test-token"), base_url=LOCAL)
+    watch = other.app.state.call_watch
+    monkeypatch.setattr(watch, "_apps", lambda: list(pretend["apps"]))
+    monkeypatch.setattr(watch, "_clock", lambda: pretend["now"])
+    rest = later(4, ["3CX"], of=other)
+    assert rest["meeting_id"] != shared["meeting_id"] and rest["private"] is True
+    # A call a good while later is another one.
+    later(60, [], of=other)
+    later(SAME_CALL_WITHIN + 60, [], of=other)
+    assert later(4, ["3CX"], of=other)["private"] is False
+
+    store = Store()
+    private = {first["meeting_id"], shared["meeting_id"]}
+    assert store.private_meetings() == private | ({rest["meeting_id"]} & ids(store))
+    store.close()
+
+
+def ids(store: Store) -> set[int]:
+    return {meeting["id"] for meeting in store.meetings()}
 
 
 def test_events_come_after_a_cursor_and_a_new_engine_says_so(client: TestClient, monkeypatch):

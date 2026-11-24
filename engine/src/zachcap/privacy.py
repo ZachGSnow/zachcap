@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -36,9 +38,34 @@ def is_private(store: Store, meeting) -> bool:
 
 
 def refuse_private(store: Store, meeting) -> None:
-    """Called before anything of one meeting is sent to Claude."""
+    """Called before anything of one meeting is sent to Claude, each time: it can be made
+    private (or deleted) while Claude is asked."""
+    if meeting is None:
+        raise RuntimeError("This meeting isn't there any more.")
     if is_private(store, meeting):
         raise RuntimeError(PRIVATE)
+
+
+# When each meeting was last redacted, as far as this run of the engine knows.
+_redacted: dict[int, float] = {}
+_started = time.time()
+
+
+def redacted(meeting_id: int) -> None:
+    _redacted[meeting_id] = time.time()
+
+
+def may_send(store: Store, meeting_ids: Iterable[int], since: float) -> bool:
+    """Whether what was found in these meetings, at ``since`` or later, may go to Claude now:
+    none was made private, deleted or redacted meanwhile."""
+    ids = set(meeting_ids)
+    if not ids:
+        return True
+    return (
+        since >= _started  # before that, there's no telling what was redacted
+        and ids.isdisjoint(store.private_meetings())
+        and all(store.meeting(i) is not None and _redacted.get(i, 0.0) < since for i in ids)
+    )
 
 
 def _luhn(digits: str) -> bool:

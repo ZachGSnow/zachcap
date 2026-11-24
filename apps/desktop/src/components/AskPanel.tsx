@@ -1,5 +1,5 @@
 import { ArrowUp, Loader2, MessageCircleQuestion } from "lucide-react";
-import { memo, useRef, useState } from "react";
+import { memo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { Answer } from "@/components/Answer";
@@ -9,21 +9,36 @@ import { api } from "@/lib/engine";
 import { reason } from "@/lib/feedback";
 import { costLabel } from "@/lib/writer";
 
-type Exchange = { id: number; question: string; answer?: string; model?: string; cost?: number; failed?: boolean };
+type Exchange = {
+  id: number;
+  question: string;
+  /** Asked of the model on this PC. */
+  here: boolean;
+  answer?: string;
+  model?: string;
+  cost?: number;
+  failed?: boolean;
+};
 
 const STARTERS = ["What did I commit to?", "What was decided?", "Were there any risks or blockers?", "Who owns the next steps?"];
 
 // Memoized: the panel stays mounted on the meeting page, which re-renders as audio plays.
 /** Questions about one meeting. ``here`` is the model on this PC that answers for a private one
- * (Claude answers for the others). */
+ * (Claude answers for the others), and ``answering`` whether it is on a question now, which may
+ * be one from before the page was left. ``children`` go in place of the question box, when
+ * nobody may answer. */
 export const AskPanel = memo(function AskPanel({
   meetingId,
   here,
+  answering,
   onSeek,
+  children,
 }: {
   meetingId: number;
   here: string | null;
+  answering: boolean;
   onSeek: (seconds: number) => void;
+  children?: ReactNode;
 }) {
   const [question, setQuestion] = useState("");
   const [history, setHistory] = useState<Exchange[]>([]);
@@ -38,7 +53,7 @@ export const AskPanel = memo(function AskPanel({
     const update = (patch: Partial<Exchange>) => setHistory((h) => h.map((e) => (e.id === id ? { ...e, ...patch } : e)));
     setQuestion("");
     setBusy(true);
-    setHistory((h) => [...h, { id, question: text.trim() }]);
+    setHistory((h) => [...h, { id, question: text.trim(), here: here !== null }]);
     try {
       const result = await api<{ answer: string; model: string; cost_usd: number }>(`/api/meetings/${meetingId}/ask`, {
         method: "POST",
@@ -55,9 +70,22 @@ export const AskPanel = memo(function AskPanel({
     }
   };
 
+  const stop = (
+    <Button
+      size="sm"
+      variant="outline"
+      className="h-7"
+      onClick={() => void api(`/api/meetings/${meetingId}/writing/stop`, { method: "POST" }).catch(() => undefined)}
+    >
+      Stop
+    </Button>
+  );
+  // One asked before the page was left: its answer has nowhere to go any more.
+  const earlier = answering && !history.some((e) => e.here && !e.answer && !e.failed);
+
   return (
     <div>
-      {history.length === 0 && (
+      {history.length === 0 && !children && (
         <div className="flex flex-col items-center py-8 text-center">
           <div className="flex size-12 items-center justify-center rounded-full bg-muted">
             <MessageCircleQuestion className="size-5" />
@@ -103,42 +131,46 @@ export const AskPanel = memo(function AskPanel({
                 <span className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="size-3.5 animate-spin" />
                   Reading the transcript...
-                  {here && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7"
-                      onClick={() =>
-                        void api(`/api/meetings/${meetingId}/writing/stop`, { method: "POST" }).catch(() => undefined)
-                      }
-                    >
-                      Stop
-                    </Button>
-                  )}
+                  {exchange.here && stop}
                 </span>
               )}
             </div>
           </div>
         ))}
       </div>
-      <form
-        className="sticky bottom-0 mt-5 flex gap-2 bg-background pb-1"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void ask(question);
-        }}
-      >
-        <Input
-          aria-label="Your question about this meeting"
-          placeholder="Ask anything about this meeting"
-          value={question}
-          onChange={(event) => setQuestion(event.target.value)}
-          className="h-10"
-        />
-        <Button type="submit" size="icon" className="size-10 shrink-0" aria-label="Ask" disabled={busy || !question.trim()}>
-          {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
-        </Button>
-      </form>
+      {earlier && (
+        <p role="status" className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" />
+          The model on this PC is still on a question asked before.
+          {stop}
+        </p>
+      )}
+      {children || (
+        <form
+          className="sticky bottom-0 mt-5 flex gap-2 bg-background pb-1"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void ask(question);
+          }}
+        >
+          <Input
+            aria-label="Your question about this meeting"
+            placeholder="Ask anything about this meeting"
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+            className="h-10"
+          />
+          <Button
+            type="submit"
+            size="icon"
+            className="size-10 shrink-0"
+            aria-label="Ask"
+            disabled={busy || earlier || !question.trim()}
+          >
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
+          </Button>
+        </form>
+      )}
     </div>
   );
 });

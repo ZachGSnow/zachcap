@@ -1,9 +1,10 @@
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from zachcap import assistant
+from zachcap import assistant, summarize
 from zachcap.store import Store
 from zachcap.voiceprint import Match
 
@@ -116,17 +117,20 @@ def fake_runner(monkeypatch, replies: list, final=None) -> dict:
             return {"role": "user", "content": [{"type": "tool_result", "content": found}]}
 
         def __iter__(self):
-            yield from replies[: self.params["max_iterations"]]
+            for one in replies[: self.params["max_iterations"]]:
+                yield one
+                if one.stop_reason == "tool_use":  # the real runner runs the tools then
+                    self.generate_tool_call_response()
 
     def create(**params):
         calls["final"] = params
         return final(params)
 
     class Client:
-        def __init__(self, api_key):
+        def __init__(self, api_key, **options):
             self.beta = SimpleNamespace(messages=SimpleNamespace(tool_runner=Runner, create=create))
 
-    monkeypatch.setattr(assistant.anthropic, "Anthropic", Client)
+    monkeypatch.setattr(summarize.anthropic, "Anthropic", Client)
     monkeypatch.setattr(assistant.apikeys, "get", lambda name: "test-key")
     return calls
 
@@ -155,6 +159,8 @@ def test_the_answer_comes_back_with_the_meetings_it_cites(library, monkeypatch):
         cutover: {"title": "Cutover sync", "started_at": "2026-11-20T09:00:00"}
     }
     assert result["cost_usd"] == pytest.approx(2 * (1000 * 4 + 100 * 20) / 1_000_000)
+    # What it was answered from goes back with the next question.
+    assert result["used"] == [cutover] and result["since"] <= time.time()
     assert [m["role"] for m in calls["messages"]] == ["user", "assistant", "user"]
     assert calls["fallbacks"] == "default" and "Cite every fact" in calls["system"]
     assert calls["max_tokens"] == 16_000 and "final" not in calls
@@ -168,11 +174,13 @@ def test_questions_are_masked_like_what_the_tools_find(library, monkeypatch):
     assistant.ask_everything(
         store,
         "Who wrote to dana@example.com?",
-        history=[{"question": "And 555-123-4567?", "answer": "Dana."}],
+        history=[{"question": "And 555-123-4567?", "answer": "Dana, on 555-123-4567."}],
     )
 
     sent = [m["content"] for m in calls["messages"]]
     assert sent[0] == "And [phone]?" and "Who wrote to [email]?" in sent[2]
+    # An answer from before masking was on, too.
+    assert sent[1] == "Dana, on [phone]."
 
 
 def test_out_of_lookups_claude_answers_with_what_it_found(library, monkeypatch):

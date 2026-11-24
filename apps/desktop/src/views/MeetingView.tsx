@@ -747,14 +747,19 @@ export function MeetingView({
 
             {/* Kept mounted, so questions and an answer still on its way survive a tab switch. */}
             <TabsContent value="ask" forceMount className="data-[state=inactive]:hidden">
-              {writer === null ? (
-                <PrivateNote
-                  what="so it can't be asked about it. A model on this PC could answer: see Summaries in Settings."
-                  onAllow={() => void savePrivate(false)}
-                />
-              ) : (
-                <AskPanel meetingId={id} here={meeting.private ? (settings?.local_model ?? "") : null} onSeek={seek} />
-              )}
+              <AskPanel
+                meetingId={id}
+                here={meeting.private && writer === "local" ? (settings?.local_model ?? null) : null}
+                answering={writing?.what === "answer"}
+                onSeek={seek}
+              >
+                {writer === null && (
+                  <PrivateNote
+                    what="so it can't be asked about it. A model on this PC could answer: see Summaries in Settings."
+                    onAllow={() => void savePrivate(false)}
+                  />
+                )}
+              </AskPanel>
             </TabsContent>
 
             <TabsContent value="summary" forceMount className="data-[state=inactive]:hidden">

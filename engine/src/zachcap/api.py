@@ -143,6 +143,8 @@ class PromptChangeBody(BaseModel):
 class Turn(BaseModel):
     question: str
     answer: str
+    used: list[int] = []  # the meetings it was answered from, and when that began: as
+    since: float = 0.0  # /api/ask said
 
 
 class LibraryQuestionBody(BaseModel):
@@ -164,6 +166,7 @@ class PauseBody(BaseModel):
 
 class PrivateBody(BaseModel):
     private: bool
+    meeting_id: int | None = None  # the recording the page showed the button for
 
 
 class RecordingRef(BaseModel):
@@ -446,7 +449,8 @@ def create_app(token: str) -> FastAPI:
     startup = Store()
     try:
         # A recording cut off by a crash or a quit: a call on the mic now is still that call.
-        cut_off = bool(startup.meetings_with_status("recording"))
+        interrupted = startup.meetings_with_status("recording")
+        cut_off = interrupted[-1]["id"] if interrupted else None
         recover(startup, worker.submit)
         if startup.setting(dictation.SETTING) == "1":  # ready before the keys are first held
             dictator.transcriber.warm_up(language_of(startup))
@@ -545,7 +549,7 @@ def create_app(token: str) -> FastAPI:
                 store.close()
         return meeting_id
 
-    def begin_recording(store: Store, title: str | None) -> int:
+    def begin_recording(store: Store, title: str | None, private: bool = False) -> int:
         """Starts recording into a new meeting and returns its id. Raises HTTPException
         (409 when already recording or checking the sound, 500 when it can't start)."""
         from .capture import Recorder
@@ -591,9 +595,12 @@ def create_app(token: str) -> FastAPI:
             title = title or f"Meeting {datetime.now():%b %d %H:%M}"
             started = recorder.started_at or datetime.now().astimezone()
             try:
-                meeting_id = store.create_meeting(
-                    title, started.isoformat(timespec="seconds"), folder, status="recording"
-                )
+                with store.transaction():
+                    meeting_id = store.create_meeting(
+                        title, started.isoformat(timespec="seconds"), folder, status="recording"
+                    )
+                    if private:
+                        store.update_meeting(meeting_id, private=1)
             except Exception as exc:  # the database busy or full: don't leave it recording
                 try:
                     recorder.stop()
@@ -615,7 +622,7 @@ def create_app(token: str) -> FastAPI:
                 title=title,
                 notes=0,
                 watch=watch,
-                private=False,
+                private=private,
             )
             stop_live()  # the last recording's (stopped already, normally)
             live_state["now"] = None
@@ -637,6 +644,8 @@ def create_app(token: str) -> FastAPI:
     def heard(recorder, track: str) -> bool:
         """Whether anyone was heard on that track ("system": the other side of a call)."""
         return getattr(getattr(recorder, "tracks", {}).get(track), "heard_at", None) is not None
+
+    discarded_private: set[int] = set()  # recordings not kept, that Claude was to be kept from
 
     def discard_recording(meeting_id: int, only_if_worthless: bool = False) -> str:
         """Stops that recording and deletes it, audio and all: Don't record, or a call app
@@ -661,6 +670,8 @@ def create_app(token: str) -> FastAPI:
             meeting = store.meeting(meeting_id)
             if meeting is None:
                 return "deleted"
+            if privacy.is_private(store, meeting):
+                discarded_private.add(meeting_id)
             folder = Path(meeting["folder"]).resolve()
             store.delete_meeting(meeting_id)
             store.scrub_deleted_text()
@@ -722,10 +733,17 @@ def create_app(token: str) -> FastAPI:
         with watch_settings_lock:
             watch_settings["value"] = None  # read again at the next look
 
-    def start_for_call(app_name: str) -> int:
+    def start_for_call(app_name: str, after: int | None) -> int:
         store = Store()
         try:
-            return begin_recording(store, f"{app_name} call {datetime.now():%b %d %H:%M}")
+            # As private as the meeting the same app was recorded in a moment ago (before a
+            # hold, a crash of the engine, a preview closed): it can't be told from that call.
+            before = store.meeting(after) if after is not None else None
+            private = after in discarded_private
+            if before is not None:
+                private = privacy.is_private(store, before)
+            title = f"{app_name} call {datetime.now():%b %d %H:%M}"
+            return begin_recording(store, title, private)
         except HTTPException as exc:
             if exc.status_code == 409:  # a sound check, or a recording starting: next look
                 raise autorecord.Busy(exc.detail) from exc
@@ -1393,17 +1411,21 @@ def create_app(token: str) -> FastAPI:
     @app.patch("/api/segments/{segment_id}", dependencies=auth)
     def edit_line(segment_id: int, body: LineTextBody, store: Store = Depends(db)):
         """Fix a line's words. Offers the Words to know entry that would fix the same
-        mishearing in future meetings, when the edit looks like one."""
+        mishearing in future meetings, when the edit looks like one (never of a private
+        meeting's line: those words go to Claude with every prompt)."""
         segment = store.segment(segment_id)
         if segment is None:
             raise HTTPException(status_code=404, detail="No such line")
-        refuse_if_busy(store.meeting(segment["meeting_id"]))
+        meeting = store.meeting(segment["meeting_id"])
+        refuse_if_busy(meeting)
         text = " ".join(body.text.split())
         if not text:
             raise HTTPException(status_code=400, detail="A line can't be empty")
         if len(text) > 4000:
             raise HTTPException(status_code=400, detail="Keep a line under 4,000 characters")
-        suggestion = words.suggest(segment["text"], text, store.setting("vocabulary"))
+        suggestion = None
+        if not privacy.is_private(store, meeting):
+            suggestion = words.suggest(segment["text"], text, store.setting("vocabulary"))
         store.edit_segment(segment_id, text)
         export.auto_export(store, segment["meeting_id"])
         return {"text": text, "suggestion": suggestion}
@@ -1456,6 +1478,7 @@ def create_app(token: str) -> FastAPI:
         finally:
             for lock in locks:
                 lock.release()
+        privacy.redacted(meeting_id)  # what Ask found in it before isn't sent again
         tickets.fill(store, meeting_id)  # a ticket found in what was redacted goes too
         export.auto_export(store, meeting_id)
         return {
@@ -1511,7 +1534,8 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/people", dependencies=auth)
     def people(store: Store = Depends(db)):
-        return [dict(p) for p in store.people_stats()]
+        hidden = store.private_people()  # not offered to ask Claude about
+        return [{**dict(p), "private": p["id"] in hidden} for p in store.people_stats()]
 
     @app.patch("/api/people/{person_id}", dependencies=auth)
     def rename_person(person_id: int, body: NameBody, store: Store = Depends(db)):
@@ -1644,12 +1668,17 @@ def create_app(token: str) -> FastAPI:
     @app.post("/api/record/private", dependencies=auth)
     def record_private(body: PrivateBody, store: Store = Depends(db)):
         """Keeps the meeting being recorded from Claude, or stops keeping it: set before it
-        ends, it's never there to be read (the MCP server has a meeting once it's recorded)."""
+        ends, it's never there to be read (the MCP server has a meeting once it's recorded).
+        Pressed as the recording ended, it's still that meeting's, not the next one's."""
         with lock:
-            if recording.get("recorder") is None:
+            now = recording.get("meeting_id") if recording.get("recorder") else None
+            meeting_id = now if body.meeting_id is None else body.meeting_id
+            if meeting_id is None:
                 raise HTTPException(status_code=409, detail="Not recording")
-            store.update_meeting(recording["meeting_id"], private=int(body.private))
-            recording["private"] = body.private
+            meeting_or_404(store, meeting_id)
+            store.update_meeting(meeting_id, private=int(body.private))
+            if meeting_id == now:
+                recording["private"] = body.private
         return {"private": body.private}
 
     @app.post("/api/record/note", dependencies=auth)
