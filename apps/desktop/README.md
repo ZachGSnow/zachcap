@@ -15,8 +15,9 @@ built again from scratch. It also puts ZachCap in the tray: closing the window k
 `scripts/build-installer.ps1` stages the engine's tracked files and a pinned, checksummed uv in
 `src-tauri/installer/`, then runs `tauri build --config src-tauri/tauri.installer.conf.json`
 (NSIS, per-user, into `%LOCALAPPDATA%\Programs\ZachCap`; see `src-tauri/windows/installer-hooks.nsh`).
-The plain `tauri.conf.json` keeps bundling off, so `cargo check` and `npm run tauri dev` need
-none of it.
+It stops when `uv.lock` or the version of the engine doesn't go with the app's, which would make
+every first start fail. The plain `tauri.conf.json` keeps bundling off, so `cargo check` and
+`npm run tauri dev` need none of it.
 
 ## Develop
 

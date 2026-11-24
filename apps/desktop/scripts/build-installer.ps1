@@ -77,10 +77,21 @@ foreach ($license in $UvLicenses.GetEnumerator()) {
     Copy-Item $path (Join-Path $stage "uv\$($license.Key)")
 }
 
-# ZachCap's own code as a wheel, from the staged copy (only what git tracks).
+# The first start installs from the lock as shipped, then the wheel of the BUILD stamp's version
+# (set_up and wheel_for in lib.rs): with a stale lock or another version, every one would fail.
 $uv = Join-Path $stage 'uv\uv.exe'
-& $uv build (Join-Path $stage 'engine') --wheel --out-dir (Join-Path $stage 'engine\wheel') --no-config
+$engine = Join-Path $stage 'engine'
+& $uv lock --check --project $engine --no-config
+if ($LASTEXITCODE -ne 0) { throw "engine\uv.lock doesn't match engine\pyproject.toml: run 'uv lock' in engine and commit it" }
+
+# ZachCap's own code as a wheel, from the staged copy (only what git tracks).
+& $uv build $engine --wheel --out-dir (Join-Path $engine 'wheel') --no-config
 if ($LASTEXITCODE -ne 0) { throw "uv build failed ($LASTEXITCODE)" }
+$wheel = "zachcap-$version-py3-none-any.whl"
+$built = @(Get-ChildItem (Join-Path $engine 'wheel') -Filter '*.whl').Name -join ', '
+if ($built -ne $wheel) {
+    throw "The app installs $wheel (the version in src-tauri\tauri.conf.json), but uv built '$built' (the one in engine\pyproject.toml): give both the same version, run 'uv lock' in engine and commit"
+}
 
 Write-Host "Staged engine ($(@($files).Count) files and its wheel, BUILD $stamp) and uv $UvVersion"
 

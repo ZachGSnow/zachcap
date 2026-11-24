@@ -1768,6 +1768,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn every_manifest_has_the_same_version() {
+        // Setup takes the wheel of tauri.conf.json's version (the BUILD stamp's), which is built
+        // with pyproject.toml's, and needs uv.lock to go with that.
+        let json = |text: &str| -> serde_json::Value { serde_json::from_str(text).unwrap() };
+        let config = json(include_str!("../tauri.conf.json"));
+        let version = config["version"].as_str().unwrap();
+        assert_eq!(env!("CARGO_PKG_VERSION"), version, "Cargo.toml");
+        let page = json(include_str!("../../package.json"));
+        assert_eq!(page["version"], version, "package.json");
+        let engine = format!("name = \"zachcap\"\nversion = \"{version}\"\n");
+        for (name, text) in [
+            (
+                "pyproject.toml",
+                include_str!("../../../../engine/pyproject.toml"),
+            ),
+            ("uv.lock", include_str!("../../../../engine/uv.lock")),
+        ] {
+            let text = text.replace("\r\n", "\n");
+            assert!(text.contains(&engine), "{name} isn't at {version}");
+        }
+    }
+
     /// A folder for one test, gone after it.
     struct Scratch(PathBuf);
 
