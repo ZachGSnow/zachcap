@@ -930,6 +930,14 @@ export function SettingsView() {
                 Copy config for the Claude app
               </Button>
             </div>
+            <p className="mt-3 flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+              <span className="min-w-0">
+                Meeting text comes from other people: whoever spoke on a call, shared a screen or wrote a file you
+                attached, and it can hold instructions. If that app also has tools that change things (email, files,
+                tickets), make sure it asks you before acting on anything it read in a meeting.
+              </span>
+            </p>
           </div>
         </Section>
 

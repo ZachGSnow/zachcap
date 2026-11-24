@@ -2,7 +2,9 @@
 
 An optional export folder (an Obsidian vault, say) gets a Markdown copy of every meeting,
 rewritten whenever the meeting changes. Each copy's name ends with the meeting's id, "(M12)",
-so a renamed meeting replaces its old file and two meetings never share one.
+so a renamed meeting replaces its old file and two meetings never share one. What other people
+said or wrote, and what Claude made of it, goes into Markdown through inert(), so an image or
+an HTML tag in it never loads anything when the file is opened.
 """
 
 from __future__ import annotations
@@ -18,6 +20,21 @@ from . import clients
 from .store import Store
 
 FORMATS = {"md": "Markdown", "txt": "Text", "srt": "Subtitles (SRT)", "vtt": "Subtitles (WebVTT)"}
+
+# What makes a Markdown app (Obsidian, say) load something when it opens a file: an image,
+# inline, by reference or embedded ("![x](url)", "![x][1]", "![[x]]"), or raw HTML, which
+# starts with "<" and a letter, "/", "!" or "?" (a tag, a comment, "<https://...>"). The
+# backslashes already in front of one are taken along, as they decide whether it is escaped.
+# The page's copy of a summary as Markdown (src/lib/markdown.ts) follows the same rule.
+_LOADS = re.compile(r"(\\*)(!\[|<(?=[A-Za-z/!?]))")
+
+
+def inert(text: str) -> str:
+    """Text from a meeting or from Claude, for a Markdown file: a backslash goes before each
+    "![" and each "<" that could start HTML, so a Markdown app shows them as typed and loads
+    nothing (an image's link stays a link), and a text editor shows little change.
+    Backslashes already in front are doubled, so they still show and can't cancel it."""
+    return _LOADS.sub(lambda found: found[1] * 2 + "\\" + found[2], text)
 
 
 def _clock(seconds: float) -> str:
@@ -48,43 +65,49 @@ def _note_text(note) -> str:
 
 
 def markdown(store: Store, meeting_id: int) -> str:
+    """The meeting as Markdown. Only ZachCap's own headings and marks are written as they
+    are; every name and text in between goes through inert()."""
     meeting = store.meeting(meeting_id)
     started = datetime.fromisoformat(meeting["started_at"])
     people = store.participants([meeting_id]).get(meeting_id, [])
     client = clients.of_meeting(store, meeting)["client"]
-    lines = [f"# {meeting['title']}", ""]
+    lines = [f"# {inert(meeting['title'])}", ""]
     lines.append(
         f"{started:%A %B %d, %Y %H:%M}"
         + (f" | {round((meeting['duration'] or 0) / 60)} min" if meeting["duration"] else "")
-        + (f" | {', '.join(people)}" if people else "")
-        + (f" | Client {client}" if client else "")
-        + (f" | Ticket {meeting['ticket']}" if meeting["ticket"] else "")
+        + (f" | {inert(', '.join(people))}" if people else "")
+        + (f" | Client {inert(client)}" if client else "")
+        + (f" | Ticket {inert(meeting['ticket'])}" if meeting["ticket"] else "")
     )
     summary = store.summary(meeting_id)
     if summary:
         content = summary["content"]
-        lines += ["", "## Summary", "", content.get("overview", "")]
+        lines += ["", "## Summary", "", inert(content.get("overview", ""))]
         if content.get("decisions"):
-            lines += ["", "## Decisions", ""] + [f"- {d}" for d in content["decisions"]]
+            lines += ["", "## Decisions", ""] + [f"- {inert(d)}" for d in content["decisions"]]
         items = store.action_items(meeting_id=meeting_id)
         if items:
             lines += ["", "## Action items", ""]
             for item in items:
-                due = f" (due {item['due']})" if item["due"] else ""
+                due = f" (due {inert(item['due'])})" if item["due"] else ""
                 lines.append(
-                    f"- [{'x' if item['status'] == 'done' else ' '}] **{item['owner']}**: "
-                    f"{item['task']}{due}"
+                    f"- [{'x' if item['status'] == 'done' else ' '}] **{inert(item['owner'])}**: "
+                    f"{inert(item['task'])}{due}"
                 )
         if content.get("open_questions"):
-            lines += ["", "## Open questions", ""] + [f"- {q}" for q in content["open_questions"]]
+            questions = [f"- {inert(q)}" for q in content["open_questions"]]
+            lines += ["", "## Open questions", ""] + questions
     notes = store.notes(meeting_id)
     if notes:
         lines += ["", "## My notes", ""]
-        lines += [f"- [{_clock(n['at'])}] {_note_text(n)}" for n in notes]
+        lines += [f"- [{_clock(n['at'])}] {inert(_note_text(n))}" for n in notes]
     transcript = store.transcript(meeting_id)
     if transcript:
         lines += ["", "## Transcript", ""]
-        lines += [f"**[{_clock(r['start'])}] {r['speaker']}:** {r['text']}  " for r in transcript]
+        lines += [
+            f"**[{_clock(r['start'])}] {inert(r['speaker'])}:** {inert(r['text'])}  "
+            for r in transcript
+        ]
     return "\n".join(lines).rstrip() + "\n"
 
 

@@ -89,7 +89,8 @@ def test_attached_files_go_to_claude_labelled_and_offer_tickets(
     assert refused.status_code == 400
 
     text = summarize.notes_text(store, meeting_id)
-    assert "Files You attached to the meeting" in text and "--- spooler.log ---" in text
+    assert "Files You attached to the meeting" in text
+    assert '<attached_file name="spooler.log">\nTicket 1924086\nPID 7654321 crashed\n' in text
     assert "Notes You took" not in text  # a file isn't one of your notes
     found = tickets.candidates(store, meeting_id)
     assert {c["ticket"] for c in found} == {"1924086", "7654321"}
