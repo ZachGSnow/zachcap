@@ -2543,7 +2543,7 @@ ml = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=2.0" },
-    { name = "av", specifier = ">=14" },
+    { name = "av", specifier = ">=18" },
     { name = "comtypes", marker = "sys_platform == 'win32'", specifier = ">=1.4" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "keyring", specifier = ">=25" },

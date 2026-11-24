@@ -71,6 +71,12 @@ class Refused(ValueError):
     to read (decode_child). The message says which, for the user."""
 
 
+class Stalled(TimeoutError):
+    """Reading a file got nowhere for so long that it was given up, though its decoder wasn't
+    busy (decode_child): a network drive that stopped answering, most likely, or a cloud file
+    that isn't here yet. An OSError, as for any file that can't be read right now."""
+
+
 class NoRoom(Refused):
     """A file there isn't the free space to decode: ``size`` bytes of audio go on the drive
     ``folder`` is on, and SPARE stays free there besides. It's not the file's doing, so the
@@ -230,6 +236,12 @@ def decode_pieces(
             raise Refused(too_long)
         if starting is not None:
             starting(seconds)
+        # Only this stream is read: FFmpeg skips the rest where the file lets it. That's most
+        # of a video recording in an .mp4 laid out in pieces of 64 KB or more (as Windows' own
+        # writer does), and nothing of an .mkv.
+        for other in container.streams:
+            if other is not stream:
+                other.discard = av.stream.Discard.all
         resampler = av.AudioResampler(format="s16", layout="mono", rate=RATE)
         kept = 0
         for frame in container.decode(stream):

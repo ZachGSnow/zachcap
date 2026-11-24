@@ -239,6 +239,113 @@ def test_a_teams_recording_imports_its_audio_and_its_video_is_never_decoded(tmp_
     assert abs(audio.import_media(source, tmp_path / "out.flac") - 1.0) < 0.15
 
 
+class Counted:
+    """A file that counts what FFmpeg reads of it."""
+
+    def __init__(self, file) -> None:
+        self.file, self.name, self.count = file, file.name, 0
+        self.seek, self.tell = file.seek, file.tell
+
+    def read(self, size: int) -> bytes:
+        data = self.file.read(size)
+        self.count += len(data)
+        return data
+
+
+def video_recording(
+    path: Path,
+    form: str,
+    options: dict[str, str] | None = None,
+    first: str = "",
+    tracks: int = 1,
+    late: float = 0.0,
+    seconds: float = 4.0,
+) -> Path:
+    """A recording that's mostly its picture (noise, as JPEGs), with ``tracks`` of audio that
+    start ``late`` seconds in. FFmpeg lays it out by time, unless one kind goes ``first``."""
+    noise = np.random.default_rng(1)
+    with av.open(str(path), "w", format=form, options=options or {}) as out:
+        picture = out.add_stream("mjpeg", rate=10)
+        picture.width, picture.height, picture.pix_fmt = 320, 240, "yuvj420p"
+        picture.bit_rate = 10_000_000
+        sounds = [out.add_stream("aac", rate=RATE, layout="mono") for _ in range(tracks)]
+        packets = {"audio": [], "video": []}
+        for number, sound in enumerate(sounds):
+            samples = tone(seconds - late) * (1 + number) / 2
+            frame = av.AudioFrame.from_ndarray(
+                (samples * 32767).astype(np.int16)[None, :], format="s16", layout="mono"
+            )
+            frame.sample_rate, frame.pts = RATE, int(late * RATE)
+            packets["audio"] += [*sound.encode(frame), *sound.encode(None)]
+        for index in range(int(seconds * 10)):
+            image = noise.integers(0, 255, (240, 320, 3), np.uint8)
+            frame = av.VideoFrame.from_ndarray(image, format="rgb24")
+            frame.pts = index
+            packets["video"] += picture.encode(frame)
+        packets["video"] += picture.encode(None)
+        both = sorted(
+            packets["audio"] + packets["video"],
+            key=lambda p: (first not in ("", p.stream.type), p.dts * p.time_base),
+        )
+        for packet in both:
+            out.mux(packet)
+    return path
+
+
+@pytest.mark.parametrize("form", ["mp4", "mov"])
+def test_only_the_audio_of_a_video_recording_is_read(tmp_path: Path, monkeypatch, form: str):
+    # On a mapped drive over a slow link, reading the video too took so long that the decoder
+    # was ended for taking too long to read. Laid out a second of each at a time (Windows' own
+    # writer takes a third of a second).
+    source = video_recording(tmp_path / f"Weekly sync.{form}", form, {"chunk_duration": "1000000"})
+    opened: list[Counted] = []
+    real = av.open
+
+    def counting(file, **options):
+        opened.append(Counted(file))
+        return real(opened[-1], **options)
+
+    monkeypatch.setattr(av, "open", counting)
+
+    samples = audio.decode_media(source, audio.IMPORTS)
+
+    assert abs(len(samples) / RATE - 4.0) < 0.15
+    (read,) = opened
+    assert read.count < 0.5 * source.stat().st_size
+
+
+@pytest.mark.parametrize(
+    ("name", "form", "how"),
+    [
+        ("call.mp4", "mp4", {}),
+        ("call.mp4", "mp4", {"options": {"movflags": "faststart"}}),
+        ("call.mp4", "mp4", {"options": {"movflags": "frag_keyframe+empty_moov"}}),
+        ("call.mp4", "mp4", {"options": {"chunk_duration": "1000000"}}),
+        ("call.mp4", "mp4", {"first": "audio"}),
+        ("call.mp4", "mp4", {"first": "video"}),
+        ("call.mp4", "mp4", {"tracks": 2}),  # the first is the one that's imported
+        ("call.mp4", "mp4", {"late": 2.0}),
+        ("call.mov", "mov", {}),
+        ("call.mkv", "matroska", {}),
+        ("call.mkv", "matroska", {"first": "video"}),
+        ("call.mkv", "matroska", {"late": 2.0, "tracks": 2}),
+    ],
+)
+def test_skipping_the_rest_leaves_the_audio_as_it_was(tmp_path: Path, name, form, how):
+    source = video_recording(tmp_path / name, form, **how)
+    whole = []  # decoded with everything in the file read, and nothing skipped
+    with av.open(str(source)) as container:
+        sound = container.streams.audio[0]
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=RATE)
+        for frame in [*container.decode(sound), None]:
+            whole += [out.to_ndarray().reshape(-1) for out in resampler.resample(frame)]
+
+    pieces = list(audio.decode_pieces(source, audio.IMPORTS))
+
+    assert np.array_equal(np.concatenate(pieces), np.concatenate(whole))
+    assert len(np.concatenate(pieces)) / RATE > 1.9
+
+
 def test_a_file_with_only_video_is_refused(tmp_path: Path):
     source = encode(tmp_path / "screen.mp4", "mp4", None, video=True)
 

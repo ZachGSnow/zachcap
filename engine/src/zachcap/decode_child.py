@@ -22,8 +22,9 @@ watch folder tries again once there's room, not on every look.
 The child runs in a Windows Job Object that ends it when the engine goes (kill on close, so
 none is left behind), lets it start no other process, caps its memory (MEMORY), and ends it
 at once if it crashes, with no error dialog. It reads the file only once it is in the job: it
-waits for a go on stdin first. Its time limit (START, PER_SECOND) grows with the audio it has
-written; when it runs out, the job is ended and the file "took too long to read".
+waits for a go on stdin first. Its time limit follows how far it gets (_Patience), and tells
+a file that hangs FFmpeg, which keeps the CPU busy and "took too long to read", from a drive
+that has stopped answering, which doesn't (audio.Stalled: the watch folder tries it again).
 
 The engine's own tracks (audio.TRACKS: the FLAC chunks it recorded, the playback cache,
 redaction) are still decoded in the engine's process: ZachCap wrote them itself.
@@ -52,27 +53,39 @@ MODULE = "zachcap.decode_child"  # what the child runs: this module
 AUDIO, RESULT, ERRORS = "audio.s16", "result.json", "errors.txt"  # in the child's folder
 SAMPLE = 2  # bytes: int16, which a FLAC holds as it is (float32 took twice the space)
 GO = b"go"  # on the child's stdin once it is in its job
-# The time limit: a minute to start and open the file (the child is ready in under a
-# second), then half a second more for each second of audio written. So the decoder has to
-# keep up with twice real time: on a 6-core laptop it reads an hour of 48 kHz stereo AAC in
-# about 4 seconds (850 times real time), and a 2 Mbps Teams recording on a mapped network
-# drive needs 0.5 MB/s. A file that hangs FFmpeg at once is ended a minute in; one that
-# hangs later, at most a minute plus half the length it got through (six hours for 12 hours
-# of audio and then a hang, the worst a file can do).
-START = 60.0
+# The time limits (_Patience): a minute of CPU time, and five minutes of waiting, without
+# getting anywhere. The first ends a file that hangs FFmpeg. The second allows for a network
+# drive that's slow to answer (Windows itself gives up on one after a minute or so) and for a
+# cloud file, whose first read waits for all of it to come down (which goes on meanwhile if
+# the child is ended, so another try finds it here).
+BUSY = 60.0
+IDLE = 300.0
+# Each second of audio written gives half a second of both back, so the decoder has to keep
+# up with twice real time: on a 6-core laptop it reads an hour of 48 kHz stereo AAC in about
+# 4 seconds (850 times real time), and looks through 2 GB of video for its audio in one. The
+# most CPU time a file can use up that way is six hours, with 12 hours of audio.
 PER_SECOND = 0.5
+# Each 64 KB read of the file gives a second of waiting back, so a drive at 0.5 Mbps is fast
+# enough whatever the file's own bitrate: a 2 Mbps Teams recording over a 2.5 Mbps link, say.
+# A file that's read over and over gets nowhere, so that stops at three times its size (some
+# are read twice) and what Python reads to start (4.5 MB).
+SLOWEST = 64 * 2**10
+TIMES, STARTING = 3, 8 * 2**20
 # 4 GB: more than 12 hours of audio would take even held whole (1.4 GB as int16), though
 # the child holds only a piece at a time (it peaked at 54 MB on an hour of AAC, 42 MB on a
 # Teams-style recording with video). The cap stops a crafted file from making FFmpeg take
 # all of the PC's memory.
 MEMORY = 4 * 2**30
 POLL = 0.25  # seconds between looks at how far the child has got
+# The most that counts between two looks. One that comes later than that says nothing about
+# the file: the PC slept (the clock runs on meanwhile), or was too busy to look.
+LATE = 1.0
 GONE = 30.0  # the most to wait for an ended child to be gone (a network drive can hold it)
 # Folders a decode left when the engine stopped part-way (the job ended the child then) are
-# removed a day on: no decode lasts that long (START + PER_SECOND * audio.MAX_SECONDS).
+# removed a day on.
 STALE = 24 * 3600.0
-# Tests make the child misbehave part-way through a file with this ("crash", "hang" or
-# "unwritable"), to check that the engine copes.
+# Tests make the child misbehave part-way through a file with this ("crash", "hang", "stall"
+# or "unwritable"), to check that the engine copes.
 TEST_HOOK = "ZACHCAP_DECODE_TEST"
 
 
@@ -81,8 +94,8 @@ def decode(source: Path) -> np.ndarray:
     process with audio.IMPORTS. Raises audio.Refused with the reason for the user (the
     refusals of decode_media, a file that crashed the decoder or took too long to read, and
     audio.NoRoom when there isn't the free space), OSError for a file that can't be read
-    right now (in use, or on a drive that's offline), and RuntimeError when the decoder
-    couldn't start or failed some other way."""
+    right now (in use, or on a drive that's offline; audio.Stalled if it stopped answering),
+    and RuntimeError when the decoder couldn't start or failed some other way."""
     try:
         root = _root()
         _tidy(root)
@@ -92,18 +105,15 @@ def decode(source: Path) -> np.ndarray:
     except OSError as exc:  # not the file's doing: noted once, not tried on every look
         raise RuntimeError(f"the decoder couldn't start: {exc}") from exc
     try:
-        code = _run(source, folder, room)
-        if code is None:
-            raise audio.Refused(f"{source.name} took too long to read")
-        return _collect(source, folder, room, code)
+        return _collect(source, folder, room, _run(source, folder, room))
     finally:
         _remove(folder)
 
 
-def _run(source: Path, folder: Path, room: int) -> int | None:
+def _run(source: Path, folder: Path, room: int) -> int:
     """Runs the child on ``source`` in a job of its own, with ``room`` bytes for the audio.
-    Returns its exit code, or None if it ran out of time, and raises audio.NoRoom if it ran
-    out of room (it is ended then). Raises RuntimeError if it couldn't be started."""
+    Returns its exit code, or raises what it ran out of (_wait), with the child ended. Raises
+    RuntimeError if it couldn't be started."""
     python, env = _interpreter()
     try:
         job = _Job()
@@ -134,7 +144,7 @@ def _run(source: Path, folder: Path, room: int) -> int | None:
             except OSError:
                 pass  # it has stopped already: its exit code and errors say why
             child.stdin.close()
-            return _wait(child, source, folder)
+            return _wait(child, job, source, folder)
         finally:
             child.stdin.close()
             if child.poll() is None:  # out of time or room, or the engine is stopping
@@ -147,11 +157,11 @@ def _run(source: Path, folder: Path, room: int) -> int | None:
         job.close()  # kills anything still in the job
 
 
-def _wait(child: subprocess.Popen, source: Path, folder: Path) -> int | None:
-    """The child's exit code, or None once it has used up its time: START seconds, and
-    PER_SECOND more for each second of audio it has written so far. Raises audio.NoRoom once
-    the drive is down to what's kept free on it."""
-    began = time.monotonic()
+def _wait(child: subprocess.Popen, job: _Job, source: Path, folder: Path) -> int:
+    """The child's exit code. Raises audio.Refused when it has used up its CPU time,
+    audio.Stalled when it has waited for the file long enough, and audio.NoRoom once the
+    drive is down to what's kept free on it."""
+    patience, last = _Patience(source), time.monotonic()
     while True:
         try:
             return child.wait(POLL)
@@ -159,9 +169,40 @@ def _wait(child: subprocess.Popen, source: Path, folder: Path) -> int | None:
             pass
         if _full(folder):
             raise _no_room(source, folder)
-        seconds = min(_written(folder) / SAMPLE / audio.RATE, audio.MAX_SECONDS)
-        if time.monotonic() - began > START + PER_SECOND * seconds:
-            return None
+        now = time.monotonic()
+        passed, last = min(now - last, LATE), now
+        patience.look(passed, *job.used(), _written(folder))
+        if patience.busy <= 0:
+            raise audio.Refused(f"{source.name} took too long to read")
+        if patience.idle <= 0:
+            why = "its drive may be offline, or the file still downloading"
+            raise audio.Stalled(f"reading {source.name} stalled; {why}")
+
+
+class _Patience:
+    """How long the child may still go on: ``busy`` seconds of CPU time, and ``idle`` seconds
+    of waiting (what it didn't spend on the CPU). It starts with BUSY and IDLE, and what it
+    gets through gives some back, never past those: a file that hangs is ended that long
+    after it last got anywhere, however far it had got."""
+
+    def __init__(self, source: Path) -> None:
+        self.busy, self.idle = BUSY, IDLE
+        self._cpu = self._read = self._seconds = 0.0
+        try:
+            self._most = TIMES * source.stat().st_size + STARTING
+        except OSError:  # the child says why, if it can't open it either
+            self._most = STARTING
+
+    def look(self, passed: float, cpu: float, read: int, written: int) -> None:
+        """``passed`` seconds since the last look, and so far: the child's CPU time, the bytes
+        it has read, and the bytes of audio it has written."""
+        used, self._cpu = cpu - self._cpu, cpu
+        read = min(read, self._most)
+        came, self._read = (read - self._read) / SLOWEST, read
+        seconds = min(written / SAMPLE / audio.RATE, audio.MAX_SECONDS)
+        got, self._seconds = PER_SECOND * (seconds - self._seconds), seconds
+        self.busy = min(self.busy - used + got, BUSY)
+        self.idle = min(self.idle - max(passed - used, 0.0) + got + came, IDLE)
 
 
 def _written(folder: Path) -> int:
@@ -330,7 +371,8 @@ JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x0008
 JOB_OBJECT_LIMIT_JOB_MEMORY = 0x0200
 JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION = 0x0400
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
-JOB_OBJECT_EXTENDED_LIMITS = 9  # the JobObjectExtendedLimitInformation information class
+# The JobObjectBasicAndIoAccountingInformation and JobObjectExtendedLimitInformation classes.
+JOB_OBJECT_ACCOUNTING, JOB_OBJECT_EXTENDED_LIMITS = 8, 9
 PROCESS_TERMINATE = 0x0001
 PROCESS_SET_QUOTA = 0x0100
 
@@ -363,6 +405,20 @@ class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
     ]
 
 
+class JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_int64),
+        ("TotalKernelTime", ctypes.c_int64),
+        ("ThisPeriodTotalUserTime", ctypes.c_int64),
+        ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+        ("TotalPageFaultCount", wintypes.DWORD),
+        ("TotalProcesses", wintypes.DWORD),
+        ("ActiveProcesses", wintypes.DWORD),
+        ("TotalTerminatedProcesses", wintypes.DWORD),
+        ("IoInfo", IO_COUNTERS),
+    ]
+
+
 class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
     _fields_ = [
         ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
@@ -383,6 +439,11 @@ def _kernel32() -> ctypes.WinDLL:
     for function, argtypes, restype in (
         (kernel32.CreateJobObjectW, [ctypes.c_void_p, wintypes.LPCWSTR], HANDLE),
         (kernel32.SetInformationJobObject, [HANDLE, ctypes.c_int, ctypes.c_void_p, DWORD], BOOL),
+        (
+            kernel32.QueryInformationJobObject,
+            [HANDLE, ctypes.c_int, ctypes.c_void_p, DWORD, ctypes.c_void_p],
+            BOOL,
+        ),
         (kernel32.OpenProcess, [DWORD, BOOL, DWORD], HANDLE),
         (kernel32.AssignProcessToJobObject, [HANDLE, HANDLE], BOOL),
         (kernel32.TerminateJobObject, [HANDLE, wintypes.UINT], BOOL),
@@ -429,6 +490,15 @@ class _Job:
                 raise ctypes.WinError(ctypes.get_last_error())
         finally:
             kernel32.CloseHandle(process)
+
+    def used(self) -> tuple[float, int]:
+        """The CPU time the child has used so far, in seconds, and the bytes it has read."""
+        so_far = JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION()
+        _kernel32().QueryInformationJobObject(
+            self.handle, JOB_OBJECT_ACCOUNTING, ctypes.byref(so_far), ctypes.sizeof(so_far), None
+        )
+        cpu = so_far.TotalUserTime + so_far.TotalKernelTime  # in units of 100 ns
+        return cpu / 1e7, so_far.IoInfo.ReadTransferCount
 
     def end(self) -> None:
         """Ends every process in the job."""
@@ -522,8 +592,11 @@ def _misbehave(hook: str, out: BinaryIO) -> None:
     """What the tests make the child do once it has written some audio (TEST_HOOK)."""
     if hook == "crash":  # an access violation, as a crafted file can make FFmpeg have
         ctypes.c_int.from_address(0).value = 0
-    elif hook == "hang":
-        time.sleep(60)  # far past the tests' time limit, though not forever
+    elif hook == "hang":  # busy far past the tests' time limit, though not forever
+        while time.process_time() < 60:
+            pass
+    elif hook == "stall":  # as while a drive doesn't answer
+        time.sleep(60)
     elif hook == "unwritable":  # every write fails from here on, as on a full drive
         os.close(out.fileno())
 

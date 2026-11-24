@@ -294,18 +294,70 @@ def test_a_file_that_crashes_the_decoder_is_listed_and_the_look_goes_on(library,
 def test_a_file_that_hangs_the_decoder_is_ended_and_listed(library, monkeypatch):
     store, folder = library
     recording(folder / "hangs.wav")
-    monkeypatch.setenv(DECODE_TEST, "hang")  # a minute's sleep once it has some audio
-    monkeypatch.setattr("zachcap.decode_child.START", 2.0)
+    monkeypatch.setenv(DECODE_TEST, "hang")  # a minute's work once it has some audio
+    monkeypatch.setattr("zachcap.decode_child.BUSY", 2.0)
     watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
     watch.check(store)
 
     began = time.monotonic()
     assert watch.check(store) == []
-    assert time.monotonic() - began < 20  # ended at the time limit, not when the sleep ends
+    assert time.monotonic() - began < 20  # ended at the time limit, not when the work is done
 
     hung = [{"name": "hangs.wav", "error": "hangs.wav took too long to read", "retrying": False}]
     assert watch.failures == hung
     assert watch.check(store) == [] and watch.failures == hung  # not tried again
+
+
+def test_a_file_on_a_drive_that_stops_answering_is_tried_again(library, monkeypatch):
+    store, folder = library
+    recording(folder / "a-stalls.wav")
+    recording(folder / "b-fine.wav")
+    real = watchfolder.import_recording
+
+    def stall_on_the_first(store_, path):  # its decoder waits, once it has some audio
+        with monkeypatch.context() as patch:
+            if path.name == "a-stalls.wav":
+                patch.setenv(DECODE_TEST, "stall")
+                patch.setattr("zachcap.decode_child.IDLE", 2.0)
+            return real(store_, path)
+
+    monkeypatch.setattr(watchfolder, "import_recording", stall_on_the_first)
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    watch.check(store)
+    assert len(watch.check(store)) == 1  # b-fine.wav, in the same look
+    assert watch.failures == []
+
+    monkeypatch.setattr(watchfolder, "import_recording", real)  # it answers again
+    assert len(watch.check(store)) == 1 and watch.failures == []
+
+
+def test_a_file_whose_reading_keeps_stalling_is_listed_after_a_few_looks(library, monkeypatch):
+    # Each of those looks waits minutes for it, so it doesn't go on for ever.
+    store, folder = library
+    recording(folder / "cloud.wav")
+    real, reads = watchfolder.import_recording, []
+
+    def stalls(store_, path):
+        reads.append(path.name)
+        if len(reads) == 2:  # in use in between: that's no stall
+            raise PermissionError(13, "The process cannot access the file", str(path))
+        raise audio.Stalled(f"reading {path.name} stalled; its drive may be offline")
+
+    monkeypatch.setattr(watchfolder, "import_recording", stalls)
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    for _ in range(8):
+        watch.check(store)
+
+    assert len(reads) == 4  # three stalls
+    why = "reading cloud.wav stalled; its drive may be offline"
+    assert watch.failures == [{"name": "cloud.wav", "error": why, "retrying": False}]
+    assert watch.retry_failed(store) == 1  # Settings' Retry gives it three more
+    for _ in range(5):
+        watch.check(store)
+    assert len(reads) == 7
+    assert watch.retry_failed(store) == 1
+    monkeypatch.setattr(watchfolder, "import_recording", real)
+    assert len(watch.check(store)) == 1
 
 
 @pytest.fixture

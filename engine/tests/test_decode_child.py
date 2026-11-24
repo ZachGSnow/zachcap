@@ -122,55 +122,192 @@ def test_a_hang_is_ended_at_the_time_limit_and_leaves_nothing_behind(
     tmp_path: Path, folders, started, monkeypatch
 ):
     source = recording(tmp_path / "call.wav")
-    monkeypatch.setenv(decode_child.TEST_HOOK, "hang")  # a minute's sleep after some audio
-    monkeypatch.setattr(decode_child, "START", 2.0)
+    monkeypatch.setenv(decode_child.TEST_HOOK, "hang")  # a minute's work after some audio
+    monkeypatch.setattr(decode_child, "BUSY", 2.0)
     began = time.monotonic()
 
     with pytest.raises(audio.Refused, match=r"^call\.wav took too long to read$"):
         decode_child.decode(source)
 
+    assert time.monotonic() - began < 20  # at its limit, not when the work is done
+    (child,) = started
+    assert not running(child.pid) and list(folders.iterdir()) == []
+
+
+def test_a_stall_is_a_file_to_try_again_and_leaves_nothing_behind(
+    tmp_path: Path, folders, started, monkeypatch
+):
+    # A drive that stops answering keeps the child waiting, with no use of the CPU.
+    source = recording(tmp_path / "call.wav")
+    monkeypatch.setenv(decode_child.TEST_HOOK, "stall")  # a minute's sleep after some audio
+    monkeypatch.setattr(decode_child, "IDLE", 2.0)
+    began = time.monotonic()
+
+    with pytest.raises(audio.Stalled, match=r"^reading call\.wav stalled; its drive may be "):
+        decode_child.decode(source)
+
+    assert issubclass(audio.Stalled, OSError)
     assert time.monotonic() - began < 20  # at its limit, not when the sleep ends
     (child,) = started
     assert not running(child.pid) and list(folders.iterdir()) == []
 
 
 class Decoder:
-    """A child on a pretend clock: it writes ``speed`` seconds of audio a second until
-    ``hangs`` seconds in, then nothing more."""
+    """A child and its job on a pretend clock: it reads ``link`` bytes and writes ``speed``
+    seconds of audio a second, with ``cores`` of the CPU, until ``stops`` seconds in. Then it
+    hangs (``after`` cores), or is done (None)."""
 
-    def __init__(self, folder: Path, speed: float, hangs: float) -> None:
-        self.written, self.speed, self.hangs = folder / decode_child.AUDIO, speed, hangs
-        self.now = 0.0
-        self.written.touch()
+    def __init__(
+        self,
+        speed: float = 0.0,
+        link: float = 0.0,
+        cores: float = 0.0,
+        stops: float = 0.0,
+        after: float | None = 0.0,
+        sleeps: float | None = None,
+    ) -> None:
+        self.speed, self.link, self.cores = speed, link, cores
+        self.stops, self.after, self.sleeps = stops, after, sleeps
+        self.now = self.ran = 0.0
 
     def wait(self, timeout: float) -> int:
+        if self.after is None and self.ran >= self.stops:
+            return 0
+        self.ran += timeout
         self.now += timeout
-        seconds = self.speed * min(self.now, self.hangs)
-        os.truncate(self.written, int(seconds * RATE) * 2)
+        if self.sleeps is not None and self.ran >= self.sleeps:
+            self.now += 8 * 3600  # the PC slept: the clock ran on, the child didn't
+            self.sleeps = None
         raise subprocess.TimeoutExpired("decoder", timeout)
+
+    def used(self) -> tuple[float, int]:
+        working = min(self.ran, self.stops)
+        cpu = self.cores * working + (self.after or 0.0) * (self.ran - working)
+        return cpu, int(self.link * working)
+
+    def written(self, folder: Path) -> int:
+        return int(self.speed * min(self.ran, self.stops) * RATE) * 2
+
+
+MBPS = 1_000_000 / 8
+HOURS = 3600.0
+
+
+@pytest.fixture
+def outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Waits for a pretend child reading a file of ``size`` bytes. Returns how it ended."""
+
+    def run(child: Decoder, size: float = 0) -> int | type[Exception]:
+        info = SimpleNamespace(st_size=int(size))
+        source = SimpleNamespace(name="call.mkv", stat=lambda: info)
+        child.now = child.ran = 0.0  # it was made when the tests were collected
+        monkeypatch.setattr(decode_child, "time", SimpleNamespace(monotonic=lambda: child.now))
+        monkeypatch.setattr(decode_child, "POLL", 1.0)
+        monkeypatch.setattr(decode_child, "_written", child.written)
+        monkeypatch.setattr(decode_child, "_full", lambda folder: False)
+        try:
+            return decode_child._wait(child, child, source, tmp_path)
+        except (audio.Refused, audio.Stalled) as exc:
+            return type(exc)
+
+    return run
 
 
 @pytest.mark.parametrize(
-    ("speed", "hangs", "cap", "ended"),
+    ("child", "ended"),
     [
-        (0, 0, None, 60),  # hangs at once: a minute in
-        (100, 2, None, 60 + 0.5 * 200),  # 200 s of audio, then a hang
-        (4, 100, None, 60 + 0.5 * 400),  # slower, and longer: the same rule
-        (1, 10_000, None, 120),  # still going, but only at real time: too slow
-        (100, 2, 100, 60 + 0.5 * 100),  # more than a file may hold doesn't buy more time
+        (Decoder(after=1.0), 60),  # hangs FFmpeg at once: a minute in
+        (Decoder(after=0.25), 240),  # the same on a busy PC, with a quarter of a core
+        # 200 s of audio, or hours of it, and then a hang: a minute after that too
+        (Decoder(speed=100, cores=1.0, stops=2, after=1.0), 2 + 60),
+        (Decoder(speed=100, cores=1.0, stops=300, after=1.0), 300 + 60),
+        # still going, but only at real time: too slow
+        (Decoder(speed=1, cores=1.0, stops=10 * HOURS), 120),
     ],
 )
-def test_the_time_limit_grows_with_the_audio_written(
-    tmp_path: Path, monkeypatch, speed: float, hangs: float, cap: int | None, ended: float
-):
-    child = Decoder(tmp_path, speed, hangs)
-    monkeypatch.setattr(decode_child, "time", SimpleNamespace(monotonic=lambda: child.now))
-    if cap:
-        monkeypatch.setattr(audio, "MAX_SECONDS", cap)
+def test_a_file_that_keeps_the_cpu_busy_and_gets_nowhere_is_ended(outcome, child, ended):
+    assert outcome(child) is audio.Refused
 
-    assert decode_child._wait(child, Path("call.wav"), tmp_path) is None  # ran out of time
+    assert ended <= child.ran <= ended + 1
 
-    assert ended < child.now <= ended + decode_child.POLL
+
+@pytest.mark.parametrize(
+    ("child", "size", "ended"),
+    [
+        (Decoder(), 0, 300),  # a drive that doesn't answer at all
+        # one that stops answering part-way, whatever it did before
+        (Decoder(speed=2, link=10 * MBPS, cores=0.1, stops=600), 10e9, 600 + 300),
+        (Decoder(link=1024, stops=HOURS), 10e9, 305),  # or only just answers: 8 kbps
+        # A file FFmpeg reads over and over: until it's been read three times, and the wait.
+        (Decoder(link=10 * MBPS, cores=0.01, stops=10 * HOURS), 100e6, 3 * 80 + 307),
+    ],
+)
+def test_a_file_that_stops_coming_is_given_up_for_now(outcome, child, size, ended):
+    assert outcome(child, size) is audio.Stalled
+
+    assert ended <= child.ran <= ended + 10
+
+
+@pytest.mark.parametrize(
+    ("child", "size"),
+    [
+        # An hour's 2 Mbps Teams recording on a mapped drive, over 2.5 Mbps: its audio comes
+        # at 1.25 times real time.
+        (Decoder(speed=1.25, link=2.5 * MBPS, cores=0.02, stops=HOURS / 1.25, after=None), 9e8),
+        # 8 GB of video with its audio at the very end, over 10 Mbps
+        (Decoder(link=10 * MBPS, cores=0.005, stops=8e9 / (10 * MBPS), after=None), 8e9),
+        # A cloud file that takes four minutes to come down before any of it is read
+        (Decoder(stops=240, after=None), 1e9),
+        # 12 hours of audio at four times real time, on a slow PC
+        (Decoder(speed=4, link=MBPS, cores=1.0, stops=3 * HOURS, after=None), 1e9),
+    ],
+)
+def test_a_slow_file_that_keeps_coming_is_read_to_the_end(outcome, child, size):
+    assert outcome(child, size) == 0
+
+
+@pytest.mark.parametrize("after", [1.0, 0.0])
+def test_the_pc_sleeping_meanwhile_doesnt_count(outcome, after):
+    # The clock runs on while the PC sleeps; the child, its CPU time and the file don't.
+    asleep = Decoder(speed=2, link=10 * MBPS, cores=0.1, stops=600, after=None, sleeps=300)
+    assert outcome(asleep, 1e9) == 0 and asleep.now > 8 * HOURS
+
+    limit = {1.0: 60, 0.0: 300}[after]  # nor for a file that hangs, or stalls
+    hanging = Decoder(after=after, sleeps=limit / 2)
+    assert outcome(hanging) is {1.0: audio.Refused, 0.0: audio.Stalled}[after]
+    assert limit - 1 <= hanging.ran <= limit + 1
+
+
+def test_audio_past_what_a_file_may_hold_buys_no_more_time(outcome, monkeypatch):
+    monkeypatch.setattr(audio, "MAX_SECONDS", 100)
+    child = Decoder(speed=1, cores=0.9, stops=10 * HOURS)  # half a second for each, then none
+
+    assert outcome(child) is audio.Refused
+
+    assert 120 <= child.ran <= 125  # 60 + 0.5 * 100 of CPU time
+
+
+def test_the_job_counts_the_childs_cpu_time_and_what_it_reads(tmp_path: Path):
+    (tmp_path / "call.mkv").write_bytes(bytes(2**20))
+    python, env = decode_child._interpreter()
+    read = "sys.stdin.read(); open(sys.argv[1], 'rb', buffering=0).read(2**20)"
+    spin = "while time.process_time() < 1: pass"
+    job = decode_child._Job()
+    child = subprocess.Popen(
+        [python, "-I", "-c", f"import sys, time; {read}\n{spin}", str(tmp_path / "call.mkv")],
+        stdin=subprocess.PIPE,
+        env=env,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    try:
+        job.add(child.pid)
+        child.stdin.close()
+        assert eventually(lambda: job.used()[0] > 0.5)  # counted as it runs
+        assert child.wait(30) == 0
+        cpu, read = job.used()
+        assert 0.9 < cpu < 10 and 2**20 <= read < 4 * 2**20
+    finally:
+        job.close()
 
 
 def free_space(monkeypatch: pytest.MonkeyPatch, free: Callable[[], int]) -> None:
@@ -226,7 +363,7 @@ def test_a_decode_that_fills_the_drive_is_ended_with_space_to_spare(
     # A file with no length, or a wrong one: the drive gets down to what's kept for a
     # recording while it's decoded.
     source = recording(tmp_path / "call.wav")
-    monkeypatch.setenv(decode_child.TEST_HOOK, "hang")  # a minute's sleep after some audio
+    monkeypatch.setenv(decode_child.TEST_HOOK, "stall")  # a minute's sleep after some audio
 
     def written() -> int:
         return sum(path.stat().st_size for path in folders.glob(f"*/{decode_child.AUDIO}"))
@@ -330,7 +467,7 @@ def test_the_decoder_goes_when_the_engine_does(tmp_path: Path, folders):
     source = recording(tmp_path / "call.wav")
     python, env = decode_child._interpreter()
     temp = str(folders.parent)
-    env.update({decode_child.TEST_HOOK: "hang", "TMP": temp, "TEMP": temp})
+    env.update({decode_child.TEST_HOOK: "stall", "TMP": temp, "TEMP": temp})
     engine = subprocess.Popen(
         [python, "-I", "-c", ENGINE, str(source)],
         stdout=subprocess.PIPE,
