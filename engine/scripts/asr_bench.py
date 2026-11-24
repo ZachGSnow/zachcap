@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from zachcap import cuda
+from zachcap import cuda, models
 
 
 class GpuMemorySampler(threading.Thread):
@@ -79,7 +79,11 @@ def word_error_rate(reference: list[str], hypothesis: list[str]) -> float:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("audio", type=Path)
-    parser.add_argument("--model", default="large-v3-turbo")
+    parser.add_argument(
+        "--model",
+        default="large-v3-turbo",
+        help="a name pinned in zachcap/models.py, or a model folder",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--compute-type", default="int8_float16")
     parser.add_argument("--beam-size", type=int, default=5)
@@ -91,7 +95,7 @@ def main() -> None:
 
     gpu = cuda.prepare()
     print(f"CUDA available: {gpu}")
-    from faster_whisper import BatchedInferencePipeline, WhisperModel
+    from faster_whisper import BatchedInferencePipeline
 
     audio = load_16k_mono(args.audio)
     if args.repeat > 1:
@@ -102,7 +106,7 @@ def main() -> None:
     sampler = GpuMemorySampler()
     sampler.start()
     started = time.perf_counter()
-    model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type)
+    model = models.whisper(args.model, device=args.device, compute_type=args.compute_type)
     load_seconds = time.perf_counter() - started
 
     options = {"language": "en", "beam_size": args.beam_size, "word_timestamps": True}
