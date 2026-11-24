@@ -23,6 +23,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import soundfile as sf
@@ -44,6 +45,7 @@ from . import (
     gate,
     imports,
     insights,
+    live,
     mentions,
     paths,
     pipeline,
@@ -196,6 +198,7 @@ class SettingsBody(BaseModel):
     stop_when_call_ends: bool | None = None
     auto_record: bool | None = None  # start recording when a chosen call app takes the mic
     auto_record_apps: list[str] | None = None  # the call apps that do (see autorecord)
+    live_transcript: bool | None = None  # a live transcript in a panel over the call
     export_work_log: bool | None = None  # keep a daily and weekly work log in the export folder
     dictation: bool | None = None  # hold the dictation keys to dictate into any app
     dictation_snippets: str | None = None  # "cue: text to type", one per line
@@ -231,18 +234,32 @@ def work_log_period(period: str, day: str | None) -> tuple[str, date]:
         raise HTTPException(status_code=400, detail="Use a date like 2026-11-23") from None
 
 
+class LiveTranscript(NamedTuple):
+    """A recording's live transcript, kept from its start until the next recording starts."""
+
+    meeting_id: int
+    live: live.Live
+    me: str  # your name as the recording started: the panel's name for your mic's lines
+    # Names this one for the panel's cursor: line ids count from 1 in each, and a meeting id
+    # can come back after a recording that wasn't kept.
+    run: str
+
+
 class Worker:
-    """Runs processing jobs one at a time and remembers the latest message per meeting."""
+    """Runs processing jobs one at a time and remembers the latest message per meeting.
+    Each takes the GPU from the live transcript first (``gpu``), which waits meanwhile."""
 
     def __init__(self) -> None:
         self.jobs: queue.Queue[int] = queue.Queue()
         self.progress: dict[int, str] = {}
+        self.gpu = live.GpuTurns()
         threading.Thread(target=self._run, name="zachcap-worker", daemon=True).start()
 
     def submit(self, meeting_id: int) -> None:
         if self.progress.get(meeting_id) == "queued":
             return
         self.progress[meeting_id] = "queued"
+        self.gpu.meeting_waiting()  # the live transcript lets go of the GPU now
         self.jobs.put(meeting_id)
 
     def _run(self) -> None:
@@ -251,11 +268,12 @@ class Worker:
             store = None
             try:
                 store = Store()
-                pipeline.process(
-                    store,
-                    meeting_id,
-                    log=lambda msg, m=meeting_id: self.progress.__setitem__(m, msg),
-                )
+                with self.gpu.for_meeting():
+                    pipeline.process(
+                        store,
+                        meeting_id,
+                        log=lambda msg, m=meeting_id: self.progress.__setitem__(m, msg),
+                    )
                 self.progress.pop(meeting_id, None)
                 tickets.fill(store, meeting_id)
                 export.auto_export(store, meeting_id)
@@ -265,6 +283,8 @@ class Worker:
             finally:
                 if store is not None:
                     store.close()
+                if self.jobs.empty():  # none left: the live transcript may have the GPU
+                    self.gpu.meetings_done()
 
 
 def recover(store: Store, submit: Callable[[int], None]) -> None:
@@ -346,6 +366,33 @@ def create_app(token: str) -> FastAPI:
     finally:
         startup.close()
 
+    # Whether there's a CUDA GPU: until Settings says otherwise, recordings have a live
+    # transcript only then (live_on). The first look takes seconds, so serve() has it done
+    # on its own thread as the engine starts.
+    gpu = live.GpuCheck()
+
+    def look_for_gpu() -> None:
+        """Looks for a CUDA GPU, when the live transcript's default still depends on it."""
+        store = Store()
+        try:
+            undecided = store.setting(live.SETTING) is None
+        finally:
+            store.close()
+        if undecided:
+            gpu.look()
+
+    app.state.look_for_gpu = look_for_gpu
+
+    def live_on(store: Store, wait: bool = False) -> bool:
+        """Whether recordings have a live transcript: as set in Settings, else only with a
+        CUDA GPU, where a line takes a fraction of a second. On the CPU it competes with the
+        call app and the recorder for cores, so there it waits to be turned on. A recording
+        doesn't ``wait`` for the GPU check: one started before it's done has none."""
+        setting = store.setting(live.SETTING)
+        if setting is not None:
+            return setting == "1"
+        return gpu.look() if wait else gpu.known()
+
     def remove_old_audio() -> None:
         """The "keep recordings" setting, applied at startup and every few hours after."""
         while True:
@@ -359,6 +406,25 @@ def create_app(token: str) -> FastAPI:
             time.sleep(6 * 3600)
 
     threading.Thread(target=remove_old_audio, name="zachcap-retention", daemon=True).start()
+
+    # The live transcript of the recording running now, or of the last one until the next
+    # starts (a LiveTranscript, swapped whole): kept in memory only.
+    live_state: dict = {"now": None}
+
+    def stop_live(meeting_id: int | None = None) -> None:
+        """Stops the live transcript (that recording's, when given). It doesn't wait: the
+        worker frees its speech model after the line it's on, and the meeting's own
+        transcript takes the GPU from it (Worker)."""
+        now = live_state["now"]
+        if now is not None and meeting_id in (None, now.meeting_id):
+            now.live.stop()
+
+    def forget_live(meeting_id: int) -> None:
+        """A recording that isn't kept takes its live lines with it."""
+        now = live_state["now"]
+        if now is not None and now.meeting_id == meeting_id:
+            now.live.stop()
+            live_state["now"] = None
 
     def finish_recording(meeting_id: int | None = None) -> int | None:
         """Stop the recorder, if one is running, and save its meeting. Returns the meeting id.
@@ -380,6 +446,9 @@ def create_app(token: str) -> FastAPI:
             except Exception:  # the audio saved so far still counts
                 traceback.print_exc()
             finally:
+                # After the last audio reached it: its speech model leaves the GPU for the
+                # meeting's own transcript, which the caller submits next.
+                stop_live(meeting_id)
                 if watch is not None:  # kept awake until the last audio is written
                     watch.stop()
             store = Store()
@@ -406,10 +475,21 @@ def create_app(token: str) -> FastAPI:
             while folder.exists():
                 stamp += timedelta(seconds=1)
                 folder = paths.meetings_dir() / stamp.strftime("%Y-%m-%d_%H%M%S")
+            # A live transcript of its own: one that ended a moment ago (Stop, then Start)
+            # may still be finishing a line, and it's never this one's.
+            listening = None
+            if live_on(store):
+                names = [
+                    p["name"] for p in store.people() if p["name"].lower() not in {"you", "me"}
+                ]
+                hotwords = words.parse(store.setting("vocabulary")).hotwords(names)
+                speech = live.Speech(language_of(store), hotwords, gpu=worker.gpu)
+                listening = live.Live(speech)
             recorder = Recorder(
                 folder,
                 mic_name=store.setting("mic_device") or None,
                 output_name=store.setting("output_device") or None,
+                listener=listening.feed if listening is not None else None,
             )
             try:
                 recorder.start()
@@ -445,6 +525,13 @@ def create_app(token: str) -> FastAPI:
             recording.update(
                 recorder=recorder, meeting_id=meeting_id, title=title, notes=0, watch=watch
             )
+            stop_live()  # the last recording's (stopped already, normally)
+            live_state["now"] = None
+            if listening is not None:
+                me = store.me()["name"]
+                run = pysecrets.token_hex(8)
+                live_state["now"] = LiveTranscript(meeting_id, listening, me, run)
+                listening.start()
         return meeting_id
 
     def stop_recording(meeting_id: int | None = None) -> int | None:
@@ -478,6 +565,7 @@ def create_app(token: str) -> FastAPI:
             if only_if_worthless and (call_heard or store.notes(meeting_id)):
                 worker.submit(meeting_id)
                 return "kept"
+            forget_live(meeting_id)  # nothing of it is kept, its live lines included
             meeting = store.meeting(meeting_id)
             if meeting is None:
                 return "deleted"
@@ -565,6 +653,7 @@ def create_app(token: str) -> FastAPI:
     app.state.finish_recording = finish_recording
     app.state.call_watch = call_watch
     app.state.submit = worker.submit
+    app.state.worker_gpu = worker.gpu  # shared with the live transcript (tests look)
     # The watch folder's looks (a thread started by serve()); Settings reads what it found.
     app.state.folder_watch = watchfolder.FolderWatch(worker.submit)
 
@@ -1328,6 +1417,7 @@ def create_app(token: str) -> FastAPI:
         if recorder is None or meeting_id is None:
             return {"recording": False, **events}
         watch = recording.get("watch")
+        now = live_state["now"]
         return {
             **events,
             # The recording it started (if it's this one) and this one's countdown to stop:
@@ -1335,6 +1425,8 @@ def create_app(token: str) -> FastAPI:
             **call_watch.status(meeting_id),
             "recording": True,
             "meeting_id": meeting_id,
+            # A live transcript runs for it (the shell opens the live panel then).
+            "live": now is not None and now.meeting_id == meeting_id and now.live.on,
             "title": recording.get("title"),
             "elapsed": round(recorder.elapsed, 1),
             "levels": recorder.levels(),
@@ -1379,6 +1471,39 @@ def create_app(token: str) -> FastAPI:
         if meeting_id is None:
             raise HTTPException(status_code=409, detail="Not recording")
         return {"meeting_id": meeting_id}
+
+    @app.get("/api/live", dependencies=auth)
+    def live_lines(run: str | None = None, after: int = 0):
+        """The live transcript of the recording running now (or of the one that just
+        ended): the lines after the panel's cursor (``after``, a line id of the transcript
+        ``run``; all of them for another), and those up to it left out as echo since, for the
+        panel to take away. With the recording's clock, so the panel needs nothing else. Kept
+        in memory only, never cached by the page."""
+        meeting_id = recording.get("meeting_id")  # read first: Stop takes the recorder first
+        recorder = recording.get("recorder")
+        now = live_state["now"]
+        current = now.live if now is not None else None
+        this_one = recorder is not None and now is not None and now.meeting_id == meeting_id
+        if now is None or run != now.run:
+            after = 0
+        return JSONResponse(
+            {
+                "recording": recorder is not None,
+                "run": now.run if now is not None else None,
+                "meeting_id": now.meeting_id if now is not None else None,
+                "on": this_one and current.on,
+                "elapsed": round(recorder.elapsed, 1) if this_one else None,
+                "paused": bool(recorder.paused) if this_one else False,
+                "me": now.me if now is not None else None,
+                "lines": current.lines(after) if current is not None else [],
+                "dropped": current.dropped(after) if current is not None else [],
+                # Waiting for the GPU, which a meeting being processed has for now.
+                "waiting": bool(current.waiting) if this_one else False,
+                "error": current.error if current is not None else None,
+                "skipped": round(current.skipped) if current is not None else 0,
+            },
+            headers=NO_STORE,
+        )
 
     @app.post("/api/record/keep", dependencies=auth)
     def record_keep(body: RecordingRef | None = None):
@@ -1639,6 +1764,9 @@ def create_app(token: str) -> FastAPI:
                     autorecord.chosen(store.setting(autorecord.APPS_SETTING))
                 ),
                 "auto_record_choices": autorecord.choosable(),
+                # A live transcript in a panel over the call while recording: as set, else
+                # on only with a CUDA GPU (live_on).
+                "live_transcript": live_on(store, wait=True),
                 "export_work_log": store.setting("export_work_log") == "1",
                 "dictation": store.setting(dictation.SETTING) == "1",
                 "dictation_snippets": store.setting(dictation.SNIPPETS, ""),
@@ -1710,6 +1838,10 @@ def create_app(token: str) -> FastAPI:
             store.set_setting("stop_when_call_ends", "1" if body.stop_when_call_ends else "0")
         if body.auto_record is not None:
             store.set_setting(autorecord.SETTING, "1" if body.auto_record else "0")
+        if body.live_transcript is not None:
+            store.set_setting(live.SETTING, "1" if body.live_transcript else "0")
+            if not body.live_transcript:
+                stop_live()  # this call's too: its model leaves the GPU now (on: from the next)
         if body.auto_record_apps is not None:  # checked above
             store.set_setting(autorecord.APPS_SETTING, ", ".join(sorted(body.auto_record_apps)))
         call_settings_changed()  # the call watch reads the new ones at its next look
@@ -1848,8 +1980,8 @@ def serve(port: int, token: str) -> None:
             daemon=True,
         ).start()
     # Recordings saved in the watch folder import themselves (off until a folder is chosen),
-    # and calls are recorded on their own. Started here rather than in create_app, so tests
-    # never leave one running.
+    # calls are recorded on their own, and the GPU is looked for (the live transcript's
+    # default). Started here rather than in create_app, so tests never leave one running.
     threading.Thread(
         target=app.state.folder_watch.run_forever,
         name="zachcap-watch-folder",
@@ -1858,6 +1990,7 @@ def serve(port: int, token: str) -> None:
     threading.Thread(
         target=app.state.call_watch.run_forever, name="zachcap-call-watch", daemon=True
     ).start()
+    threading.Thread(target=app.state.look_for_gpu, name="zachcap-gpu-check", daemon=True).start()
     sock = listen_on(port)
     report_port(sock, os.environ.get("ZACHCAP_PORT_FILE"))
     uvicorn.Server(uvicorn.Config(app, log_level="warning")).run(sockets=[sock])

@@ -45,6 +45,10 @@ LOOK_FOR_DEVICES = 2.0  # seconds between looks for outputs plugged in or unplug
 RETRY_FAILED_DEVICE = 30.0
 WRITE_EVERY = 0.1
 
+# Hears each track's audio as it's written: (track name, mono block, rate, the block's first
+# frame on the recording's timeline). The live transcript listens (live.py).
+Listener = Callable[[str, np.ndarray, int, int], object]
+
 
 def _note_level(track, level_dbfs: float) -> None:
     """Remembers when a track last had any signal, and last had speech-level sound."""
@@ -68,6 +72,7 @@ class ChunkWriter:
         chunk_seconds: int,
         errors: list[str],
         subtype: str = "PCM_16",
+        listener: Listener | None = None,
     ) -> None:
         self.folder = folder
         self.name = name
@@ -80,10 +85,23 @@ class ChunkWriter:
         self.chunks: list[str] = []
         self._current: sf.SoundFile | None = None
         self._written = 0
+        self._listener = listener
+        self._heard = 0  # frames handed to the listener: the timeline, even after a disk error
 
     def write(self, mono: np.ndarray) -> None:
-        if self.failed:
-            return
+        if not self.failed:
+            self._save(mono)
+        if self._listener is not None:
+            # After the disk, so whatever listens never holds the recording up; and one that
+            # fails is let go, so it fails once, not ten times a second.
+            try:
+                self._listener(self.name, mono, self.rate, self._heard)
+            except Exception:
+                traceback.print_exc()
+                self._listener = None
+        self._heard += len(mono)
+
+    def _save(self, mono: np.ndarray) -> None:
         try:
             if self._current is None or self._written >= self.chunk_frames:
                 if self._current is not None:
@@ -130,6 +148,7 @@ class TrackRecorder:
         speech_dbfs: float = MIC_SPEECH_DBFS,
         t0: float | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        listener: Listener | None = None,
     ) -> None:
         self.name = name
         self.device = device
@@ -148,7 +167,9 @@ class TrackRecorder:
         self._given_t0 = t0 is not None
         self._clock = clock
         self._mixer = Mixer(self.rate, t0, early_follows_on=True) if t0 is not None else None
-        self._chunks = ChunkWriter(folder, name, self.rate, chunk_seconds, self.errors)
+        self._chunks = ChunkWriter(
+            folder, name, self.rate, chunk_seconds, self.errors, listener=listener
+        )
         self._on_first_buffer = on_first_buffer
         self._queue: queue.Queue[tuple[float, bytes] | None] = queue.Queue()
         self._writer = threading.Thread(target=self._write, name=f"{name}-writer", daemon=True)
@@ -302,6 +323,7 @@ class AllOutputsTrack:
         on_first_buffer: Callable[[], object] | None = None,
         clock: Callable[[], float] = time.perf_counter,
         api=None,
+        listener: Listener | None = None,
     ) -> None:
         self.rate = EVERY_OUTPUT_RATE
         self.device = {"name": "Every speaker and headset"}
@@ -316,7 +338,13 @@ class AllOutputsTrack:
         self._api = api if api is not None else _loopback_api()
         self._on_first_buffer = on_first_buffer
         self._chunks = ChunkWriter(
-            folder, self.name, self.rate, chunk_seconds, self.errors, subtype="PCM_24"
+            folder,
+            self.name,
+            self.rate,
+            chunk_seconds,
+            self.errors,
+            subtype="PCM_24",
+            listener=listener,
         )
         self._mixer = Mixer(self.rate, t0)
         self._lock = threading.Lock()  # the mixer: capture threads, the writer, stop
@@ -525,11 +553,13 @@ class Recorder:
         chunk_seconds: int = 300,
         mic_name: str | None = None,
         output_name: str | None = None,
+        listener: Listener | None = None,
     ) -> None:
         self.folder = folder
         self.chunk_seconds = chunk_seconds
         self.mic_name = mic_name
         self.output_name = output_name
+        self.listener = listener
         self.started_at: datetime | None = None
         self._t0 = 0.0
         self._pa: pyaudio.PyAudio | None = None
@@ -559,7 +589,13 @@ class Recorder:
         self.started_at = datetime.now().astimezone()
         self._t0 = time.perf_counter()
         if loopback is None:
-            system = AllOutputsTrack(self.folder, self.chunk_seconds, self._t0, self._save_info)
+            system = AllOutputsTrack(
+                self.folder,
+                self.chunk_seconds,
+                self._t0,
+                self._save_info,
+                listener=self.listener,
+            )
         else:
             system = TrackRecorder(
                 "system",
@@ -569,9 +605,16 @@ class Recorder:
                 self._save_info,
                 speech_dbfs=CALL_SPEECH_DBFS,
                 t0=self._t0,
+                listener=self.listener,
             )
         mic_track = TrackRecorder(
-            "mic", mic, self.folder, self.chunk_seconds, self._save_info, t0=self._t0
+            "mic",
+            mic,
+            self.folder,
+            self.chunk_seconds,
+            self._save_info,
+            t0=self._t0,
+            listener=self.listener,
         )
         self.tracks = {"mic": mic_track, "system": system}
         for track in self.tracks.values():

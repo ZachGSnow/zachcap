@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Bookmark, Camera, Circle, Megaphone, Mic, Pause, Play, Square, Timer, TriangleAlert } from "lucide-react";
+import { Bookmark, Camera, Captions, Circle, Megaphone, Mic, Pause, Play, Square, Timer, TriangleAlert } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -29,6 +29,12 @@ type AutoStop = { reason: "call" | "quiet"; in: number };
 
 /** An automatic recording can be undone this long: past it, Stop keeps what was recorded. */
 const DECLINE_WITHIN = 120;
+
+/** Runs `show` (a toast) only when the window is in front: behind the call, the shell says
+ * it with a Windows notification (follow_engine in lib.rs). */
+async function inFront(show: () => unknown) {
+  if (await windowInFront()) show();
+}
 
 /** Settings tells the rest of the page when something it reads changed (the shortcuts). */
 export const SETTINGS_CHANGED = "zachcap:settings-changed";
@@ -110,7 +116,8 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
   }, [setDraft]);
 
   /** A recording saved: open it, unless it stopped on its own while something on screen is
-   * being done (a dialog, a line being fixed); then it's offered instead. */
+   * being done (a dialog, a line being fixed); then it's offered instead. Stopped on its own,
+   * the shell has already said so with a Windows notification if the window was behind. */
   const opened = useCallback(
     (meetingId: number, why: string | null) => {
       if (why && busyOnScreen()) {
@@ -121,7 +128,8 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
         });
         return;
       }
-      void announce("Recording saved", `${why ? `${why} ` : ""}Transcribing and finding speakers...`, "success");
+      if (why) void inFront(() => toast.success("Recording saved", { description: `${why} Transcribing and finding speakers...` }));
+      else void announce("Recording saved", "Transcribing and finding speakers...", "success");
       onSaved(meetingId);
     },
     [onSaved],
@@ -253,9 +261,11 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     }
   }, [refresh, setDraft, meetingId]);
 
-  // What the engine did on its own: said once each, oldest first, as a Windows notification
-  // when the window is behind the call. What happened before this page loaded is old news;
-  // all that an engine started again did is news, though it numbers its events from 1 again.
+  // What the engine did on its own: said once each, oldest first, as a toast when the window
+  // is in front. When it isn't, the shell sends the Windows notification instead (it follows
+  // the same events with a cursor of its own, and a hidden window's timers run late). What
+  // happened before this page loaded is old news; all that an engine started again did is
+  // news, though it numbers its events from 1 again.
   const boot = state?.boot;
   const events = state?.events;
   useEffect(() => {
@@ -266,11 +276,11 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
   function said(event: CallEvent) {
     const app = event.app ?? "The call app";
     if (event.kind === "started") {
-      void announce(`Recording your ${app} call`, "It stops when the call ends. Not one to keep? Press Don't record in ZachCap.");
+      void inFront(() => toast(`Recording your ${app} call`, { description: "It stops when the call ends. Not one to keep? Press Don't record." }));
     } else if (event.kind === "stopped" && event.meeting_id !== null) {
       opened(event.meeting_id, event.reason === "quiet" ? "It stopped after ten quiet minutes." : "It stopped when the call ended.");
     } else if (event.kind === "failed") {
-      void announce(`Couldn't record the ${app} call`, event.detail ?? "", "error");
+      void inFront(() => toast.error(`Couldn't record the ${app} call`, { description: event.detail ?? "" }));
     } else if (event.kind === "declined") {
       toast.success("Deleted", { description: `This ${app} call won't be recorded.` });
     } else if (event.kind === "discarded") {
@@ -560,6 +570,18 @@ export function RecordingBar() {
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
+          {state.live && isTauri() && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-8"
+              title="Show the live panel: the call as it happens, over the call"
+              aria-label="Show the live panel"
+              onClick={() => void invoke("show_live_panel").catch(() => undefined)}
+            >
+              <Captions className="size-4" />
+            </Button>
+          )}
           {state.auto?.meeting_id === state.meeting_id && state.elapsed < DECLINE_WITHIN && (
             <Button
               size="sm"

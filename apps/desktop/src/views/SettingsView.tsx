@@ -90,6 +90,7 @@ type SettingsChange = Partial<{
   stop_when_call_ends: boolean;
   auto_record: boolean;
   auto_record_apps: string[];
+  live_transcript: boolean;
   export_work_log: boolean;
   dictation: boolean;
   dictation_snippets: string;
@@ -858,6 +859,17 @@ export function SettingsView() {
             </div>
           )}
           <Row
+            label="Live panel during calls"
+            help="A small panel over the call shows what's being said a moment after each person stops talking. It uses the GPU during the call, or the CPU when there's none, so it's off by default on a PC without an NVIDIA GPU. It's left out of screen shares and screenshots; close it for one call with its X. Turning it off stops it at once; turning it on starts it with the next recording."
+          >
+            <Switch
+              className="ml-auto"
+              aria-label="Live panel during calls"
+              checked={settings?.live_transcript ?? false}
+              onCheckedChange={(on) => void save({ live_transcript: on })}
+            />
+          </Row>
+          <Row
             label="Stop when the call ends"
             help="For recordings you start: once Teams or another call app lets go of your microphone and nobody has spoken for ten seconds, ZachCap stops a few seconds later; after ten quiet minutes in a room, a minute later. Keep recording calls it off."
           >
@@ -871,7 +883,7 @@ export function SettingsView() {
         </Section>
 
         <Section icon={<Speaker className="size-3.5" />} title="Transcription">
-          <Row label="Language" help="Whisper runs on your GPU. Pick the meeting language, or let it detect.">
+          <Row label="Language" help="Whisper runs on this PC, on the GPU when there is one. Pick the meeting language, or let it detect.">
             <Select
               label="Language"
               value={settings?.language ?? "en"}
