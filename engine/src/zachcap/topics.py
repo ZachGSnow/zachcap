@@ -151,6 +151,79 @@ def counts(store: Store) -> dict[str, dict[int, int]]:
     return {name: dict(per) for name, per in result.items()}
 
 
+# Which meetings say a topic, for related meetings: kept per topic's words, like the counts.
+_saying: dict[tuple, dict[tuple, frozenset[int]]] = {}
+
+
+def in_common(store: Store, meeting_id: int, most_lines: int) -> dict[str, frozenset[int]]:
+    """The topics said in a meeting, most said first, each with every meeting that says it (this
+    one too): as ``counts`` would find them, but only these topics, and only as far as each
+    meeting's first mention, so much quicker. A topic on more than ``most_lines`` lines of the
+    library is said all over it, so it's left out."""
+    topics = saved(store)
+    if not topics:
+        return {}
+    first, last = store.db.execute(
+        "SELECT MIN(id), MAX(id) FROM segments WHERE meeting_id = ?", (meeting_id,)
+    ).fetchone()
+    if first is None:  # nothing said in it
+        return {}
+    version = store.lines_version()
+    kept: dict[tuple, frozenset[int]] = {}
+    if version is not None:
+        with _counted_lock:
+            if (store.path, version) not in _saying:
+                _saying.clear()  # only the latest is ever asked for again
+            kept = _saying.setdefault((store.path, version), kept)
+    said: list[tuple[int, str, tuple[str, ...]]] = []
+    for topic in topics:
+        words = tuple(topic["words"])
+        compiled = _pattern(topic["words"])
+        try:  # only this meeting's lines: the index finds them by its id range
+            lines = store.db.execute(
+                "SELECT s.text FROM segments_fts f JOIN segments s ON s.id = f.rowid WHERE "
+                "segments_fts MATCH ? AND f.rowid BETWEEN ? AND ? AND s.meeting_id = ?",
+                (_fts_query(words), first, last, meeting_id),
+            ).fetchall()
+        except sqlite3.OperationalError:  # words the index can't search for: not said
+            continue
+        count = sum(len(compiled.findall(line["text"])) for line in lines)
+        if count:
+            said.append((count, topic["name"], words))
+    result: dict[str, frozenset[int]] = {}
+    for _, name, words in sorted(said, key=lambda found: -found[0]):  # keeps Settings' order
+        key = (words, most_lines)
+        if key not in kept:
+            kept[key] = _meetings_saying(store, list(words), most_lines)
+        if kept[key]:
+            result[name] = kept[key]
+    return result
+
+
+def _meetings_saying(store: Store, words: list[str], most_lines: int) -> frozenset[int]:
+    """The meetings that say any of these words; none when they're on more than ``most_lines``
+    lines. Once a meeting says one, its other lines aren't looked at."""
+    compiled = _pattern(words)
+    meetings: set[int] = set()
+    try:
+        (found,) = store.db.execute(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM segments_fts WHERE segments_fts MATCH ? LIMIT ?)",
+            (_fts_query(words), most_lines + 1),
+        ).fetchone()
+        if found > most_lines:
+            return frozenset()
+        for meeting_id, text in store.db.execute(
+            "SELECT s.meeting_id, s.text FROM segments_fts f "
+            "JOIN segments s ON s.id = f.rowid WHERE segments_fts MATCH ?",
+            (_fts_query(words),),
+        ):
+            if meeting_id not in meetings and compiled.search(text):
+                meetings.add(meeting_id)
+    except sqlite3.OperationalError:  # words the index can't search for: none say them
+        pass
+    return frozenset(meetings)
+
+
 def overview(store: Store) -> list[dict]:
     """Every topic with how often it came up and where, newest meetings first: {"topic",
     "words", "count", "meetings": [{"id", "title", "started_at", "client", "count"}]}."""

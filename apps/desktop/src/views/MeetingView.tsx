@@ -23,6 +23,7 @@ import { NotesPanel } from "@/components/NotesPanel";
 import { PlayerBar, type PlayerState } from "@/components/PlayerBar";
 import { PrivateNote } from "@/components/PrivateNote";
 import { RedactDialog } from "@/components/RedactDialog";
+import { Related } from "@/components/Related";
 import { SummaryPanel } from "@/components/SummaryPanel";
 import { ClientField } from "@/components/Client";
 import { TicketControl } from "@/components/Ticket";
@@ -58,6 +59,7 @@ import {
   type MeetingDetail,
   type Person,
   type RedactResult,
+  type RelatedMeeting,
   type Segment,
   type Settings,
   type Speaker,
@@ -65,6 +67,7 @@ import {
 import { attempt, copyText, reason } from "@/lib/feedback";
 import { clock, colorMap, day, minutes, when } from "@/lib/format";
 import { kindShown, pickAfterSummary } from "@/lib/kinds";
+import { relatedKey } from "@/lib/related";
 import { StatusBadge } from "@/views/MeetingsView";
 
 type Track = "mix" | "mic" | "system";
@@ -99,7 +102,17 @@ function nextSpan(spans: { start: number; end: number }[], time: number) {
   return spans[lo];
 }
 
-export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBack: () => void }) {
+export function MeetingView({
+  id,
+  at,
+  onBack,
+  onOpen,
+}: {
+  id: number;
+  at?: number;
+  onBack: () => void;
+  onOpen: (meetingId: number) => void;
+}) {
   const [busy, setBusy] = useState(false);
   const { data, error, refresh } = usePoll(() => api<MeetingDetail>(`/api/meetings/${id}`), busy ? 1500 : 0, id);
   const { data: people = [], refresh: refreshPeople } = usePoll(() => api<Person[]>("/api/people"), 0);
@@ -146,6 +159,14 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   const processing = progress === "queued" || (meeting?.status === "processing" && progress != null && !failedNow);
   const stalled = !processing && (meeting?.status === "processing" || meeting?.status === "recorded");
   useEffect(() => setBusy(processing), [processing]);
+  // Other meetings about the same thing: asked for once this one is loaded, and again after each
+  // change made on the page (its client, a name, a line).
+  const relatedOf = relatedKey(data, processing);
+  const { data: related = [] } = usePoll(
+    () => (relatedOf ? api<RelatedMeeting[]>(`/api/meetings/${id}/related`) : Promise.resolve([])),
+    0,
+    relatedOf,
+  );
   useEffect(() => {
     if (data && tab === null) setTab(data.summary ? "summary" : "transcript");
   }, [data, tab]);
@@ -669,6 +690,8 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
               onSolo={setSolo}
             />
           )}
+
+          <Related meetings={related} onOpen={onOpen} />
 
           <Tabs value={tab ?? "transcript"} onValueChange={setTab} className="mt-5 gap-4">
             <TabsList>

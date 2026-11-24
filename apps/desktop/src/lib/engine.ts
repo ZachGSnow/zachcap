@@ -129,6 +129,16 @@ export type TopicFound = {
   lines: { segment_id: number; at: number; speaker: string; snippet: string; spans: [number, number][] }[];
 };
 
+/** Another meeting about the same thing as one (the same ticket, client, people, topics or words),
+ * with what they share in plain words, the strongest first. */
+export type RelatedMeeting = {
+  id: number;
+  title: string;
+  started_at: string;
+  score: number;
+  reasons: string[];
+};
+
 /** A topic across meetings, newest first. */
 export type TopicOverview = {
   topic: string;
