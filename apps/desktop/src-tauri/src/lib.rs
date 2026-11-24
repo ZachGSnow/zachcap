@@ -33,10 +33,27 @@ struct EngineInfo {
 }
 
 struct Engine {
-    info: Result<EngineInfo, String>,
+    info: EngineInfo,
+    launch: Launch,
     child: Mutex<Option<Child>>,
     /// Why the engine stopped, once it has; cleared by a restart.
     stopped: Mutex<Option<String>>,
+    /// Set from the moment a start begins until the engine runs or fails, so a second
+    /// start (Try again pressed twice) doesn't run another.
+    starting: AtomicBool,
+    /// While an installed copy sets its engine up: the last thing uv said, for the startup
+    /// screen.
+    setup: Mutex<Option<String>>,
+}
+
+/// Where the engine and uv are. An installed copy runs the engine that came with it, in a
+/// venv of its own that it sets up with the bundled uv; a development build runs the
+/// repo's engine with the uv on this PC.
+#[derive(Clone)]
+struct Launch {
+    uv: PathBuf,
+    engine: PathBuf,
+    installed: bool,
 }
 
 /// Set while ZachCap exits, so the engine going away then isn't reported as a crash.
@@ -44,7 +61,14 @@ static EXITING: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 fn engine_info(engine: tauri::State<Engine>) -> Result<EngineInfo, String> {
-    engine.info.clone()
+    Ok(engine.info.clone())
+}
+
+/// What the engine's setup is doing, while it runs (the first launch of an installed copy
+/// downloads Python and the speech libraries); None otherwise.
+#[tauri::command]
+fn engine_setup(engine: tauri::State<Engine>) -> Option<String> {
+    engine.setup.lock().unwrap().clone()
 }
 
 /// Why the engine stopped, if it has; the startup screen uses it to fail fast.
@@ -71,19 +95,10 @@ fn check_engine(engine: &Engine) -> Option<String> {
 }
 
 /// Starts the engine again after it stopped, on the same port and token, so the window
-/// reconnects without reloading. Does nothing while it is still running.
+/// reconnects without reloading. Does nothing while it is still running or starting.
 #[tauri::command]
-fn restart_engine(engine: tauri::State<Engine>) -> Result<(), String> {
-    let info = engine.info.clone()?;
-    let mut child = engine.child.lock().unwrap();
-    if child.is_some() {
-        return Ok(());
-    }
-    let started = start_engine(info.port, &info.token)
-        .map_err(|error| format!("Couldn't run uv ({error})."))?;
-    *child = Some(started);
-    *engine.stopped.lock().unwrap() = None;
-    Ok(())
+fn restart_engine(app: AppHandle) {
+    begin(app);
 }
 
 /// The tray icon shows a red dot and says so in its tooltip while a recording runs, so
@@ -424,11 +439,35 @@ fn open_data_folder() -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// The Python engine folder: ZACHCAP_ENGINE_DIR, or the repo's `engine/` in development.
-fn engine_dir() -> PathBuf {
-    std::env::var("ZACHCAP_ENGINE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../engine"))
+/// The Python engine: ZACHCAP_ENGINE_DIR when set, else the one installed with the app (the
+/// installer puts it and uv next to the exe), else the repo's `engine/` in development.
+fn launch_for(app: &AppHandle) -> Launch {
+    if let Some(dir) = std::env::var_os("ZACHCAP_ENGINE_DIR") {
+        return Launch {
+            uv: find_uv(),
+            engine: PathBuf::from(dir),
+            installed: false,
+        };
+    }
+    if let Ok(resources) = app.path().resource_dir()
+        && resources.join("engine").join("pyproject.toml").is_file()
+    {
+        let bundled = resources.join("uv").join("uv.exe");
+        return Launch {
+            uv: if bundled.is_file() {
+                bundled
+            } else {
+                find_uv()
+            },
+            engine: resources.join("engine"),
+            installed: true,
+        };
+    }
+    Launch {
+        uv: find_uv(),
+        engine: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../engine"),
+        installed: false,
+    }
 }
 
 /// The keys last passed on from Settings, kept so the next start holds yours from the first
@@ -505,13 +544,144 @@ fn free_port() -> u16 {
         .unwrap_or(8765)
 }
 
-fn start_engine(port: u16, token: &str) -> std::io::Result<Child> {
-    let mut command = Command::new(find_uv());
+/// Starts the engine on its own thread, setting an installed copy's engine up first when this
+/// build hasn't been yet. Does nothing while the engine runs or is already starting. A failure
+/// is kept as the reason it stopped, which the startup screen and the restart banner show.
+fn begin(app: AppHandle) {
+    let Some(engine) = app.try_state::<Engine>() else {
+        return;
+    };
+    if engine.child.lock().unwrap().is_some() || engine.starting.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    *engine.stopped.lock().unwrap() = None;
+    std::thread::spawn(move || {
+        let engine = app.state::<Engine>();
+        let started = set_up(&engine).and_then(|()| {
+            start_engine(&engine.launch, engine.info.port, &engine.info.token).map_err(|error| {
+                if engine.launch.installed {
+                    format!("Couldn't start the engine ({error}).")
+                } else {
+                    format!(
+                        "Couldn't run uv ({error}). Install it from https://docs.astral.sh/uv/ and start ZachCap again."
+                    )
+                }
+            })
+        });
+        match started {
+            Ok(child) => *engine.child.lock().unwrap() = Some(child),
+            Err(message) => *engine.stopped.lock().unwrap() = Some(message),
+        }
+        *engine.setup.lock().unwrap() = None;
+        engine.starting.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Brings an installed copy's engine venv up to date with the bundled uv: Python and the
+/// speech libraries on first launch (a few GB), what changed after an update. Skipped when
+/// this build is set up already (the installer's BUILD stamp is in the venv). What uv says
+/// is shown on the startup screen and kept in engine-setup.log.
+fn set_up(engine: &Engine) -> Result<(), String> {
+    let launch = &engine.launch;
+    if !launch.installed {
+        return Ok(());
+    }
+    let venv = launch.engine.join(".venv");
+    let marker = venv.join("zachcap-build.txt");
+    let build = std::fs::read_to_string(launch.engine.join("BUILD")).unwrap_or_default();
+    if !build.is_empty() && std::fs::read_to_string(&marker).is_ok_and(|done| done == build) {
+        return Ok(());
+    }
+    *engine.setup.lock().unwrap() = Some("Getting ready...".to_string());
+    let mut command = Command::new(&launch.uv);
     command
-        .arg("run")
+        .arg("sync")
         .arg("--project")
-        .arg(engine_dir())
-        .args(["zachcap", "serve", "--port", &port.to_string()])
+        .arg(&launch.engine)
+        // The lock as shipped, without the test tools, with ZachCap's own code copied into
+        // the venv (so the installed files are only read) and always refreshed from them.
+        .args([
+            "--locked",
+            "--no-dev",
+            "--no-editable",
+            "--reinstall-package",
+            "zachcap",
+        ])
+        .env("UV_PROJECT_ENVIRONMENT", &venv)
+        .env_remove("VIRTUAL_ENV")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    no_window(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Couldn't run the bundled uv ({error})."))?;
+    let mut log = std::fs::create_dir_all(data_dir())
+        .and_then(|_| std::fs::File::create(data_dir().join("engine-setup.log")))
+        .ok();
+    let mut last = String::new();
+    if let Some(stderr) = child.stderr.take() {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if let Some(log) = log.as_mut() {
+                let _ = writeln!(log, "{line}");
+            }
+            let line = line.trim();
+            if !line.is_empty() {
+                last = line.to_string();
+                *engine.setup.lock().unwrap() = Some(last.clone());
+            }
+        }
+    }
+    let status = child.wait().map_err(|error| error.to_string())?;
+    if !status.success() {
+        return Err(format!(
+            "Setting up the engine didn't finish ({last}). Check the internet connection and press Try again. \
+             What happened is in {}.",
+            data_dir().join("engine-setup.log").display()
+        ));
+    }
+    let _ = std::fs::write(&marker, &build);
+    Ok(())
+}
+
+fn no_window(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
+fn start_engine(launch: &Launch, port: u16, token: &str) -> std::io::Result<Child> {
+    let mut command = if launch.installed {
+        // Set up already (set_up), so its Python runs the engine directly.
+        let mut command = Command::new(
+            launch
+                .engine
+                .join(".venv")
+                .join("Scripts")
+                .join("python.exe"),
+        );
+        command.args(["-m", "zachcap.cli"]);
+        command
+    } else {
+        let mut command = Command::new(&launch.uv);
+        command
+            .arg("run")
+            .arg("--project")
+            .arg(&launch.engine)
+            .arg("zachcap");
+        command
+    };
+    command
+        .args(["serve", "--port", &port.to_string()])
         // Passed through the environment so the token never shows in process listings.
         .env("ZACHCAP_TOKEN", token)
         // The engine exits by itself if this app goes away without stopping it.
@@ -529,12 +699,7 @@ fn start_engine(port: u16, token: &str) -> std::io::Result<Child> {
             command.stdout(copy).stderr(log);
         }
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    no_window(&mut command);
     command.spawn()
 }
 
@@ -622,21 +787,20 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
-            // On failure the window still opens and the startup screen says what went wrong.
-            let (info, child) = match start_engine(port, &token) {
-                Ok(child) => (Ok(EngineInfo { port, token: token.clone() }), Some(child)),
-                Err(error) => (
-                    Err(format!(
-                        "Couldn't run uv ({error}). Install it from https://docs.astral.sh/uv/ and start ZachCap again."
-                    )),
-                    None,
-                ),
-            };
+            // Started on its own thread (an installed copy's first launch sets the engine up
+            // for minutes); the startup screen shows how that goes, or what went wrong.
             app.manage(Engine {
-                info,
-                child: Mutex::new(child),
+                info: EngineInfo {
+                    port,
+                    token: token.clone(),
+                },
+                launch: launch_for(app.handle()),
+                child: Mutex::new(None),
                 stopped: Mutex::new(None),
+                starting: AtomicBool::new(false),
+                setup: Mutex::new(None),
             });
+            begin(app.handle().clone());
 
             // Notice when the engine stops later (a crash), so the window can offer a restart.
             let handle = app.handle().clone();
@@ -686,14 +850,23 @@ pub fn run() {
                 {
                     let handle = app.handle().clone();
                     dictation_keys::on_change(move |down| {
-                        let _ = handle.emit(if down { "dictate-start" } else { "dictate-stop" }, ());
+                        let _ = handle.emit(
+                            if down {
+                                "dictate-start"
+                            } else {
+                                "dictate-stop"
+                            },
+                            (),
+                        );
                     });
                 }
                 sync_keys(app.handle(), Vec::new(), false);
             }
 
-            let record = MenuItem::with_id(app, "record", "Start or stop recording", true, None::<&str>)?;
-            let mark = MenuItem::with_id(app, "bookmark", "Bookmark this moment", true, None::<&str>)?;
+            let record =
+                MenuItem::with_id(app, "record", "Start or stop recording", true, None::<&str>)?;
+            let mark =
+                MenuItem::with_id(app, "bookmark", "Bookmark this moment", true, None::<&str>)?;
             let shot = MenuItem::with_id(app, "snapshot", "Snapshot the call", true, None::<&str>)?;
             let open = MenuItem::with_id(app, "open", "Open ZachCap", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
@@ -747,6 +920,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             engine_info,
+            engine_setup,
             engine_exited,
             restart_engine,
             open_data_folder,
@@ -763,9 +937,7 @@ pub fn run() {
                 && let Some(engine) = app.try_state::<Engine>()
             {
                 EXITING.store(true, Ordering::Relaxed);
-                if let Ok(info) = &engine.info {
-                    stop_recording(info);
-                }
+                stop_recording(&engine.info);
                 if let Some(mut child) = engine.child.lock().unwrap().take() {
                     let _ = child.kill();
                 }

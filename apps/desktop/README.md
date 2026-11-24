@@ -2,9 +2,20 @@
 
 Tauri 2 shell with a React + TypeScript + Tailwind v4 + shadcn/ui interface.
 
-The Rust side starts the Python engine (`../../engine`) with `uv run zachcap serve`, on a free
-127.0.0.1 port with a random per-launch token, and hands both to the UI through the
-`engine_info` command. It also puts ZachCap in the tray: closing the window keeps it running.
+The Rust side starts the Python engine on a free 127.0.0.1 port with a random per-launch token,
+and hands both to the UI through the `engine_info` command. In development that's the repo's
+engine (`../../engine`) with `uv run zachcap serve`; an installed copy runs the engine that came
+with the installer, from a venv it sets up on first launch with the uv bundled next to it (the
+startup screen shows the setup; `engine_setup` reports it). It also puts ZachCap in the tray:
+closing the window keeps it running.
+
+## Installer
+
+`scripts/build-installer.ps1` stages the engine's tracked files and a pinned, checksummed uv in
+`src-tauri/installer/`, then runs `tauri build --config src-tauri/tauri.installer.conf.json`
+(NSIS, per-user, into `%LOCALAPPDATA%\Programs\ZachCap`; see `src-tauri/windows/installer-hooks.nsh`).
+The plain `tauri.conf.json` keeps bundling off, so `cargo check` and `npm run tauri dev` need
+none of it.
 
 ## Develop
 

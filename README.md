@@ -45,7 +45,23 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 
 ## Quick start
 
-Requirements: Windows 10 or 11, an NVIDIA GPU with 4 GB or more (it falls back to the CPU, slowly), [uv](https://docs.astral.sh/uv/), Node.js LTS, and Rust with the Visual Studio C++ build tools.
+### Install
+
+Requirements: Windows 10 or 11 (64-bit), an internet connection for the first start, and about 8 GB of free disk space. An NVIDIA GPU with 4 GB or more makes processing fast; without one ZachCap runs on the CPU, more slowly.
+
+1. Download `ZachCap_<version>_x64-setup.exe` from the [latest release](https://github.com/ZachGSnow/zachcap/releases/latest) and run it. It installs for your account only (no administrator rights), into `%LOCALAPPDATA%\Programs\ZachCap`. The installer isn't code-signed yet, so Windows SmartScreen may say it "protected your PC": choose **More info**, then **Run anyway**.
+2. Start ZachCap. The first start sets up the speech engine: it downloads Python and the speech libraries (a few GB) and takes a few minutes; later starts take seconds.
+3. Open **Settings** and add:
+   1. A free [Hugging Face](https://huggingface.co) token, after accepting the terms of [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1). Without it ZachCap still transcribes, labeling the two sides "You" and "Call audio".
+   2. An [Anthropic API key](https://platform.claude.com) for summaries and questions (optional; about $0.09 per hour-long meeting with Opus 5.5).
+
+Keys are stored in Windows Credential Manager. Your meetings, voices and settings live in `%LOCALAPPDATA%\ZachCap`; uninstalling (Settings > Apps) removes the program and its speech engine but leaves them. Updating is running a newer installer: it keeps the speech engine and downloads only what changed.
+
+Windows **Smart App Control**, when it is on, blocks parts of the speech libraries (they aren't signed by their makers), and the engine can't start. If the startup screen reports that, Smart App Control has to be turned off (Windows Security > App & browser control).
+
+### Build from source
+
+Requirements: [uv](https://docs.astral.sh/uv/), Node.js LTS, and Rust with the Visual Studio C++ build tools.
 
 ```powershell
 git clone https://github.com/ZachGSnow/zachcap.git
@@ -57,21 +73,15 @@ npm install
 npm run tauri dev            # starts the local engine and opens the app
 ```
 
-Then open **Settings** and add:
+The engine also has a command line (`uv run zachcap --help`): `record`, `import`, `show`, `name`, `confirm`, `search`, `keys`, `mcp`.
 
-1. A free [Hugging Face](https://huggingface.co) token, after accepting the terms of [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1). Without it ZachCap still transcribes, labeling the two sides "You" and "Call audio".
-2. An [Anthropic API key](https://platform.claude.com) for summaries and questions (optional; about $0.09 per hour-long meeting with Opus 5.5).
-
-Keys are stored in Windows Credential Manager. The engine also has a command line (`uv run zachcap --help`): `record`, `import`, `show`, `name`, `confirm`, `search`, `keys`, `mcp`.
-
-For everyday use, build the app once and start it from a shortcut:
+To build the installer, from the repo root:
 
 ```powershell
-cd apps\desktop
-npm run tauri build          # creates src-tauri\target\release\zachcap.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File apps\desktop\scripts\build-installer.ps1
 ```
 
-The exe runs the engine from this clone, so keep the folder where it is (there is no installer yet). Turn on **Start with Windows** in Settings to have ZachCap waiting in the tray, and its log is `engine.log` in the data folder.
+It copies the engine's tracked files and uv (a pinned release, checked against its SHA-256) into the installer, and prints the installer's path and SHA-256. Turn on **Start with Windows** in Settings to have ZachCap waiting in the tray; the engine's log is `engine.log` in the data folder.
 
 ## Configuration
 
