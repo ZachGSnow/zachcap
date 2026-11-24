@@ -56,13 +56,14 @@ def library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store.close()
 
 
-def said_to_claude(store: Store, private: int) -> dict[str, str]:
+def said_to_claude(store: Store, shared: int, private: int) -> dict[str, str]:
     """All that the library tells Claude, through Ask's tools and the MCP server's."""
     tools = {tool.name: tool for tool in assistant.make_tools(store)}
     asked = {
         "search_transcripts": [{"query": "breach Sunday agree"}],
         "list_meetings": [{}, {"client": "Fabrikam"}, {"ticket": "INC-4471"}],
         "get_meeting": [{"meeting_id": private}],
+        "related_meetings": [{"meeting_id": shared}, {"meeting_id": private}],
         "list_action_items": [{"status": "all"}, {"owner": "Priya"}],
         "get_work_log": [{"day": "2026-11-20"}, {"day": "2026-11-20", "period": "week"}],
     }
@@ -81,7 +82,7 @@ def said_to_claude(store: Store, private: int) -> dict[str, str]:
 def test_the_library_claude_reads_has_no_private_meeting(library):
     store, shared, private = library
 
-    said = said_to_claude(store, private)
+    said = said_to_claude(store, shared, private)
 
     for what, text in said.items():
         for word in ONLY_PRIVATE:
@@ -90,6 +91,9 @@ def test_the_library_claude_reads_has_no_private_meeting(library):
     kept = f"M{private} is a private meeting: the user keeps it from Claude."
     assert said[f"get_meeting {{'meeting_id': {private}}}"] == kept
     assert said[f"mcp search_meetings {{'query': 'breach', 'meeting_id': {private}}}"] == kept
+    assert said[f"related_meetings {{'meeting_id': {private}}}"] == kept
+    alone = f"No other meeting seems to be about the same thing as M{shared}."
+    assert said[f"mcp related_meetings {{'meeting_id': {shared}}}"] == alone
     # What was left out is said, so an answer doesn't claim there is nothing more.
     left_out = "\n(1 private meeting isn't listed: the user keeps them from Claude.)"
     assert said["list_meetings {}"].endswith(f"</meetings>{left_out}")
@@ -104,9 +108,10 @@ def test_the_library_claude_reads_has_no_private_meeting(library):
     assert "Dana: 1 meetings" in people and "Marcus: 1 meetings, 1 min" in people
 
     store.update_meeting(private, private=0)
-    said = said_to_claude(store, private)
+    said = said_to_claude(store, shared, private)
     assert "The breach began on Sunday." in said[f"get_meeting {{'meeting_id': {private}}}"]
     assert "Priya: 1 meetings" in said["mcp list_people {}"]
+    assert "Incident bridge" in said[f"related_meetings {{'meeting_id': {shared}}}"]
     assert "private" not in said["list_meetings {}"] + said["get_work_log {'day': '2026-11-20'}"]
 
 
@@ -148,6 +153,8 @@ def test_the_page_shows_a_private_meeting_like_any_other(library):
     owners = {i["owner"] for i in client.get("/api/actions", headers=AUTH).json()["items"]}
     assert owners == {"Dana", "Priya"}
     assert {p["name"] for p in store.people_stats()} == {"You", "Dana", "Priya", "Marcus"}
+    related = client.get(f"/api/meetings/{shared}/related", headers=AUTH).json()
+    assert [row["id"] for row in related] == [private]
 
     refused = client.post(f"/api/meetings/{private}/summary", headers=AUTH, json={})
     assert refused.status_code == 400 and "private" in refused.json()["detail"]

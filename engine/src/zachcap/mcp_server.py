@@ -96,6 +96,15 @@ def create_server() -> MCPServer:
             return privacy.outgoing(store, assistant.meeting_detail(store, meeting_id, start_at))
 
     @server.tool(annotations=READ_ONLY)
+    def related_meetings(
+        meeting_id: Annotated[int, Field(description="The meeting's id, the number after M")],
+    ) -> str:
+        """Up to five other meetings about the same thing as one, most related first, each with
+        what it shares: the same ticket, client, people, topics or words."""
+        with library() as store:
+            return privacy.outgoing(store, assistant.related_list(store, meeting_id))
+
+    @server.tool(annotations=READ_ONLY)
     def list_action_items(
         status: Annotated[str, Field(description='"open", "done" or "all"')] = "open",
         owner: Annotated[str | None, Field(description="Only items this person owns")] = None,

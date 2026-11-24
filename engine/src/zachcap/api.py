@@ -53,6 +53,7 @@ from . import (
     privacy,
     prompts,
     redact,
+    related,
     shortcuts,
     tickets,
     topics,
@@ -831,6 +832,13 @@ def create_app(token: str) -> FastAPI:
             return tickets.candidates(store, meeting_id)
         except ValueError:  # patterns saved before a stricter check: none found
             return []
+
+    @app.get("/api/meetings/{meeting_id}/related", dependencies=auth)
+    def related_meetings(meeting_id: int, store: Store = Depends(db)):
+        """The few other meetings about the same thing, best first, each with what it shares
+        with this one (the same ticket, client, people, topics or words)."""
+        meeting_or_404(store, meeting_id)
+        return related.find(store, meeting_id)
 
     @app.patch("/api/meetings/{meeting_id}", dependencies=auth)
     def change_meeting(meeting_id: int, body: MeetingChange, store: Store = Depends(db)):

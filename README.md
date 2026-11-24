@@ -31,6 +31,7 @@ Teams mixes every remote voice into one stream, so ZachCap separates speakers it
 - **Tickets**: tell ZachCap how your ticket numbers look (`#######` for a 7-digit number, `INC-####`) and it finds them in a meeting's title, your notes, its snapshots and what was said. One you wrote or snapshotted becomes the meeting's ticket; ones only heard are offered to pick. The ticket shows in the meeting list, goes into time entries, ticket notes and exports, finds the meeting in search, and Ask and the MCP server can list a ticket's meetings.
 - **Clients**: say which client each person works for (on the People page), and their meetings are that client's; set a meeting's client yourself when it was with someone new or with two clients. The client shows in the meeting list and header, the meeting list and the work log can be narrowed to one client (a per-client time sheet), and exports, ticket notes, Ask and the MCP server know it.
 - **Topics**: track words and phrases across meetings ("Renewals: renewal, contract, quote"). Each meeting shows the topics said in it, and a filter on its transcript marks those lines; the Topics page lists where each came up, with the client; the work log notes each meeting's topics. Found on this PC with the full-text index.
+- **Related meetings**: a meeting's page lists the few others about the same thing, earlier or later, the most related first, each with the reason: the same ticket, the same client, the same people (never you), a topic you track, or the words that set it apart ("Also about: VPN profile, cutover"). Click one to open it, so the last call with this client or the call about this ticket is one click away. Worked out on this PC from what's already in the library; nothing is sent. Ask and the MCP server can list them too.
 - **Attach files to a meeting**: a log, an exported email (.eml), a config or any text file, from the Notes tab. Its text is kept with the meeting (the file is only read), so summaries, ticket notes and Ask can use the exact error codes and the email that led to the call; it goes to Claude only with the meeting, labelled as someone else's text and masked like your notes. A ticket number in a file is offered, never filled in on its own.
 - **Ask across all your meetings**: "What did I commit to this week?", "What's still open with Dana?". Claude searches your transcripts, summaries and action items with read-only tools and links every fact to the moment it was said. **Brief me** on a person prepares you for your next meeting with them. Each meeting also has its own Ask tab.
 - **History and search**: every meeting, searchable by anything anyone said.
@@ -175,7 +176,8 @@ Researched and planned in [docs/PLAN.md](docs/PLAN.md#13-next-from-competitor-re
 - Your own summary templates and one-click documents; redact a moment (a password read aloud); fix a line's words
 - A daily and weekly digest with draft time entries; markers where your name was said; a watch folder for recordings
 - Shipped since: a live transcript during calls, the kind of meeting picked automatically, an installer (v0.2.0, v0.3.0)
-- Next: related past calls; later, a "ticket note" dictation mode that tidies what you said with Claude, summaries on this PC, a signed installer
+- Built since, not in a release yet: related meetings on a meeting's page
+- Later: a "ticket note" dictation mode that tidies what you said with Claude, summaries on this PC, a signed installer
 
 ## License
 

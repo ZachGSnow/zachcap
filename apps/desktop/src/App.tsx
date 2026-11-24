@@ -267,7 +267,13 @@ function Shell() {
               <MeetingsView onOpen={openMeeting} onSettings={() => setView({ name: "settings" })} onImport={() => void chooseFile()} />
             )}
             {view.name === "meeting" && (
-              <MeetingView key={`${view.id}-${view.at ?? ""}`} id={view.id} at={view.at} onBack={() => setView({ name: "meetings" })} />
+              <MeetingView
+                key={`${view.id}-${view.at ?? ""}`}
+                id={view.id}
+                at={view.at}
+                onBack={() => setView({ name: "meetings" })}
+                onOpen={openMeeting}
+              />
             )}
             {view.name === "ask" && <AskView library={library} onOpen={openMeeting} />}
             {view.name === "actions" && <ActionsView onOpen={openMeeting} />}
