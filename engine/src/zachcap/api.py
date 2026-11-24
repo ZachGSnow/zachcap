@@ -95,7 +95,7 @@ class TitleBody(BaseModel):
 class MeetingChange(BaseModel):
     title: str | None = None
     ticket: str | None = None  # "" takes it off
-    client: str | None = None  # "" goes back to the client of the people in it
+    client: str | None = None  # "" is "no client"; null follows the people in it again
 
 
 class ClientBody(BaseModel):
@@ -615,9 +615,7 @@ def create_app(token: str) -> FastAPI:
                 "participants": participants.get(m["id"], []),
                 "mentions": mentioned.get(m["id"], 0),
                 # Its client: the one set on it, else the one its people all work for.
-                "client": client_of[m["id"]]["client"],
-                "client_inferred": client_of[m["id"]]["inferred"],
-                "client_set": client_of[m["id"]]["set"],
+                **clients.fields(client_of[m["id"]]),
             }
             for m in meetings
         ]
@@ -633,9 +631,7 @@ def create_app(token: str) -> FastAPI:
             "meeting": {
                 **dict(meeting),
                 "progress": worker.progress.get(meeting_id),
-                "client": client["client"],
-                "client_inferred": client["inferred"],
-                "client_set": client["set"],
+                **clients.fields(client),
             },
             # The clients of the people in it, and every client named so far (to pick from).
             "clients_heard": client["clients"],
@@ -668,9 +664,11 @@ def create_app(token: str) -> FastAPI:
 
     @app.patch("/api/meetings/{meeting_id}", dependencies=auth)
     def change_meeting(meeting_id: int, body: MeetingChange, store: Store = Depends(db)):
-        """A new title, or the ticket it was about ("" takes the ticket off)."""
-        meeting_or_404(store, meeting_id)
+        """A new title, the ticket it was about ("" takes the ticket off), or its client ("" for
+        no client, null to follow its people again)."""
+        meeting = meeting_or_404(store, meeting_id)
         changes: dict = {}
+        renamed: list[int] = []
         if body.title is not None:
             if not body.title.strip():
                 raise HTTPException(status_code=400, detail="The title can't be empty")
@@ -681,26 +679,30 @@ def create_app(token: str) -> FastAPI:
                 changes["ticket_source"] = tickets.YOURS  # set or taken off: yours to keep
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if body.client is not None:  # yours to keep; "" is "no client"
+        if "client" in body.model_fields_set and body.client is None:  # its people's again
+            changes["client"] = changes["client_source"] = None
+        elif body.client is not None:
             try:
                 name = clients.checked(body.client)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            changes["client"] = clients.canonical(store, name) if name else None
-            changes["client_source"] = clients.YOURS
+            shown = clients.of_meeting(store, meeting)["client"]
+            if clients.recased(shown, name):  # only its capitals: the client's, everywhere
+                renamed = clients.rename(store, shown, name)
+            else:  # yours to keep; "" is "no client"
+                changes["client"] = clients.canonical(store, name) if name else None
+                changes["client_source"] = clients.YOURS
         if changes:
             store.update_meeting(meeting_id, **changes)
             if "ticket" not in changes:
                 tickets.fill(store, meeting_id)  # a ticket number typed in the title
             export.auto_export(store, meeting_id)
+        export_soon(store, renamed)
         meeting = store.meeting(meeting_id)
-        client = clients.of_meeting(store, meeting)
         return {
             "title": meeting["title"],
             "ticket": meeting["ticket"],
-            "client": client["client"],
-            "client_inferred": client["inferred"],
-            "client_set": client["set"],
+            **clients.fields(clients.of_meeting(store, meeting)),
         }
 
     @app.delete("/api/meetings/{meeting_id}", dependencies=auth)
@@ -1170,31 +1172,39 @@ def create_app(token: str) -> FastAPI:
         if not body.name.strip():
             raise HTTPException(status_code=400, detail="The name can't be empty")
         into = store.person_id(body.name.strip(), create=False)
-        if into is not None and into != person_id:  # a merge: the client goes with them
-            merged, keeping = store.person(person_id), store.person(into)
-            if merged and keeping and merged["org"]:
-                if not keeping["org"]:
-                    store.set_client(into, merged["org"])
-                elif keeping["org"].casefold() != merged["org"].casefold():
-                    clients.keep_history(store, person_id)
-        kept = store.rename_person(person_id, body.name.strip())
+        with store.transaction():
+            if into is not None and into != person_id:  # a merge: the client goes with them
+                clients.before_merge(store, person_id, into)
+            kept = store.rename_person(person_id, body.name.strip())
         export_soon(store, store.person_meetings(kept))
         return {"id": kept}
 
     @app.put("/api/people/{person_id}/client", dependencies=auth)
     def set_person_client(person_id: int, body: ClientBody, store: Store = Depends(db)):
-        """The client a person works for ("" for none): their meetings follow."""
-        if store.person(person_id) is None:
+        """The client a person works for ("" for none): their meetings follow, and the ones
+        they were in keep the client they had. Only its capitals changed: the client's name
+        is written that way everywhere."""
+        person = store.person(person_id)
+        if person is None:
             raise HTTPException(status_code=404, detail="No such person")
         try:
             client = clients.checked(body.client)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if client and person["is_me"]:
+            raise HTTPException(
+                status_code=400,
+                detail="You don't have a client: a meeting's client comes from the people you meet",
+            )
+        before = person["org"] or ""
+        if clients.recased(before, client):
+            export_soon(store, clients.rename(store, before, client))
+            return {"client": client}
         client = clients.canonical(store, client) if client else ""
-        before = store.person(person_id)["org"]
-        if before and before.casefold() != client.casefold():
-            clients.keep_history(store, person_id)  # their past meetings stay as they were
-        store.set_client(person_id, client)
+        with store.transaction():  # all of it, or none if it fails
+            if before and before.casefold() != client.casefold():
+                clients.keep_history(store, person_id)  # their past meetings stay as they were
+            store.set_client(person_id, client)
         export_soon(store, store.person_meetings(person_id))
         return {"client": client or None}
 
@@ -1215,8 +1225,9 @@ def create_app(token: str) -> FastAPI:
     @app.delete("/api/people/{person_id}", dependencies=auth)
     def delete_person(person_id: int, store: Store = Depends(db)):
         meetings = store.person_meetings(person_id)
-        clients.keep_history(store, person_id)  # their meetings keep the client they had
-        store.delete_person(person_id)
+        with store.transaction():
+            clients.keep_history(store, person_id)  # their meetings keep the client they had
+            store.delete_person(person_id)
         export_soon(store, meetings)
         return {"ok": True}
 
