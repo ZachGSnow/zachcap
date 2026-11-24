@@ -274,7 +274,7 @@ def test_reprocessing_lets_a_kept_client_follow_its_people_again(
 
 def test_you_never_have_a_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     store = Store()
     call = meeting(store, tmp_path, "Call", "2026-11-23T09:00:00-05:00", ["You", "Dana"])
     store.set_client(store.person_id("Dana"), "Contoso")
@@ -291,7 +291,7 @@ def test_you_never_have_a_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 def test_a_meeting_can_follow_its_people_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     store = Store()
     call = meeting(store, tmp_path, "Cutover", "2026-11-23T09:00:00-05:00", ["Dana"])
     store.set_client(store.person_id("Dana"), "Contoso")
@@ -312,7 +312,7 @@ def test_changing_only_the_capitals_renames_the_client_everywhere(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     store = Store()
     first = meeting(store, tmp_path, "Cutover", "2026-11-23T09:00:00-05:00", ["Dana", "Mark"])
     second = meeting(store, tmp_path, "Review", "2026-11-23T11:00:00-05:00")
@@ -340,7 +340,7 @@ def test_merging_people_leaves_their_meetings_as_they_were(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     store = Store()
     together = meeting(store, tmp_path, "Review", "2026-11-23T09:00:00-05:00", ["Mark", "Lee"])
     alone = meeting(store, tmp_path, "One to one", "2026-11-23T10:00:00-05:00", ["Mark"])
@@ -361,7 +361,7 @@ def test_merging_people_leaves_their_meetings_as_they_were(
 
 def test_merging_with_you_gives_you_no_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     store = Store()
     dana_call = meeting(store, tmp_path, "Dana call", "2026-11-23T09:00:00-05:00", ["Dana"])
     lee_call = meeting(store, tmp_path, "Lee call", "2026-11-23T10:00:00-05:00", ["Lee"])
@@ -389,7 +389,7 @@ def test_saved_client_work_logs_forget_deleted_and_redacted_meetings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     store = Store()
     cutover = meeting(store, tmp_path, "Cutover", "2026-11-23T09:00:00-05:00", ["Dana"])
     review = meeting(store, tmp_path, "Review", "2026-11-23T11:00:00-05:00", ["Dana"])
@@ -448,7 +448,7 @@ def test_keeping_history_is_one_change(store: Store, tmp_path: Path):
 
 def test_a_change_that_fails_halfway_keeps_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"), raise_server_exceptions=False)
+    client = TestClient(create_app("test-token"), base_url=LOCAL, raise_server_exceptions=False)
     store = Store()
     call = meeting(store, tmp_path, "Call", "2026-11-23T09:00:00-05:00", ["Dana"])
     dana = store.person_id("Dana")

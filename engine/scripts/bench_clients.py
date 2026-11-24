@@ -64,7 +64,8 @@ def main() -> None:
             os.environ["ZACHCAP_HOME"] = scratch
             store, dana = build(Path(scratch))
             store.close()
-            api = TestClient(create_app("bench"))
+            # The engine only answers requests to this PC (gate.py).
+            api = TestClient(create_app("bench"), base_url="http://127.0.0.1")
             started = time.perf_counter()
             answer = api.put(
                 f"/api/people/{dana}/client",
