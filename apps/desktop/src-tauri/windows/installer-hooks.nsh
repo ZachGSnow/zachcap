@@ -8,6 +8,9 @@
     StrCpy $INSTDIR "$LOCALAPPDATA\Programs\${PRODUCTNAME}"
     SetOutPath $INSTDIR
   ${EndIf}
+  ; An update that doesn't uninstall first would leave the older version's wheel beside the
+  ; new one; the engine is set up from the new one only (wheel_for in lib.rs).
+  Delete "$INSTDIR\engine\wheel\*.whl"
 !macroend
 
 ; The engine's venv is set up on first launch (a few GB) next to the program, so uninstalling
