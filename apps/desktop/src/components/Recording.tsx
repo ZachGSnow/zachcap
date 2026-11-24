@@ -30,7 +30,8 @@ type AutoStop = { reason: "call" | "quiet"; in: number };
 /** An automatic recording can be undone this long: past it, Stop keeps what was recorded. */
 const DECLINE_WITHIN = 120;
 
-/** Runs ``show`` (a toast) only when the window is in front. */
+/** Runs `show` (a toast) only when the window is in front: behind the call, the shell says
+ * it with a Windows notification (follow_engine in lib.rs). */
 async function inFront(show: () => unknown) {
   if (await windowInFront()) show();
 }
@@ -260,9 +261,11 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     }
   }, [refresh, setDraft, meetingId]);
 
-  // What the engine did on its own: said once each, oldest first, as a Windows notification
-  // when the window is behind the call. What happened before this page loaded is old news;
-  // all that an engine started again did is news, though it numbers its events from 1 again.
+  // What the engine did on its own: said once each, oldest first, as a toast when the window
+  // is in front. When it isn't, the shell sends the Windows notification instead (it follows
+  // the same events with a cursor of its own, and a hidden window's timers run late). What
+  // happened before this page loaded is old news; all that an engine started again did is
+  // news, though it numbers its events from 1 again.
   const boot = state?.boot;
   const events = state?.events;
   useEffect(() => {
@@ -270,8 +273,6 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     cursor.current = next;
     for (const event of fresh) said(event);
   }, [boot, events, opened]);
-  // Windows notifications about calls come from the shell, which never runs late; the
-  // window says it too when it's in front.
   function said(event: CallEvent) {
     const app = event.app ?? "The call app";
     if (event.kind === "started") {

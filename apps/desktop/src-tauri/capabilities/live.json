@@ -1,12 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "live",
-  "description": "The live panel shown over the call while recording: moved, resized and closed by the page",
+  "description": "The live panel over the call while recording: dragged by its title bar, and closed (hidden for that recording) by its X. Nothing else: no events, menus, tray or other windows",
   "windows": ["live"],
-  "permissions": [
-    "core:default",
-    "core:window:allow-start-dragging",
-    "core:window:allow-set-size",
-    "core:window:allow-close"
-  ]
+  "permissions": ["core:window:allow-start-dragging", "core:window:allow-close"]
 }

@@ -98,14 +98,15 @@ const LIVE: &str = "live";
 /// notifications about calls never wait on the page (a hidden window's timers run late).
 #[derive(Default)]
 struct Following {
-    recording: bool,
-    /// The meeting being recorded.
+    /// A recording with a live transcript ran at the last look.
+    live: bool,
+    /// The meeting being recorded at the last look.
     meeting: Option<i64>,
     /// The meeting whose live panel was closed: it isn't opened again for it.
     dismissed: Option<i64>,
-    /// The last call event seen (None until the first look: older ones are old news).
-    event: Option<i64>,
-    looked: bool,
+    /// How far the shell has said what the engine did on its own: the engine's run (`boot`)
+    /// and the last event said (see /api/record). None until the first answer.
+    events: Option<(String, i64)>,
 }
 
 struct Follow(Mutex<Following>);
@@ -881,7 +882,8 @@ fn stop_recording(info: &EngineInfo) {
     }
 }
 
-/// GET from the engine, as JSON; None if it isn't answering.
+/// GET from the engine, as JSON; None if it isn't answering (or not with a 200). Sent with
+/// the host the engine's gate wants (gate.py) and the token; read up to a megabyte.
 fn engine_get(info: &EngineInfo, path: &str) -> Option<serde_json::Value> {
     let address = SocketAddr::from(([127, 0, 0, 1], info.port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500)).ok()?;
@@ -894,7 +896,7 @@ fn engine_get(info: &EngineInfo, path: &str) -> Option<serde_json::Value> {
     );
     stream.write_all(request.as_bytes()).ok()?;
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).ok()?;
+    stream.take(1 << 20).read_to_end(&mut response).ok()?;
     let text = String::from_utf8_lossy(&response);
     let (head, body) = text.split_once("\r\n\r\n")?;
     if !head.starts_with("HTTP/1.1 200") {
@@ -903,9 +905,86 @@ fn engine_get(info: &EngineInfo, path: &str) -> Option<serde_json::Value> {
     serde_json::from_str(body).ok()
 }
 
-/// Opens the live panel (or shows it again) at the top right of the main screen.
+/// GET from the engine running now: its port and token are read on every call, since each
+/// start of it has its own (a restart included). None while it starts or isn't answering.
+fn ask_engine(engine: &Engine, path: &str) -> Option<serde_json::Value> {
+    let info = engine.info.lock().unwrap().clone()?;
+    engine_get(&info, path)
+}
+
+/// The recording's state, with the call events after the shell's cursor (as the page asks).
+fn record_path(cursor: &Option<(String, i64)>) -> String {
+    match cursor {
+        // The engine's run is hex; anything else is sent as no cursor at all.
+        Some((boot, after)) if boot.bytes().all(|byte| byte.is_ascii_alphanumeric()) => {
+            format!("/api/record?boot={boot}&after={after}")
+        }
+        _ => "/api/record".to_string(),
+    }
+}
+
+/// The call events to tell about after an answer from /api/record, oldest first, and the
+/// cursor after them. Unlike the page, the shell takes everything from a run of the engine it
+/// hasn't seen as news: it started that run itself, so none of it has been told yet (a
+/// restarted engine numbers its events from 1 again).
+fn new_events(
+    cursor: &Option<(String, i64)>,
+    state: &serde_json::Value,
+) -> (Option<(String, i64)>, Vec<serde_json::Value>) {
+    let Some(boot) = state["boot"].as_str() else {
+        return (cursor.clone(), Vec::new());
+    };
+    let from = match cursor {
+        Some((seen, after)) if seen == boot => *after,
+        _ => 0,
+    };
+    let mut fresh: Vec<serde_json::Value> = state["events"]
+        .as_array()
+        .map(|events| {
+            events
+                .iter()
+                .filter(|event| event["id"].as_i64().is_some_and(|id| id > from))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    fresh.sort_by_key(|event| event["id"].as_i64());
+    let last = fresh
+        .last()
+        .and_then(|event| event["id"].as_i64())
+        .unwrap_or(from);
+    (Some((boot.to_string(), last)), fresh)
+}
+
+/// What to do with the live panel after a look: open it when a recording with a live
+/// transcript starts (unless it was closed for that recording), close it when the recording
+/// ends or its live transcript stops (turned off in Settings). None: leave it as it is.
+fn panel_after(
+    seen: &mut Following,
+    recording: bool,
+    meeting: Option<i64>,
+    live: bool,
+) -> Option<bool> {
+    let running = recording && live;
+    let started = running && !(seen.live && seen.meeting == meeting);
+    let action = if started {
+        (seen.dismissed != meeting).then_some(true)
+    } else if seen.live && !running {
+        Some(false)
+    } else {
+        None
+    };
+    seen.live = running;
+    seen.meeting = if recording { meeting } else { None };
+    action
+}
+
+/// Opens the live panel (or shows it again) at the top right of the main screen. It doesn't
+/// take the keyboard from the call as it opens, and can't be maximized or minimized (it has
+/// no taskbar button to come back from).
 fn open_live_panel(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(LIVE) {
+        let _ = window.unminimize();
         let _ = window.show();
         return;
     }
@@ -921,7 +1000,9 @@ fn open_live_panel(app: &AppHandle) {
             .shadow(true)
             .focused(false)
             .content_protected(true)
-            .resizable(true);
+            .resizable(true)
+            .maximizable(false)
+            .minimizable(false);
     if let Ok(Some(monitor)) = app.primary_monitor() {
         let scale = monitor.scale_factor();
         let area = monitor.work_area();
@@ -938,23 +1019,34 @@ fn close_live_panel(app: &AppHandle) {
     }
 }
 
-/// Shows the live panel again after it was closed (the recording bar's button).
+/// Shows the live panel again after it was closed (the recording bar's button). Async: on
+/// Windows, a window made in a command that isn't can hang.
 #[tauri::command]
-fn show_live_panel(app: AppHandle) {
+async fn show_live_panel(app: AppHandle) {
     if let Some(follow) = app.try_state::<Follow>() {
         follow.0.lock().unwrap().dismissed = None;
     }
     open_live_panel(&app);
 }
 
-/// A Windows notification for what the engine did on its own about a call, unless ZachCap's
-/// window is in front (it says so there).
+/// Whether the main window is where the user is looking: shown, not minimized, and focused
+/// (as the page's windowInFront has it). Not while the live panel has the focus.
+fn main_in_front(app: &AppHandle) -> bool {
+    app.get_webview_window("main").is_some_and(|window| {
+        window.is_visible().unwrap_or(false)
+            && !window.is_minimized().unwrap_or(true)
+            && window.is_focused().unwrap_or(false)
+    })
+}
+
+/// A Windows notification for what the engine did on its own about a call: the events the
+/// page says with a toast when its window is in front (the others it only shows there).
 fn tell_about_call(app: &AppHandle, event: &serde_json::Value) {
     let name = event["app"].as_str().unwrap_or("The call app");
     let (title, body) = match event["kind"].as_str() {
         Some("started") => (
             format!("Recording your {name} call"),
-            "It stops when the call ends. Not one to keep? Press Don't record in the live panel."
+            "It stops when the call ends. Not one to keep? Press Don't record in ZachCap."
                 .to_string(),
         ),
         Some("stopped") => (
@@ -972,61 +1064,47 @@ fn tell_about_call(app: &AppHandle, event: &serde_json::Value) {
         ),
         _ => return,
     };
-    let in_front = app
-        .get_webview_window("main")
-        .and_then(|window| window.is_focused().ok())
-        .unwrap_or(false);
-    if in_front {
-        return;
-    }
     use tauri_plugin_notification::NotificationExt;
     let _ = app.notification().builder().title(title).body(body).show();
 }
 
-/// Once a second: opens the live panel when a recording with a live transcript starts,
-/// closes it when the recording ends, and tells about calls recorded or stopped on their own.
+/// Once a second: opens the live panel when a recording with a live transcript starts and
+/// closes it when that ends, and tells about calls recorded or stopped on their own with a
+/// Windows notification when the main window isn't in front (the page shows a toast when it
+/// is). The events come after a cursor of the shell's own, so none is told twice, or lost to
+/// a restart of the engine.
 fn follow_engine(app: AppHandle) {
     std::thread::spawn(move || {
         while !EXITING.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_secs(1));
-            // Read again on every look: each start of the engine has a port and a token of
-            // its own, and there's none while it starts.
-            let Some(info) = app
-                .try_state::<Engine>()
-                .and_then(|engine| engine.info.lock().unwrap().clone())
+            let (Some(engine), Some(follow)) =
+                (app.try_state::<Engine>(), app.try_state::<Follow>())
             else {
                 continue;
             };
-            let Some(state) = engine_get(&info, "/api/record") else {
-                continue;
-            };
-            let Some(follow) = app.try_state::<Follow>() else {
+            let path = record_path(&follow.0.lock().unwrap().events);
+            let Some(state) = ask_engine(&engine, &path) else {
                 continue;
             };
             let recording = state["recording"].as_bool().unwrap_or(false);
             let meeting = state["meeting_id"].as_i64();
             let live = state["live"].as_bool().unwrap_or(false);
-            let event = state["event"]["id"].as_i64();
-            let (open, close, news) = {
+            let (panel, fresh) = {
                 let mut seen = follow.0.lock().unwrap();
-                let started = recording && (!seen.recording || seen.meeting != meeting);
-                let open = started && live && seen.dismissed != meeting;
-                let close = !recording && seen.recording;
-                let news = seen.looked && event.is_some() && event != seen.event;
-                seen.recording = recording;
-                seen.meeting = if recording { meeting } else { None };
-                seen.event = event.or(seen.event);
-                seen.looked = true;
-                (open, close, news)
+                let panel = panel_after(&mut seen, recording, meeting, live);
+                let (cursor, fresh) = new_events(&seen.events, &state);
+                seen.events = cursor;
+                (panel, fresh)
             };
-            if open {
-                open_live_panel(&app);
+            match panel {
+                Some(true) => open_live_panel(&app),
+                Some(false) => close_live_panel(&app),
+                None => {}
             }
-            if close {
-                close_live_panel(&app);
-            }
-            if news {
-                tell_about_call(&app, &state["event"]);
+            if !fresh.is_empty() && !main_in_front(&app) {
+                for event in &fresh {
+                    tell_about_call(&app, event);
+                }
             }
         }
     });
@@ -1297,7 +1375,10 @@ mod tests {
     use super::*;
 
     /// One request answered by a pretend engine: what it was asked, and the reply.
-    fn answer_once(reply: &'static str) -> (EngineInfo, std::thread::JoinHandle<String>) {
+    fn answer_once(
+        token: &str,
+        reply: &'static str,
+    ) -> (EngineInfo, std::thread::JoinHandle<String>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let asked = std::thread::spawn(move || {
@@ -1309,31 +1390,138 @@ mod tests {
         });
         let info = EngineInfo {
             port,
-            token: "secret".into(),
+            token: token.into(),
         };
         (info, asked)
     }
 
-    #[test]
-    fn the_engine_is_asked_with_the_token_and_its_json_read() {
-        let body = r#"{"recording": true, "meeting_id": 7, "live": true}"#;
-        let reply = Box::leak(
+    /// A 200 with that JSON, as the engine sends it.
+    fn json_reply(body: &str) -> &'static str {
+        Box::leak(
             format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
                 body.len()
             )
             .into_boxed_str(),
-        );
-        let (info, asked) = answer_once(reply);
+        )
+    }
+
+    fn engine(info: Option<EngineInfo>) -> Engine {
+        Engine {
+            info: Mutex::new(info),
+            launch: Launch {
+                uv: PathBuf::from("uv"),
+                engine: PathBuf::from("engine"),
+                installed: false,
+            },
+            child: Mutex::new(None),
+            stopped: Mutex::new(None),
+            starting: AtomicBool::new(false),
+            setup: Mutex::new(None),
+        }
+    }
+
+    #[test]
+    fn the_engine_is_asked_with_its_host_and_token_and_its_json_read() {
+        let reply = json_reply(r#"{"recording": true, "meeting_id": 7, "live": true}"#);
+        let (info, asked) = answer_once("secret", reply);
         let state = engine_get(&info, "/api/record").expect("an answer");
         assert_eq!(state["meeting_id"].as_i64(), Some(7));
         let request = asked.join().unwrap();
-        assert!(request.starts_with("GET /api/record HTTP/1.1"));
-        assert!(request.contains("Authorization: Bearer secret"));
+        assert!(request.starts_with("GET /api/record HTTP/1.1\r\n"));
+        // The engine's gate refuses any other host (a page rebinding a name of its own).
+        assert!(request.contains(&format!("\r\nHost: 127.0.0.1:{}\r\n", info.port)));
+        assert!(request.contains("\r\nAuthorization: Bearer secret\r\n"));
 
-        let (info, asked) = answer_once("HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\n\r\n{}");
+        let refused = "HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\n\r\n{}";
+        let (info, asked) = answer_once("secret", refused);
         assert!(engine_get(&info, "/api/record").is_none());
         asked.join().unwrap();
+    }
+
+    #[test]
+    fn the_engine_running_now_is_asked_even_after_a_restart() {
+        // While it starts there's no port yet, and nothing is asked.
+        let engine = engine(None);
+        assert!(ask_engine(&engine, "/api/record").is_none());
+
+        let (first, asked) = answer_once("first", json_reply(r#"{"run": 1}"#));
+        *engine.info.lock().unwrap() = Some(first);
+        assert_eq!(ask_engine(&engine, "/api/record").unwrap()["run"], 1);
+        assert!(asked.join().unwrap().contains("Bearer first"));
+
+        // Started again: a new port and a new token, read at the next ask.
+        let (second, asked) = answer_once("second", json_reply(r#"{"run": 2}"#));
+        let port = second.port;
+        *engine.info.lock().unwrap() = Some(second);
+        assert_eq!(ask_engine(&engine, "/api/record").unwrap()["run"], 2);
+        let request = asked.join().unwrap();
+        assert!(request.contains("Bearer second"));
+        assert!(request.contains(&format!("Host: 127.0.0.1:{port}")));
+    }
+
+    fn event(id: i64, kind: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "kind": kind, "app": "Microsoft Teams", "meeting_id": id})
+    }
+
+    fn ids(events: &[serde_json::Value]) -> Vec<i64> {
+        events
+            .iter()
+            .map(|event| event["id"].as_i64().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn call_events_are_told_once_each_in_order_and_all_after_a_restart() {
+        // The first answer from a run the shell started: everything in it is news.
+        let state =
+            serde_json::json!({"boot": "a1", "events": [event(2, "stopped"), event(1, "started")]});
+        let (cursor, fresh) = new_events(&None, &state);
+        assert_eq!(ids(&fresh), [1, 2]);
+        assert_eq!(cursor, Some(("a1".to_string(), 2)));
+        assert_eq!(record_path(&cursor), "/api/record?boot=a1&after=2");
+
+        // Asked from the cursor on: an event already told is never told again.
+        let state =
+            serde_json::json!({"boot": "a1", "events": [event(2, "stopped"), event(3, "failed")]});
+        let (cursor, fresh) = new_events(&cursor, &state);
+        assert_eq!(ids(&fresh), [3]);
+        let state = serde_json::json!({"boot": "a1", "events": []});
+        let (cursor, fresh) = new_events(&cursor, &state);
+        assert!(fresh.is_empty());
+        assert_eq!(cursor, Some(("a1".to_string(), 3)));
+
+        // The engine started again numbers its events from 1: all of them are news.
+        let state = serde_json::json!({"boot": "b2", "events": [event(1, "started")]});
+        let (cursor, fresh) = new_events(&cursor, &state);
+        assert_eq!(ids(&fresh), [1]);
+        assert_eq!(cursor, Some(("b2".to_string(), 1)));
+
+        // An answer without a run changes nothing; a run that isn't hex isn't sent back.
+        let (same, fresh) = new_events(&cursor, &serde_json::json!({"recording": false}));
+        assert!(fresh.is_empty() && same == cursor);
+        assert_eq!(record_path(&Some(("a&b".to_string(), 3))), "/api/record");
+        assert_eq!(record_path(&None), "/api/record");
+    }
+
+    #[test]
+    fn the_live_panel_opens_once_a_recording_and_closes_when_it_ends() {
+        let mut seen = Following::default();
+        assert_eq!(panel_after(&mut seen, false, None, false), None);
+        assert_eq!(panel_after(&mut seen, true, Some(7), true), Some(true));
+        assert_eq!(panel_after(&mut seen, true, Some(7), true), None);
+        // Closed with its X: not opened again for this recording...
+        seen.dismissed = seen.meeting;
+        assert_eq!(panel_after(&mut seen, true, Some(7), true), None);
+        assert_eq!(panel_after(&mut seen, false, None, false), Some(false));
+        // ...but for the next one.
+        assert_eq!(panel_after(&mut seen, true, Some(8), true), Some(true));
+        // A Stop and a Start between two looks: the next recording's, at once.
+        assert_eq!(panel_after(&mut seen, true, Some(9), true), Some(true));
+        // Turned off in Settings mid-call: it closes; a recording without one never opens it.
+        assert_eq!(panel_after(&mut seen, true, Some(9), false), Some(false));
+        assert_eq!(panel_after(&mut seen, false, None, false), None);
+        assert_eq!(panel_after(&mut seen, true, Some(10), false), None);
     }
 
     #[test]
