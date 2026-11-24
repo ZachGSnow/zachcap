@@ -15,9 +15,10 @@ export function livePath(view: LiveView): string {
   return view.run ? `/api/live?run=${encodeURIComponent(view.run)}&after=${view.after}` : "/api/live";
 }
 
-/** The panel's lines after an answer: the new ones added in order, any left out as echo
- * since taken away, and all of them again for another live transcript (a new recording's).
- * The same view when nothing changed, so nothing on screen moves. */
+/** The panel's lines after an answer: the new ones added in the order they were said (a
+ * line comes when its speaker stops, so one that started earlier can come later), any left
+ * out as echo since taken away, and all of them again for another live transcript (a new
+ * recording's). The same view when nothing changed, so nothing on screen moves. */
 export function mergeLines(view: LiveView, answer: Pick<LiveState, "run" | "lines" | "dropped">): LiveView {
   if (!answer.run) return view.run === null && !view.lines.length ? view : EMPTY_VIEW;
   const same = answer.run === view.run;
@@ -28,7 +29,7 @@ export function mergeLines(view: LiveView, answer: Pick<LiveState, "run" | "line
   if (same && !added.length && !gone.size) return view;
   const lines = [...kept, ...added]
     .filter((line) => !gone.has(line.id))
-    .sort((a, b) => a.id - b.id)
+    .sort((a, b) => a.start - b.start || a.id - b.id)
     .slice(-LINES_SHOWN);
   const after = Math.max(same ? view.after : 0, ...answer.lines.map((line) => line.id));
   return { run: answer.run, after, lines };

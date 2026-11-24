@@ -572,18 +572,20 @@ class Live:
     # What the page reads --------------------------------------------------------------
 
     def lines(self, after: int = 0) -> list[dict]:
+        """The lines after ``after`` (an id), in the order they were said: a line comes when
+        its speaker stops, so one that started earlier can come later."""
         with self._lock:
-            return [
-                {
-                    "id": line.id,
-                    "track": line.track,
-                    "start": round(line.start, 1),
-                    "end": round(line.end, 1),
-                    "text": line.text,
-                }
-                for line in self._lines
-                if line.id > after and not line.echo
-            ]
+            found = [line for line in self._lines if line.id > after and not line.echo]
+        return [
+            {
+                "id": line.id,
+                "track": line.track,
+                "start": round(line.start, 1),
+                "end": round(line.end, 1),
+                "text": line.text,
+            }
+            for line in sorted(found, key=lambda line: (line.start, line.id))
+        ]
 
     def dropped(self, upto: int) -> list[int]:
         """The lines up to ``upto`` left out as echo. One can be found to be echo after the

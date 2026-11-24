@@ -276,6 +276,17 @@ def test_with_the_call_quiet_every_mic_line_is_kept():
     assert [line["text"] for line in transcript.lines()] == ["Thank you."]  # maybe said
 
 
+def test_lines_come_in_the_order_they_were_said():
+    transcript, _ = make({"system": "is it friday", "mic": "yes the cutover is on friday at nine"})
+    # You start first and talk on; the call's short line ends first, so it's made first.
+    Feeder(transcript, "mic").play(np.concatenate([quiet(1), tone(4), quiet(1)]))
+    Feeder(transcript, "system").play(np.concatenate([quiet(2), tone(1), quiet(3)]))
+    transcript.step()
+    lines = transcript.lines()
+    assert [line["track"] for line in lines] == ["mic", "system"]
+    assert lines[0]["id"] > lines[1]["id"]
+
+
 def test_a_track_starting_late_is_placed_on_the_timeline():
     transcript, _ = make()
     late = Feeder(transcript, "mic", rate=16000)

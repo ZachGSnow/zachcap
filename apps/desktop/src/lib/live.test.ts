@@ -44,6 +44,15 @@ describe("the live panel's lines", () => {
     expect(next.after).toBe(3);
   });
 
+  it("shows the lines in the order they were said, not the order they came in", () => {
+    const view = mergeLines(EMPTY_VIEW, answer("a", [line(2)]));
+    // A line comes when its speaker stops: yours started first, and ended last.
+    const yours = { ...line(3, "mic"), start: 7 };
+    const next = mergeLines(view, answer("a", [yours, line(4)]));
+    expect(next.lines.map((l) => l.id)).toEqual([3, 2, 4]);
+    expect(next.after).toBe(4);
+  });
+
   it("keeps the same view when nothing changed, so nothing on screen moves", () => {
     const view = mergeLines(EMPTY_VIEW, answer("a", [line(1)]));
     expect(mergeLines(view, answer("a", []))).toBe(view);
