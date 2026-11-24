@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { useReturnFocus } from "@/hooks/useReturnFocus";
 import { api, isTauri, mediaUrl, type Note } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
+import { pickTextFile } from "@/lib/files";
 import { clock } from "@/lib/format";
 import { useKeys } from "@/lib/shortcuts";
 
@@ -89,11 +90,6 @@ function SnapshotPicture({ note }: { note: Note }) {
   );
 }
 
-/** Notes and bookmarks taken during the meeting (or added while listening back), and
- * snapshots of the call. Summaries and answers give them priority. */
-/** The text files ZachCap reads (the engine refuses others with the reason). */
-const TEXT_FILES = ["txt", "log", "md", "csv", "tsv", "json", "xml", "ini", "cfg", "conf", "config", "yaml", "yml", "toml", "ps1", "psm1", "bat", "cmd", "sh", "py", "reg", "html", "htm", "eml", "err", "out"];
-
 /** An attached file: its name and size, and its text to read. */
 function FileNote({ note }: { note: Note }) {
   const [open, setOpen] = useState(false);
@@ -115,6 +111,8 @@ function FileNote({ note }: { note: Note }) {
   );
 }
 
+/** Notes and bookmarks taken during the meeting (or added while listening back), and
+ * snapshots of the call. Summaries and answers give them priority. */
 export function NotesPanel({
   meetingId,
   notes,
@@ -151,13 +149,9 @@ export function NotesPanel({
 
   const attach = () =>
     attempt("Couldn't attach the file", async () => {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const picked = await open({
-        title: "Attach a text file: a log, an exported email, a config",
-        filters: [{ name: "Text files", extensions: TEXT_FILES }],
-      });
-      if (typeof picked !== "string") return;
-      await api(`/api/meetings/${meetingId}/attach`, { method: "POST", json: { path: picked } });
+      const path = await pickTextFile("Attach a text file: a log, an exported email, a config");
+      if (!path) return;
+      await api(`/api/meetings/${meetingId}/attach`, { method: "POST", json: { path } });
       onChanged();
     });
 

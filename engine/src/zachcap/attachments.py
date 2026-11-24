@@ -18,6 +18,7 @@ KIND = "file"
 MAX_BYTES = 5_000_000  # a bigger file isn't read
 MAX_TEXT = 20_000  # characters kept from one file
 MAX_FILES = 10  # per meeting
+_LEFT_OUT = " more characters left out]"  # how a text that was cut ends
 TEXT_TYPES = {
     ".txt", ".log", ".md", ".csv", ".tsv", ".json", ".xml", ".ini", ".cfg", ".conf", ".config",
     ".yaml", ".yml", ".toml", ".ps1", ".psm1", ".bat", ".cmd", ".sh", ".py", ".reg", ".html",
@@ -89,8 +90,13 @@ def read(path: Path) -> tuple[str, str]:
         raise NotText(f"{name} is empty")
     if len(text) > MAX_TEXT:
         left = len(text) - MAX_TEXT
-        text = text[:MAX_TEXT].rstrip() + f"\n[... {left:,} more characters left out]"
+        text = text[:MAX_TEXT].rstrip() + f"\n[... {left:,}{_LEFT_OUT}"
     return name, text
+
+
+def was_cut(text: str) -> bool:
+    """Whether a file's text is only its first MAX_TEXT characters."""
+    return text.endswith(_LEFT_OUT)
 
 
 def as_note(name: str, text: str) -> str:

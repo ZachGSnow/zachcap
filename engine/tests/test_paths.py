@@ -178,6 +178,7 @@ def looked_at(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     [
         ("POST", "/api/import", {"json": {"path": SHARE + r"\call.mp4"}}, "file"),
         ("POST", "/api/meetings/{id}/attach", {"json": {"path": SHARE + r"\spooler.log"}}, "file"),
+        ("POST", "/api/vocabulary/found", {"json": {"path": SHARE + r"\assets.csv"}}, "file"),
         (
             "POST",
             "/api/meetings/{id}/export",
@@ -193,7 +194,15 @@ def looked_at(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         ),
         ("GET", "/api/watch-folder/files", {"params": {"path": SHARE}}, "folder"),
     ],
-    ids=["import", "attach", "export", "export folder", "watch folder", "watch folder files"],
+    ids=[
+        "import",
+        "attach",
+        "words found",
+        "export",
+        "export folder",
+        "watch folder",
+        "watch folder files",
+    ],
 )
 def test_each_path_the_app_sends_is_refused_on_another_computer_untouched(
     client: TestClient, looked_at: list[str], tmp_path: Path, method, url, sent, what

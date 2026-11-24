@@ -113,6 +113,44 @@ def test_adding_an_entry_merges_into_the_terms_own_line():
         raise AssertionError("accepted a list over the limit")
 
 
+def test_a_line_break_of_any_kind_doesnt_fit_on_a_line():
+    # Written as it is, it made two lines of one term the next time the list was read.
+    for code in (0x0A, 0x0D, 0x0B, 0x0C, 0x1E, 0x85, 0x2028):
+        assert not vocabulary.usable(f"Prox{chr(code)}mox")
+        try:
+            vocabulary.add_correction("Contoso", "Proxmox", f"prox{chr(code)}mocks")
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {code:#x}")
+    assert vocabulary.usable("Proxmox VE")
+    assert not vocabulary.usable("") and not vocabulary.usable("365")
+
+
+def test_several_terms_are_added_all_or_none():
+    add = vocabulary.add_terms
+    listed = "Contoso, Datto\nProxmox: prox mocks"
+    assert add(listed, ["datto", "Dana Lee", "PROXMOX", " dana lee ", "M365"]) == (
+        "Contoso, Datto\nProxmox: prox mocks\nDana Lee\nM365"
+    )
+    assert add(None, ["Datto"]) == "Datto" and add("Contoso", []) == "Contoso"
+    for terms in (["Datto", "A, B"], ["Datto", "365"], ["Datto", "x" * 4000]):
+        try:
+            add("Contoso", terms)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {terms}")
+    # What fits by room is what can be added: each term on a line of its own.
+    assert vocabulary.room("") == vocabulary.room(None) == 4000
+    assert vocabulary.room("x" * 3990) == 10 and vocabulary.room("x" * 4001) == 0
+    assert len(add("x" * 3990, ["Tailspins"])) == 4000
+    try:
+        add("x" * 3990, ["Adventures"])
+    except ValueError as exc:
+        assert "full" in str(exc)
+    else:
+        raise AssertionError("accepted a list over the limit")
+
+
 def test_a_fixed_password_is_never_offered_as_a_word_to_know():
     # Rewording a password said aloud must not put it into every prompt sent to Claude.
     assert vocabulary.suggest("set it to hunter too", "set it to hunter2", "") is None

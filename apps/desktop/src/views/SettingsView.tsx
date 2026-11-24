@@ -40,6 +40,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { SoundCheck } from "@/components/SoundCheck";
+import { WordsFromFile } from "@/components/WordsFromFile";
 import { usePoll } from "@/hooks/usePoll";
 import { useReturnFocus } from "@/hooks/useReturnFocus";
 import { choiceList } from "@/lib/choices";
@@ -64,6 +65,7 @@ import {
   type ShortcutStatus,
 } from "@/lib/shortcuts";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
+import { carriedOver } from "@/lib/words";
 import { gigabytes, type Writer } from "@/lib/writer";
 
 const KEYS = [
@@ -582,9 +584,23 @@ function KeyRow({ name, title, help, status, onSaved }: { name: string; title: s
 }
 
 /** Names and jargon Whisper should spell right, with what it mishears them as. */
-function WordsToKnow({ saved, onSave }: { saved: string; onSave: (value: string) => Promise<void> }) {
+function WordsToKnow({
+  saved,
+  onSave,
+  onAdded,
+}: {
+  saved: string;
+  onSave: (value: string) => Promise<void>;
+  /** After words from a file were added to the saved list: Settings reads it again. */
+  onAdded: () => Promise<void>;
+}) {
   const [value, setValue] = useState(saved);
-  useEffect(() => setValue(saved), [saved]);
+  const last = useRef(saved);
+  useEffect(() => {
+    const before = last.current;
+    last.current = saved;
+    setValue((edited) => carriedOver(edited, before, saved));
+  }, [saved]);
   const changed = value.trim() !== saved.trim();
   return (
     <div className="px-4 py-3.5">
@@ -601,7 +617,8 @@ function WordsToKnow({ saved, onSave }: { saved: string; onSave: (value: string)
         placeholder={"Contoso\nProxmox: prox mocks, proxmocks\nConnectWise"}
         className="mt-2.5 min-h-24 font-mono text-xs"
       />
-      <div className="mt-2 flex justify-end">
+      <div className="mt-2 flex justify-between gap-2">
+        <WordsFromFile onAdded={onAdded} />
         <Button size="sm" disabled={!changed} onClick={() => void onSave(value)}>
           Save words
         </Button>
@@ -969,7 +986,11 @@ export function SettingsView() {
               onCheckedChange={(on) => void save({ faster_speakers: on })}
             />
           </Row>
-          <WordsToKnow saved={settings?.vocabulary ?? ""} onSave={(vocabulary) => save({ vocabulary })} />
+          <WordsToKnow
+            saved={settings?.vocabulary ?? ""}
+            onSave={(vocabulary) => save({ vocabulary })}
+            onAdded={refresh}
+          />
         </Section>
 
         <Section icon={<Sparkles className="size-3.5" />} title="Summaries">

@@ -59,6 +59,7 @@ from . import (
     redact,
     related,
     shortcuts,
+    terms,
     tickets,
     topics,
     watchfolder,
@@ -84,6 +85,14 @@ class LineTextBody(BaseModel):
 class CorrectionBody(BaseModel):
     term: str
     misheard: str | None = None
+
+
+class FileBody(BaseModel):
+    path: str  # a text file on this PC, to find names and terms in
+
+
+class TermsBody(BaseModel):
+    terms: list[str]  # the ones ticked
 
 
 class RedactBody(BaseModel):
@@ -1598,6 +1607,35 @@ def create_app(token: str) -> FastAPI:
     def add_to_words_to_know(body: CorrectionBody, store: Store = Depends(db)):
         try:
             merged = words.add_correction(store.setting("vocabulary"), body.term, body.misheard)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        store.set_setting("vocabulary", merged)
+        return {"vocabulary": merged}
+
+    @app.post("/api/vocabulary/found", dependencies=auth)
+    def words_found(body: FileBody, store: Store = Depends(db)):
+        """The names and terms in a text file worth having in Words to know, except those
+        listed there and the people named already (Whisper gets both). The file is only read,
+        and nothing of it is kept."""
+        source = on_a_drive(body.path)
+        try:
+            name, text = attachments.read(source)
+        except attachments.NotText as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        saved = store.setting("vocabulary")
+        known = [*words.parse(saved).terms, *(person["name"] for person in store.people())]
+        return {
+            "name": name,
+            "terms": terms.found_in(text, known),
+            "room": words.room(saved),
+            "cut": attachments.was_cut(text),
+        }
+
+    @app.post("/api/vocabulary/add", dependencies=auth)
+    def add_words_found(body: TermsBody, store: Store = Depends(db)):
+        """Adds the ones ticked to Words to know: all of them, or none and why."""
+        try:
+            merged = words.add_terms(store.setting("vocabulary"), body.terms)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         store.set_setting("vocabulary", merged)

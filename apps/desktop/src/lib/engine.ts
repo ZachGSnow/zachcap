@@ -393,6 +393,20 @@ export type Settings = {
   me: { id: number; name: string };
 };
 
+/** A name or term found in a file, and how often. */
+export type WordFound = { term: string; count: number };
+
+/** What was found in a file for Words to know, the most useful first. */
+export type WordsFound = {
+  /** The file's. */
+  name: string;
+  terms: WordFound[];
+  /** How many more characters the list takes. */
+  room: number;
+  /** Only the first 20,000 characters were looked at. */
+  cut: boolean;
+};
+
 /** A recent dictation, kept in memory by the engine (never on disk). */
 export type RecentDictation = {
   id: number;
