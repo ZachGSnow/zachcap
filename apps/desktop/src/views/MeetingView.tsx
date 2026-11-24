@@ -311,6 +311,15 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
     if (saved) await refresh();
   };
 
+  /** The service ticket it was about ("" takes it off); done once the page shows what the
+   * engine stored. */
+  const saveTicket = async (ticket: string) => {
+    const saved = await attempt("Couldn't save the ticket", () =>
+      api(`/api/meetings/${id}`, { method: "PATCH", json: { ticket } }),
+    );
+    if (saved) await refresh();
+  };
+
   // A file the user picks in the save dialog (or a download, outside the desktop app).
   const exportAs = (format: "md" | "txt" | "srt") =>
     attempt("Couldn't export the meeting", async () => {
@@ -527,10 +536,9 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 </button>
               ))}
             <TicketControl
-              meetingId={meeting.id}
               ticket={meeting.ticket ?? null}
               suggestions={data.ticket_suggestions ?? []}
-              onChanged={() => void refresh()}
+              onSave={saveTicket}
             />
           </div>
         </div>

@@ -2,7 +2,8 @@ import { Building2 } from "lucide-react";
 import { useId, useRef, useState } from "react";
 
 import { Input } from "@/components/ui/input";
-import { clientShown, closing, saveShowing, type Closing } from "@/lib/clients";
+import { clientShown } from "@/lib/clients";
+import { closing, saveShowing, type Closing } from "@/lib/inplace";
 import { cn } from "@/lib/utils";
 
 /** The clients named so far, offered while typing a client's name. */

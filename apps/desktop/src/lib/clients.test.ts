@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { clientHint, clientShown, closing, followsOffered, saveShowing } from "./clients";
+import { clientHint, clientShown, followsOffered } from "./clients";
+import { closing } from "./inplace";
 
 describe("the client box", () => {
   it("opens on the client a meeting's people work for, so emptying it is no client", () => {
@@ -10,22 +11,7 @@ describe("the client box", () => {
     expect(closing("Enter", start, " Contoso ").save).toBeNull(); // left as it was: nothing saved
   });
 
-  it("saves a change on Enter or a click elsewhere, never on Escape", () => {
-    expect(closing("Enter", "", "Contoso").save).toBe("Contoso");
-    expect(closing("blur", "Contoso", "Fabrikam").save).toBe("Fabrikam");
-    expect(closing("Escape", "Contoso", "Fabrikam").save).toBeNull();
-  });
-
-  it("gives focus back to its button after a key, not after a click elsewhere", () => {
-    expect(closing("Enter", "", "Contoso").refocus).toBe(true);
-    expect(closing("Escape", "", "").refocus).toBe(true);
-    expect(closing("blur", "", "Contoso").refocus).toBe(false); // the click put it somewhere
-  });
-
-  it("shows a name only while it's being saved, so a refused one goes", async () => {
-    const shown: (string | null)[] = [];
-    await saveShowing("Fabrikam", async () => false, (pending) => shown.push(pending));
-    expect(shown).toEqual(["Fabrikam", null]);
+  it("shows a name being saved as set, then the page's", () => {
     expect(clientShown("Contoso", true, "Fabrikam")).toEqual({ name: "Fabrikam", dashed: false, start: "Fabrikam" });
     expect(clientShown("Contoso", false, null).name).toBe("Contoso");
     expect(clientShown("Contoso", false, "").name).toBeNull(); // "no client" being saved
