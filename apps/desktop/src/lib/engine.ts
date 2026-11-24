@@ -147,9 +147,21 @@ export type TopicOverview = {
   meetings: { id: number; title: string; started_at: string; client: string | null; count: number }[];
 };
 
-/** A summary, document or answer being written by the model on this PC (``by``): the part it's on, of
- * how many (0: it waits for its turn; one past them: it puts them together). */
-export type Writing = { what: "summary" | "document" | "answer"; by: string; part: number; of: number };
+/** A summary, document or answer by the model on this PC (``by``): the part it's on, of how many
+ * (0: it waits for its turn; one past them: it puts them together), and once it's over, what came
+ * of it. */
+export type Writing<T = unknown> = {
+  id: string;
+  what: "summary" | "document" | "answer";
+  /** Which document, or the question. */
+  about: string | null;
+  by: string;
+  part: number;
+  of: number;
+  state: "writing" | "done" | "failed" | "stopped";
+  result: T | null;
+  error: string | null;
+};
 
 /** The models on this PC that could write (Ollama's), or why there are none. */
 export type LocalModels = {
@@ -175,8 +187,10 @@ export type MeetingDetail = {
   ticket_suggestions: TicketFound[];
   /** The topics said in it, most said first. */
   topics?: TopicFound[];
-  /** What the model on this PC is writing for it now. */
+  /** What the model on this PC is writing for it now, and the documents and answers it wrote
+   * since ZachCap started. */
   writing?: Writing | null;
+  written?: Writing[];
   /** The clients of the people in it, and every client named so far. */
   clients_heard: string[];
   clients_known: string[];
@@ -389,6 +403,9 @@ export type RecentDictation = {
 };
 
 export type RecipeResult = { title: string; text: string; model: string; cost_usd: number };
+
+/** The answer to a question about a meeting. */
+export type AnswerResult = { answer: string; model: string; cost_usd: number };
 
 /** A kind of meeting (what a summary focuses on) or a one-click document. */
 export type PromptKind = "template" | "recipe";

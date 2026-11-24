@@ -2,6 +2,7 @@
 it is asked and answers what the test says, so nothing is downloaded and no model runs."""
 
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from zachcap import api as engine_api
 from zachcap import clients, local_summary, ollama, pipeline, prompts, summarize
 from zachcap.api import create_app
 from zachcap.local_summary import Line
@@ -620,6 +622,19 @@ def summarize_(api: TestClient, meeting: int, **body):
     return api.post(f"/api/meetings/{meeting}/summary", headers=AUTH, json=body)
 
 
+def started(response) -> str:
+    """The id of what the model on this PC was asked for."""
+    assert response.status_code == 202, response.text
+    return response.json()["writing"]
+
+
+def over(api: TestClient, response) -> dict:
+    """What came of it, once it's over."""
+    run = f"/api/writing/{started(response)}"
+    until(lambda: api.get(run, headers=AUTH).json()["state"] != "writing")
+    return api.get(run, headers=AUTH).json()
+
+
 def test_settings_choose_the_model_and_who_writes(api, store, model):
     settings = api.get("/api/settings", headers=AUTH).json()
     assert (settings["writer"], settings["local_model"]) == ("claude", "")
@@ -659,10 +674,11 @@ def test_who_writes_is_as_asked_else_the_usual_one(api, store, model, monkeypatc
     put(api, local_model="small:4b")
     summarize_(api, meeting, template="standup")
     assert claude == ["standup"] and model.calls == []
-    written = summarize_(api, meeting, template="standup", by="local").json()
-    assert written["model"] == "ollama/small:4b" and len(model.calls) == 1
+    written = over(api, summarize_(api, meeting, template="standup", by="local"))
+    assert (written["state"], written["what"], written["by"]) == ("done", "summary", "small:4b")
+    assert store.summary(meeting)["model"] == "ollama/small:4b" and len(model.calls) == 1
     put(api, writer="local")
-    summarize_(api, meeting)
+    over(api, summarize_(api, meeting))
     assert len(model.calls) == 2
     summarize_(api, meeting, by="claude")
     assert len(claude) == 2
@@ -676,18 +692,21 @@ def test_a_private_meeting_is_only_written_on_this_pc(api, store, model):
     assert refused.status_code == 400 and "A model on this PC can write" in refused.json()["detail"]
     assert ask(api, meeting, "When?").status_code == 400  # nobody answers either
     put(api, local_model="small:4b")
-    assert summarize_(api, meeting).json()["model"] == "ollama/small:4b"  # though Claude is usual
+    assert over(api, summarize_(api, meeting))["state"] == "done"  # though Claude is usual
+    assert store.summary(meeting)["model"] == "ollama/small:4b"
     assert summarize_(api, meeting, by="claude").status_code == 400
     model.answer = lambda call: "Notes."
     recipe = {"recipe": "ticket"}
-    document = api.post(f"/api/meetings/{meeting}/recipe", headers=AUTH, json=recipe).json()
+    document = over(api, api.post(f"/api/meetings/{meeting}/recipe", headers=AUTH, json=recipe))
+    assert (document["what"], document["about"]) == ("document", "ticket")
+    document = document["result"]
     assert (document["text"], document["model"]) == ("Notes.", "ollama/small:4b")
     refused = api.post(
         f"/api/meetings/{meeting}/recipe", headers=AUTH, json={**recipe, "by": "claude"}
     )
     assert refused.status_code == 400
     model.answer = lambda call: "On Tuesday [01:01]."
-    answered = ask(api, meeting, "When?").json()
+    answered = over(api, ask(api, meeting, "When?"))["result"]
     assert (answered["answer"], answered["model"]) == ("On Tuesday [01:01].", "ollama/small:4b")
 
 
@@ -712,13 +731,6 @@ def ask(api: TestClient, meeting: int, question: str):
     return api.post(f"/api/meetings/{meeting}/ask", headers=AUTH, json=asked)
 
 
-def in_background(call) -> tuple[threading.Thread, list]:
-    got: list = []
-    thread = threading.Thread(target=lambda: got.append(call()), daemon=True)
-    thread.start()
-    return thread, got
-
-
 def writing(api: TestClient, meeting: int):
     return api.get(f"/api/meetings/{meeting}", headers=AUTH).json()["writing"]
 
@@ -741,14 +753,15 @@ def test_only_a_private_meetings_questions_are_answered_here(api, store, model, 
 
     store.update_meeting(meeting, private=1)
     held = Held(model)
-    thread, got = in_background(lambda: ask(api, meeting, "When?"))
+    asked = ask(api, meeting, "When?")
     assert held.entered.wait(10)
-    assert writing(api, meeting)["what"] == "answer"
+    now = writing(api, meeting)
+    assert (now["what"], now["about"]) == ("answer", "When?")
     busy = ask(api, meeting, "And who?")
     assert busy.status_code == 409 and "answering a question" in busy.json()["detail"]
     api.post(f"/api/meetings/{meeting}/writing/stop", headers=AUTH)
-    thread.join(10)
-    assert got[0].status_code == 409 and got[0].json()["detail"] == "Stopped."
+    got = over(api, asked)
+    assert (got["state"], got["error"]) == ("stopped", "Stopped.")
     assert len(claude) == 1
 
 
@@ -760,10 +773,20 @@ def test_it_says_how_far_it_is_and_is_stopped(api, store, model):
     assert writing(api, meeting) is None
     assert api.post(stop, headers=AUTH).status_code == 409  # nothing to stop
     held = Held(model)
-    thread, got = in_background(lambda: summarize_(api, meeting, by="local"))
+    asked = summarize_(api, meeting, by="local")
     assert held.entered.wait(10)
 
-    assert writing(api, meeting) == {"what": "summary", "by": "small:4b", "part": 1, "of": 1}
+    assert writing(api, meeting) == {
+        "id": started(asked),
+        "what": "summary",
+        "about": None,
+        "by": "small:4b",
+        "part": 1,
+        "of": 1,
+        "state": "writing",
+        "result": None,
+        "error": None,
+    }
     # One thing at a time for a meeting: words redacted now would come back with it.
     busy = summarize_(api, meeting, by="local")
     assert busy.status_code == 409 and "writing its summary" in busy.json()["detail"]
@@ -771,65 +794,195 @@ def test_it_says_how_far_it_is_and_is_stopped(api, store, model):
     refused = api.post(f"/api/meetings/{meeting}/redact", headers=AUTH, json=redact)
     assert refused.status_code == 409
     assert api.post(stop, headers=AUTH).json() == {"stopping": True}
-    thread.join(10)
 
-    assert got[0].status_code == 409 and got[0].json()["detail"] == "Stopped."
+    got = over(api, asked)
+    assert (got["state"], got["error"]) == ("stopped", "Stopped.")
     assert store.summary(meeting)["content"] == {"title": "Kept"}
     assert writing(api, meeting) is None and model.unloaded == ["small:4b"]
     held.go.set()
-    assert summarize_(api, meeting, by="local").is_success  # free again
+    assert over(api, summarize_(api, meeting, by="local"))["state"] == "done"  # free again
+
+
+class Processing:
+    """Stands in for processing a meeting, as slow as the test wants: which ones, in order."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.entered, self.go = threading.Event(), threading.Event()
+        self.order: list[int] = []
+        monkeypatch.setattr(pipeline, "process", self.process)
+
+    def process(self, store, meeting_id, log) -> None:
+        self.order.append(meeting_id)
+        self.entered.set()
+        assert self.go.wait(20)
 
 
 def test_it_waits_its_turn_after_a_meeting_being_processed(api, store, model, monkeypatch):
     meeting = add_meeting(store, SHORT)
     put(api, local_model="small:4b")
-    processing, go = threading.Event(), threading.Event()
-
-    def process(store, meeting_id, log):
-        processing.set()
-        assert go.wait(20)
-
-    monkeypatch.setattr(pipeline, "process", process)
+    processing = Processing(monkeypatch)
     api.app.state.submit(add_meeting(store, SHORT))
-    assert processing.wait(10)
-    thread, got = in_background(lambda: summarize_(api, meeting, by="local"))
-    until(lambda: writing(api, meeting) is not None)
+    assert processing.entered.wait(10)
+    asked = summarize_(api, meeting, by="local")
 
     assert writing(api, meeting)["part"] == 0 and model.calls == []  # waiting
     # Stopped while it waits, it's over at once, and never starts.
     api.post(f"/api/meetings/{meeting}/writing/stop", headers=AUTH)
-    thread.join(10)
-    assert got[0].status_code == 409
-    thread, got = in_background(lambda: summarize_(api, meeting, by="local"))
-    until(lambda: writing(api, meeting) is not None)
-    go.set()
-    thread.join(20)
-    assert got[0].is_success and len(model.calls) == 1
+    got = api.get(f"/api/writing/{started(asked)}", headers=AUTH).json()
+    assert (got["state"], got["error"]) == ("stopped", "Stopped.")
+    assert writing(api, meeting) is None
+    asked = summarize_(api, meeting, by="local")
+    processing.go.set()
+    assert over(api, asked)["state"] == "done" and len(model.calls) == 1
     until(lambda: not api.app.state.worker_gpu.wanted())  # the live transcript may go on
+
+
+def test_meetings_to_process_go_before_what_is_to_be_written(api, store, model, monkeypatch):
+    put(api, local_model="small:4b")
+    order: list = []
+    processing = Processing(monkeypatch)
+    processing.order = order
+    first, later = add_meeting(store, SHORT), add_meeting(store, SHORT)
+    to_write = [add_meeting(store, SHORT, f"To write {n}") for n in range(8)]
+    model.answer = lambda call: order.append(call.user.split("\n")[0]) or ANSWER
+    api.app.state.submit(first)
+    assert processing.entered.wait(10)
+    # A page has six requests at a time at most: none of these is kept waiting.
+    asked = [summarize_(api, meeting, by="local") for meeting in to_write]
+    api.app.state.submit(later)
+    processing.go.set()
+    assert all(over(api, one)["state"] == "done" for one in asked)
+    assert order == [first, later, *(f"Meeting: To write {n}" for n in range(8))]
+
+
+def test_a_meeting_recorded_meanwhile_is_processed_between_two_parts(
+    api, store, model, monkeypatch
+):
+    put(api, local_model="small:4b")
+    meeting, recorded = add_meeting(store, LONG), add_meeting(store, SHORT)
+    processing = Processing(monkeypatch)
+    said: list[str] = []
+
+    def answer(call):
+        if processing.order and not said:
+            said.append(f"asked after {model.unloaded}")
+        if not processing.order:
+            api.app.state.submit(recorded)
+            until(lambda: api.app.state.worker_gpu.wanted())
+        return ANSWER if "Notes taken" not in call.user else {"overview": "O.", "title": "T"}
+
+    model.answer = answer
+    asked = summarize_(api, meeting, by="local")
+    assert processing.entered.wait(10)
+    # It waits meanwhile, with its model out of the way.
+    assert writing(api, meeting)["part"] == 0 and len(model.calls) == 1
+    assert model.unloaded == ["small:4b"]
+    processing.go.set()
+    assert over(api, asked)["state"] == "done"
+    assert processing.order == [recorded] and said == ["asked after ['small:4b']"]
+    assert store.summary(meeting)["content"]["overview"] == "O."
+
+
+def test_stopped_while_a_meeting_goes_first_it_is_over_at_once(api, store, model, monkeypatch):
+    put(api, local_model="small:4b")
+    meeting, recorded = add_meeting(store, LONG), add_meeting(store, SHORT)
+    processing = Processing(monkeypatch)
+
+    def answer(call):
+        if not processing.order:
+            api.app.state.submit(recorded)
+        return ANSWER
+
+    model.answer = answer
+    asked = summarize_(api, meeting, by="local")
+    assert processing.entered.wait(10)
+    api.post(f"/api/meetings/{meeting}/writing/stop", headers=AUTH)
+    got = api.get(f"/api/writing/{started(asked)}", headers=AUTH).json()
+    assert (got["state"], got["error"]) == ("stopped", "Stopped.")
+    again = summarize_(api, meeting, by="local")  # the meeting isn't busy any more
+    processing.go.set()
+    assert over(api, again)["state"] == "done"
+    # The stopped one went no further.
+    assert api.get(f"/api/writing/{started(asked)}", headers=AUTH).json()["state"] == "stopped"
+    assert store.summary(meeting) is not None
+
+
+def test_what_was_written_is_kept_for_the_page(api, store, model):
+    meeting = add_meeting(store, SHORT)
+    store.update_meeting(meeting, private=1)
+    put(api, local_model="small:4b")
+
+    def written() -> list[tuple]:
+        kept = api.get(f"/api/meetings/{meeting}", headers=AUTH).json()["written"]
+        return [
+            (run["what"], run["about"], run["state"], (run["result"] or {}).get("model"))
+            for run in kept
+        ]
+
+    over(api, summarize_(api, meeting))  # a summary is the meeting's
+    assert written() == []
+    model.answer = lambda call: "Notes."
+    recipe = {"recipe": "ticket"}
+    over(api, api.post(f"/api/meetings/{meeting}/recipe", headers=AUTH, json=recipe))
+    over(api, ask(api, meeting, "When?"))
+    model.answer = lambda call: ollama.Failed("Ollama: model requires more system memory")
+    over(api, ask(api, meeting, "Who?"))
+    by = "ollama/small:4b"
+    assert written() == [
+        ("document", "ticket", "done", by),
+        ("answer", "When?", "done", by),
+        ("answer", "Who?", "failed", None),
+    ]
+    assert api.get("/api/writing/gone", headers=AUTH).status_code == 404
+    last = api.get(f"/api/meetings/{meeting}", headers=AUTH).json()["written"][-1]
+    assert api.get(f"/api/writing/{last['id']}").status_code == 401
+    assert api.get(f"/api/writing/{last['id']}", headers=AUTH).json() == last
+
+    # They go with the meeting's words.
+    redact = {"start": 0.0, "end": 5.0}
+    assert api.post(f"/api/meetings/{meeting}/redact", headers=AUTH, json=redact).is_success
+    assert written() == []
+    model.answer = lambda call: "Notes."
+    run = started(ask(api, meeting, "When?"))
+    until(lambda: written() != [])
+    assert api.delete(f"/api/meetings/{meeting}", headers=AUTH).is_success
+    assert api.get(f"/api/writing/{run}", headers=AUTH).status_code == 404
 
 
 def test_a_meeting_deleted_while_it_is_written_is_left_alone(api, store, model):
     meeting = add_meeting(store, SHORT)
     put(api, local_model="small:4b")
     held = Held(model)
-    thread, got = in_background(lambda: summarize_(api, meeting, by="local"))
+    asked = summarize_(api, meeting, by="local")
     assert held.entered.wait(10)
     assert api.delete(f"/api/meetings/{meeting}", headers=AUTH).is_success
-    thread.join(10)
-    assert got[0].status_code == 409 and store.summary(meeting) is None
+    assert over(api, asked)["state"] == "stopped" and store.summary(meeting) is None
 
 
-def test_a_model_that_fails_says_why(api, store, model):
+def test_a_model_that_fails_says_why(api, store, model, monkeypatch):
     meeting = add_meeting(store, SHORT)
     put(api, local_model="small:4b")
     model.answer = lambda call: ollama.Failed("Ollama: model requires more system memory")
-    failed = summarize_(api, meeting, by="local")
-    assert failed.status_code == 400 and "more system memory" in failed.json()["detail"]
+    failed = over(api, summarize_(api, meeting, by="local"))
+    assert failed["state"] == "failed" and "more system memory" in failed["error"]
     model.answer = lambda call: ValueError("odd")
-    assert summarize_(api, meeting, by="local").json()["detail"] == "Couldn't write it: odd"
-    # The worker goes on after either.
+    failed = over(api, summarize_(api, meeting, by="local"))
+    assert (failed["state"], failed["error"]) == ("failed", "Couldn't write it: odd")
+
+    opened = engine_api.Store
+
+    def locked(*args, **options):
+        if threading.current_thread().name == "zachcap-worker":
+            raise sqlite3.OperationalError("database is locked")
+        return opened(*args, **options)
+
+    monkeypatch.setattr(engine_api, "Store", locked)
+    failed = over(api, summarize_(api, meeting, by="local"))
+    assert failed["error"] == "Couldn't write it: database is locked"
+    monkeypatch.setattr(engine_api, "Store", opened)
+    # The worker goes on after each.
     model.answer = lambda call: ANSWER
-    assert summarize_(api, meeting, by="local").is_success
+    assert over(api, summarize_(api, meeting, by="local"))["state"] == "done"
 
 
 def test_clients_still_make_it_a_customer_call(store, model):

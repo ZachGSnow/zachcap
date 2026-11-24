@@ -486,35 +486,50 @@ function LocalModel({ chosen, onChoose }: { chosen: string; onChoose: (name: str
     >
       {!local ? (
         <span className="text-xs text-muted-foreground">Looking for Ollama...</span>
-      ) : local.models.length ? (
-        <Select
-          label="Model on this PC"
-          value={chosen}
-          onChange={onChoose}
-          options={[
-            { value: "", label: "None" },
-            // One that isn't there any more stays shown, so it's clear why it fails.
-            ...(chosen && !names.includes(chosen) ? [{ value: chosen, label: `${chosen} (not on this PC)` }] : []),
-            ...local.models.map((model) => ({ value: model.name, label: `${model.name} (${gigabytes(model.size)})` })),
-          ]}
-        />
       ) : (
         <div className="w-full space-y-2">
-          <p className="text-xs text-muted-foreground">
-            {local.running
-              ? `Ollama runs, but has no model yet. ${local.suggested} did best of the small ones tried (3.3 GB).`
-              : "Ollama isn't running on this PC. Install it from ollama.com, then get a model:"}
-          </p>
-          <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={() => void copyText(get, `Copied: ${get}`)}>
-              <Copy className="size-3.5" />
-              Copy command
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => void refresh()}>
-              <RefreshCw className="size-3.5" />
-              Look again
-            </Button>
-          </div>
+          {/* Also while Ollama is off: it can be unchosen then. */}
+          {(local.models.length > 0 || chosen) && (
+            <Select
+              label="Model on this PC"
+              value={chosen}
+              onChange={onChoose}
+              options={[
+                { value: "", label: "None" },
+                // One that isn't there any more stays shown, so it's clear why it fails.
+                ...(chosen && !names.includes(chosen)
+                  ? [{ value: chosen, label: local.running ? `${chosen} (not on this PC)` : chosen }]
+                  : []),
+                ...local.models.map((model) => ({
+                  value: model.name,
+                  label: `${model.name} (${gigabytes(model.size)})`,
+                })),
+              ]}
+            />
+          )}
+          {local.models.length === 0 && (
+            <>
+              <p className="text-xs text-muted-foreground">
+                {local.running
+                  ? `Ollama runs, but has no model yet. ${local.suggested} did best of the small ones tried (3.3 GB).`
+                  : chosen
+                    ? "Ollama isn't running on this PC. Start it to write here."
+                    : "Ollama isn't running on this PC. Install it from ollama.com, then get a model:"}
+              </p>
+              <div className="flex gap-2">
+                {(local.running || !chosen) && (
+                  <Button size="sm" variant="outline" onClick={() => void copyText(get, `Copied: ${get}`)}>
+                    <Copy className="size-3.5" />
+                    Copy command
+                  </Button>
+                )}
+                <Button size="sm" variant="outline" onClick={() => void refresh()}>
+                  <RefreshCw className="size-3.5" />
+                  Look again
+                </Button>
+              </div>
+            </>
+          )}
         </div>
       )}
     </Row>
