@@ -85,7 +85,7 @@ function EngineStopped({ message, onRestarted }: { message: string; onRestarted:
     setRestarting(true);
     try {
       await invoke("restart_engine");
-      await waitForEngine(90_000);
+      await waitForEngine();
       toast.success("The engine is running again");
       onRestarted();
     } catch (error) {

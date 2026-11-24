@@ -398,7 +398,7 @@ export function mediaUrl(path: string): string {
 /** Waits until the engine answers. While an installed copy sets its engine up (the first
  * launch downloads Python and the speech libraries, a few GB), `onSetup` hears what it's
  * doing and the wait doesn't run out. */
-export async function waitForEngine(timeoutMs = 180_000, onSetup?: (step: string) => void): Promise<void> {
+export async function waitForEngine(timeoutMs = 330_000, onSetup?: (step: string) => void): Promise<void> {
   let deadline = Date.now() + timeoutMs;
   for (;;) {
     try {

@@ -46,6 +46,8 @@ struct Engine {
     /// While an installed copy sets its engine up: the last thing uv said, for the startup
     /// screen.
     setup: Mutex<Option<String>>,
+    /// The uv setting the engine up, while it runs, so quitting ZachCap stops its download too.
+    uv: Mutex<Option<u32>>,
 }
 
 /// Where the engine and uv are. An installed copy runs the engine that came with it, in a
@@ -604,14 +606,23 @@ fn begin(app: AppHandle) {
                 *engine.child.lock().unwrap() = Some(child);
                 match wait_for_port(&engine, &port_file) {
                     Some(port) => *engine.info.lock().unwrap() = Some(EngineInfo { port, token }),
-                    None if engine.stopped.lock().unwrap().is_none() => {
-                        if let Some(mut child) = engine.child.lock().unwrap().take() {
-                            let _ = child.kill();
+                    None => {
+                        if engine.stopped.lock().unwrap().is_none() {
+                            if let Some(mut child) = engine.child.lock().unwrap().take() {
+                                let _ = child.kill();
+                            }
+                            *engine.stopped.lock().unwrap() = Some(
+                                "The engine started but never said which port it's on.".into(),
+                            );
+                        } // else it stopped, and check_engine said why
+                        // An installed engine that can't start may be a broken venv: the next
+                        // start (Try again) sets it up again instead of failing the same way.
+                        if engine.launch.installed {
+                            let _ = std::fs::remove_file(
+                                engine.launch.engine.join(".venv").join(SET_UP),
+                            );
                         }
-                        *engine.stopped.lock().unwrap() =
-                            Some("The engine started but never said which port it's on.".into());
                     }
-                    None => {} // it stopped; check_engine said why
                 }
             }
             Err(message) => *engine.stopped.lock().unwrap() = Some(message),
@@ -643,17 +654,24 @@ fn read_port(port_file: &Path) -> Option<u16> {
     text.trim().parse::<u16>().ok().filter(|&port| port != 0)
 }
 
+/// The file in an installed copy's venv that records which build it was set up for.
+const SET_UP: &str = "zachcap-build.txt";
+
 /// Brings an installed copy's engine venv up to date with the bundled uv: Python and the
 /// speech libraries on first launch (a few GB), what changed after an update. Skipped when
 /// this build is set up already (the installer's BUILD stamp is in the venv). What uv says
 /// is shown on the startup screen and kept in engine-setup.log.
+///
+/// In two steps, so nothing that isn't pinned is fetched or run: the libraries from uv.lock
+/// (each checked against its hash), then ZachCap's own code from the wheel the installer
+/// carries, built when the release was (building it here would fetch its build tool).
 fn set_up(engine: &Engine) -> Result<(), String> {
     let launch = &engine.launch;
     if !launch.installed {
         return Ok(());
     }
     let venv = launch.engine.join(".venv");
-    let marker = venv.join("zachcap-build.txt");
+    let marker = venv.join(SET_UP);
     let build = std::fs::read_to_string(launch.engine.join("BUILD")).unwrap_or_default();
     // A venv without its pyvenv.cfg was half removed (an uninstall while it ran): its python.exe
     // would quietly run uv's shared Python instead, so it's set up again from scratch.
@@ -668,26 +686,55 @@ fn set_up(engine: &Engine) -> Result<(), String> {
         std::fs::remove_dir_all(&venv)
             .map_err(|error| format!("Couldn't clear the old speech engine ({error})."))?;
     }
+    let wheel = std::fs::read_dir(launch.engine.join("wheel"))
+        .ok()
+        .and_then(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|path| path.extension().is_some_and(|ext| ext == "whl"))
+        })
+        .ok_or(
+            "The installer's copy of the engine is incomplete (no wheel). Install ZachCap again.",
+        )?;
     *engine.setup.lock().unwrap() = Some("Getting ready...".to_string());
-    let mut command = Command::new(&launch.uv);
+    let mut log = std::fs::create_dir_all(data_dir())
+        .and_then(|_| std::fs::File::create(data_dir().join("engine-setup.log")))
+        .ok();
+    // The lock as shipped, without the test tools or ZachCap itself. Only the project's own
+    // settings: no uv.toml from the user's or the machine's config folders (another account
+    // can write C:\ProgramData), and a Python uv manages, not whatever 3.12 is installed.
+    run_uv(engine, &mut log, |command| {
+        command
+            .arg("sync")
+            .arg("--project")
+            .arg(&launch.engine)
+            .args(["--locked", "--no-dev", "--no-install-project"])
+            .args(["--no-config", "--managed-python"])
+            .env("UV_PROJECT_ENVIRONMENT", &venv);
+    })?;
+    // ZachCap's own code, copied into the venv (so the installed files are only read).
+    run_uv(engine, &mut log, |command| {
+        command
+            .args(["pip", "install", "--python"])
+            .arg(&venv)
+            .args(["--no-deps", "--reinstall", "--offline", "--no-config"])
+            .arg(&wheel);
+    })?;
+    let _ = std::fs::write(&marker, &build);
+    Ok(())
+}
+
+/// Runs the bundled uv to set the engine up: what it says goes to the startup screen and
+/// the log, and quitting ZachCap meanwhile stops it (see the Exit handler).
+fn run_uv(
+    engine: &Engine,
+    log: &mut Option<std::fs::File>,
+    arguments: impl FnOnce(&mut Command),
+) -> Result<(), String> {
+    let mut command = Command::new(&engine.launch.uv);
+    arguments(&mut command);
     command
-        .arg("sync")
-        .arg("--project")
-        .arg(&launch.engine)
-        // The lock as shipped, without the test tools, with ZachCap's own code copied into
-        // the venv (so the installed files are only read) and always refreshed from them.
-        .args([
-            "--locked",
-            "--no-dev",
-            "--no-editable",
-            "--reinstall-package",
-            "zachcap",
-        ])
-        // Only the project's own settings: no uv.toml from the user's or the machine's config
-        // folders (another account can write C:\ProgramData), and a Python uv manages, not
-        // whatever Python 3.12 happens to be installed.
-        .args(["--no-config", "--managed-python"])
-        .env("UV_PROJECT_ENVIRONMENT", &venv)
         .env_remove("VIRTUAL_ENV")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -696,9 +743,7 @@ fn set_up(engine: &Engine) -> Result<(), String> {
     let mut child = command
         .spawn()
         .map_err(|error| format!("Couldn't run the bundled uv ({error})."))?;
-    let mut log = std::fs::create_dir_all(data_dir())
-        .and_then(|_| std::fs::File::create(data_dir().join("engine-setup.log")))
-        .ok();
+    *engine.uv.lock().unwrap() = Some(child.id());
     let mut last = String::new();
     if let Some(stderr) = child.stderr.take() {
         use std::io::BufRead;
@@ -716,15 +761,15 @@ fn set_up(engine: &Engine) -> Result<(), String> {
             }
         }
     }
-    let status = child.wait().map_err(|error| error.to_string())?;
-    if !status.success() {
+    let status = child.wait().map_err(|error| error.to_string());
+    *engine.uv.lock().unwrap() = None;
+    if !status?.success() {
         return Err(format!(
             "Setting up the engine didn't finish ({last}). Check the internet connection and press Try again. \
              What happened is in {}.",
             data_dir().join("engine-setup.log").display()
         ));
     }
-    let _ = std::fs::write(&marker, &build);
     Ok(())
 }
 
@@ -884,6 +929,7 @@ pub fn run() {
                 stopped: Mutex::new(None),
                 starting: AtomicBool::new(false),
                 setup: Mutex::new(None),
+                uv: Mutex::new(None),
             });
             begin(app.handle().clone());
 
@@ -1034,8 +1080,32 @@ pub fn run() {
                 if let Some(mut child) = engine.child.lock().unwrap().take() {
                     let _ = child.kill();
                 }
+                if let Some(pid) = engine.uv.lock().unwrap().take() {
+                    end_process(pid);
+                }
             }
         });
+}
+
+/// Ends a process by its id (uv, which set_up reads from on another thread).
+fn end_process(pid: u32) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        };
+        // SAFETY: a handle opened here and closed here; a pid that's gone gives a null one.
+        unsafe {
+            let process = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if !process.is_null() {
+                TerminateProcess(process, 1);
+                CloseHandle(process);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = pid;
 }
 
 #[cfg(all(test, windows))]
