@@ -441,6 +441,29 @@ def test_your_own_kinds_and_documents_through_the_api(client: TestClient):
     assert mine not in [t["id"] for t in after["templates"]]
 
 
+def test_automatic_is_the_usual_kind_until_you_choose_another(client: TestClient):
+    settings = client.get("/api/settings", headers=AUTH).json()
+    assert settings["summary_template"] == "auto"
+    assert settings["templates"][:2] == [
+        {"id": "auto", "label": "Automatic"},
+        {"id": "general", "label": "General"},
+    ]
+
+    chosen = client.put("/api/settings", headers=AUTH, json={"summary_template": "standup"})
+    assert chosen.json()["summary_template"] == "standup"
+    back = client.put("/api/settings", headers=AUTH, json={"summary_template": "auto"})
+    assert back.json()["summary_template"] == "auto"
+    assert client.get("/api/settings", headers=AUTH).json()["summary_template"] == "auto"
+
+
+def test_a_library_that_chose_a_usual_kind_keeps_it(client: TestClient):
+    store = Store()  # a library from before Automatic, where General was chosen
+    store.set_setting("summary_template", "general")
+    store.close()
+
+    assert client.get("/api/settings", headers=AUTH).json()["summary_template"] == "general"
+
+
 def test_stopping_when_the_call_ends_is_on_unless_turned_off(client: TestClient):
     assert client.get("/api/settings", headers=AUTH).json()["stop_when_call_ends"] is True
     off = client.put("/api/settings", headers=AUTH, json={"stop_when_call_ends": False}).json()

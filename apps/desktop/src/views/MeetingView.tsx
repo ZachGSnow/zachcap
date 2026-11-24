@@ -61,6 +61,7 @@ import {
 } from "@/lib/engine";
 import { attempt, copyText, reason } from "@/lib/feedback";
 import { clock, colorMap, day, minutes, when } from "@/lib/format";
+import { kindShown, pickAfterSummary } from "@/lib/kinds";
 import { StatusBadge } from "@/views/MeetingsView";
 
 type Track = "mix" | "mic" | "system";
@@ -281,10 +282,12 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
     setTab("summary");
     setSummarizing(true);
     const toastId = toast.loading("Summarizing with Claude...");
+    const sent = kind;
     try {
-      await api(`/api/meetings/${id}/summary`, { method: "POST", json: { template: kind } });
+      await api(`/api/meetings/${id}/summary`, { method: "POST", json: { template: sent } });
       toast.success("Summary ready", { id: toastId });
       await refresh();
+      setKind((now) => pickAfterSummary(now, sent));
     } catch (error) {
       toast.error("Couldn't create the summary", { id: toastId, description: reason(error) });
     } finally {
@@ -465,6 +468,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
   const named = data.talk_time.map((t) => t.speaker);
   const participants = named.filter((name) => !/^Speaker \d+|Call audio|Unknown/.test(name));
   const duration = meeting.duration ?? data.segments.at(-1)?.end ?? 0;
+  const shownKind = kindShown(kind, meeting, settings?.summary_template);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -681,7 +685,8 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 colorOf={colorOf}
                 templates={settings?.templates ?? []}
                 recipes={settings?.recipes ?? []}
-                kind={kind ?? meeting.template ?? settings?.summary_template ?? "general"}
+                kind={shownKind.value}
+                pickedAutomatically={shownKind.automatic}
                 onKindChange={setKind}
                 summarizing={summarizing}
                 onSummarize={() => void summarize()}

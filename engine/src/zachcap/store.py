@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS meetings (
     client      TEXT,                               -- set on it; else from its people
     client_source TEXT,                             -- 'user' (yours), 'auto' (kept as was)
     ticket_source TEXT,                             -- 'auto' (filled in), 'user' (yours)
+    template_source TEXT,                           -- 'auto' (picked on its own); else chosen
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -247,6 +248,7 @@ class Store:
             "client",
             "ticket_source",
             "client_source",
+            "template_source",
         ):
             if column not in columns:
                 self.db.execute(f"ALTER TABLE meetings ADD COLUMN {column} TEXT")
@@ -373,7 +375,10 @@ class Store:
 
     def forget_template(self, template: str) -> None:
         """Meetings summarized as a deleted kind of meeting go back to the usual kind."""
-        self.db.execute("UPDATE meetings SET template = NULL WHERE template = ?", (template,))
+        self.db.execute(
+            "UPDATE meetings SET template = NULL, template_source = NULL WHERE template = ?",
+            (template,),
+        )
         self._commit()
 
     # meetings ---------------------------------------------------------------

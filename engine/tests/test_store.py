@@ -130,6 +130,7 @@ def test_an_older_database_gets_the_new_columns(tmp_path: Path):
     store = Store(tmp_path / "old.db")
 
     assert store.meetings()[0]["template"] is None
+    assert store.meetings()[0]["template_source"] is None
     store.close()
 
 

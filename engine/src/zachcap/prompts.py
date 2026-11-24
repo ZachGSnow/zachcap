@@ -60,6 +60,11 @@ TEMPLATES = {
     ),
 }
 DEFAULT_TEMPLATE = "general"
+# Not a kind of its own, but a choice in the pickers: a summary whose kind is Automatic is
+# written as a kind picked for that meeting (see summarize.pick_kind). The usual kind in a
+# library where none was ever chosen.
+AUTOMATIC = "auto"
+AUTOMATIC_LABEL = "Automatic"
 
 # One-click documents made from a meeting. "{me}" becomes the user's name.
 RECIPES = {
@@ -176,6 +181,8 @@ def _clean(
     same = next((o for o in others if o["label"].casefold() == label.casefold()), None)
     if same is not None:
         raise ValueError(f"There is already a {NOUN[kind]} called {same['label']}")
+    if kind == "template" and label.casefold() == AUTOMATIC_LABEL.casefold():
+        raise ValueError(f"There is already a {NOUN[kind]} called {AUTOMATIC_LABEL}")
     return label, instructions
 
 
@@ -243,7 +250,8 @@ def reset(store: Store, prompt_id: str) -> dict:
 
 def delete(store: Store, prompt_id: str) -> None:
     """Delete one of the user's own. Meetings summarized as a deleted kind of meeting go back
-    to the usual kind, and so does the usual kind if it was this one."""
+    to the usual kind, and the usual kind, if it was this one, to General: a usual kind you
+    chose stays one you chose, never Automatic."""
     entry = find(store, prompt_id)
     if entry["builtin"]:
         raise ValueError("The built-in ones can't be deleted, only reset")
@@ -252,9 +260,12 @@ def delete(store: Store, prompt_id: str) -> None:
         if entry["kind"] == "template":
             store.forget_template(prompt_id)
             if store.setting("summary_template") == prompt_id:
-                store.delete_setting("summary_template")
+                store.set_setting("summary_template", DEFAULT_TEMPLATE)
 
 
 def choices(store: Store, kind: str) -> list[dict]:
-    """Ids and names, for the pickers."""
-    return [{"id": entry["id"], "label": entry["label"]} for entry in library(store, kind)]
+    """Ids and names, for the pickers. Kinds of meeting start with Automatic."""
+    found = [{"id": entry["id"], "label": entry["label"]} for entry in library(store, kind)]
+    if kind == "template":
+        return [{"id": AUTOMATIC, "label": AUTOMATIC_LABEL}, *found]
+    return found
