@@ -2,7 +2,10 @@
 hangs FFmpeg ends only the child, within its time limit, and leaves nothing behind."""
 
 import ctypes
+import io
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
+import av
 import numpy as np
 import pytest
 import soundfile as sf
@@ -93,8 +97,9 @@ def test_the_child_gives_the_very_samples_decoding_here_would(tmp_path: Path, fo
 
     decoded = decode_child.decode(tmp_path / "call.wav")
 
-    assert decoded.dtype == np.float32 and abs(len(decoded) / RATE - 2.0) < 0.01
-    assert np.array_equal(decoded, audio.decode_media(tmp_path / "call.wav", audio.IMPORTS))
+    assert decoded.dtype == np.int16 and abs(len(decoded) / RATE - 2.0) < 0.01
+    here = audio.decode_media(tmp_path / "call.wav", audio.IMPORTS)
+    assert np.array_equal(decoded.astype(np.float32) / 32768, here)
     (child,) = started
     assert not running(child.pid) and list(folders.iterdir()) == []
 
@@ -133,14 +138,15 @@ class Decoder:
     """A child on a pretend clock: it writes ``speed`` seconds of audio a second until
     ``hangs`` seconds in, then nothing more."""
 
-    def __init__(self, written: Path, speed: float, hangs: float) -> None:
-        self.written, self.speed, self.hangs, self.now = written, speed, hangs, 0.0
-        written.touch()
+    def __init__(self, folder: Path, speed: float, hangs: float) -> None:
+        self.written, self.speed, self.hangs = folder / decode_child.AUDIO, speed, hangs
+        self.now = 0.0
+        self.written.touch()
 
     def wait(self, timeout: float) -> int:
         self.now += timeout
         seconds = self.speed * min(self.now, self.hangs)
-        os.truncate(self.written, int(seconds * RATE) * 4)
+        os.truncate(self.written, int(seconds * RATE) * 2)
         raise subprocess.TimeoutExpired("decoder", timeout)
 
 
@@ -157,14 +163,148 @@ class Decoder:
 def test_the_time_limit_grows_with_the_audio_written(
     tmp_path: Path, monkeypatch, speed: float, hangs: float, cap: int | None, ended: float
 ):
-    child = Decoder(tmp_path / "audio.f32", speed, hangs)
+    child = Decoder(tmp_path, speed, hangs)
     monkeypatch.setattr(decode_child, "time", SimpleNamespace(monotonic=lambda: child.now))
     if cap:
         monkeypatch.setattr(audio, "MAX_SECONDS", cap)
 
-    assert decode_child._wait(child, child.written) is None  # ran out of time
+    assert decode_child._wait(child, Path("call.wav"), tmp_path) is None  # ran out of time
 
     assert ended < child.now <= ended + decode_child.POLL
+
+
+def free_space(monkeypatch: pytest.MonkeyPatch, free: Callable[[], int]) -> None:
+    """What Windows says is free, on any drive."""
+    monkeypatch.setattr(shutil, "disk_usage", lambda folder: SimpleNamespace(free=free()))
+
+
+def test_a_drive_that_is_nearly_full_already_isnt_written_to(
+    tmp_path: Path, folders, started, monkeypatch
+):
+    free_space(monkeypatch, lambda: audio.SPARE - 1)
+
+    with pytest.raises(audio.NoRoom, match=r"^call\.wav needs at least 500 MB free on drive .:$"):
+        decode_child.decode(recording(tmp_path / "call.wav"))
+
+    assert started == [] and list(folders.iterdir()) == []
+
+
+def saying(path: Path, seconds: float) -> Path:
+    """The FLAC file with a header that says it holds ``seconds``, whatever it holds."""
+    data = bytearray(path.read_bytes())
+    field = int.from_bytes(data[18:26], "big") & ~(2**36 - 1) | int(seconds * RATE)
+    data[18:26] = field.to_bytes(8, "big")  # STREAMINFO's number of samples: its low 36 bits
+    path.write_bytes(bytes(data))
+    return path
+
+
+def test_a_file_that_says_it_holds_more_than_there_is_room_for_isnt_decoded(
+    tmp_path: Path, folders, started, monkeypatch
+):
+    source = saying(recording(tmp_path / "workshop.flac"), 2 * 3600)
+    free_space(monkeypatch, lambda: audio.SPARE + 100 * 2**20)  # two hours take 220 MB
+    monkeypatch.setenv(decode_child.TEST_HOOK, "crash")  # if it decoded any of it
+
+    with pytest.raises(audio.NoRoom) as refused:
+        decode_child.decode(source)
+
+    assert refused.value.needs == audio.SPARE + 2 * 3600 * RATE * 2
+    assert str(refused.value).startswith("workshop.flac needs at least 720 MB free on drive ")
+    assert not refused.value.over()
+    (child,) = started
+    assert not running(child.pid) and list(folders.iterdir()) == []
+
+    free_space(monkeypatch, lambda: audio.SPARE + 250 * 2**20)
+    assert refused.value.over()
+    monkeypatch.delenv(decode_child.TEST_HOOK)
+    assert len(decode_child.decode(source)) / RATE > 0.9  # room for two hours: decoded
+
+
+def test_a_decode_that_fills_the_drive_is_ended_with_space_to_spare(
+    tmp_path: Path, folders, started, monkeypatch
+):
+    # A file with no length, or a wrong one: the drive gets down to what's kept for a
+    # recording while it's decoded.
+    source = recording(tmp_path / "call.wav")
+    monkeypatch.setenv(decode_child.TEST_HOOK, "hang")  # a minute's sleep after some audio
+
+    def written() -> int:
+        return sum(path.stat().st_size for path in folders.glob(f"*/{decode_child.AUDIO}"))
+
+    free_space(monkeypatch, lambda: audio.SPARE - 1 if written() else audio.SPARE + 2**30)
+    began = time.monotonic()
+
+    with pytest.raises(audio.NoRoom) as refused:
+        decode_child.decode(source)
+
+    assert time.monotonic() - began < 50  # when the drive got that full
+    assert refused.value.needs > audio.SPARE  # more than there was: not tried again at once
+    (child,) = started
+    assert not running(child.pid) and list(folders.iterdir()) == []
+
+
+@pytest.mark.parametrize("full", [True, False])
+def test_audio_that_cant_be_written_out_is_never_a_file_to_try_again(
+    tmp_path: Path, folders, monkeypatch, full: bool
+):
+    # Every write to the temporary file fails from some point on, as on a full drive.
+    source = recording(tmp_path / "call.wav")
+    monkeypatch.setenv(decode_child.TEST_HOOK, "unwritable")
+
+    def free() -> int:
+        wrote = any(path.stat().st_size for path in folders.glob(f"*/{decode_child.AUDIO}"))
+        return audio.SPARE - 1 if full and wrote else audio.SPARE + 2**30
+
+    free_space(monkeypatch, free)
+
+    with pytest.raises((audio.NoRoom, RuntimeError)) as failed:  # not an OSError
+        decode_child.decode(source)
+
+    if full:
+        assert isinstance(failed.value, audio.NoRoom) and failed.value.needs > audio.SPARE
+    else:
+        assert type(failed.value) is RuntimeError
+        assert str(failed.value) == (
+            "the audio of call.wav couldn't be written out: Bad file descriptor"
+        )
+    assert str(folders) not in str(failed.value) and list(folders.iterdir()) == []
+
+
+def test_a_result_with_no_room_to_be_written_is_no_room_not_a_crash(tmp_path: Path, monkeypatch):
+    (tmp_path / decode_child.AUDIO).write_bytes(bytes(4000))
+    free_space(monkeypatch, lambda: audio.SPARE - 1)
+
+    with pytest.raises(audio.NoRoom) as refused:  # its child left no result
+        decode_child._collect(Path("call.wav"), tmp_path, 2**30, 1)
+
+    assert refused.value.needs == audio.SPARE + 8000
+
+
+@pytest.mark.parametrize("size", [0, 2**30, 2**40, "a lot", None])
+def test_a_child_that_lies_about_the_room_it_needs_isnt_believed(tmp_path: Path, size):
+    # A child that runs code from a crafted file could ask to be tried again on every look.
+    (tmp_path / decode_child.RESULT).write_text(
+        json.dumps({"result": "no room", "size": size}), encoding="utf-8"
+    )
+
+    with pytest.raises(RuntimeError, match="^the decoder couldn't tell how long call.wav is$"):
+        decode_child._collect(Path("call.wav"), tmp_path, 2**30, 0)
+
+
+def test_what_ffmpeg_calls_a_permission_error_isnt_a_file_to_try_again(monkeypatch):
+    # FFmpeg's word for some damaged AAC is EPERM, and PyAV makes that a PermissionError. The
+    # watch folder would read such a file again every 30 s, as if it were in use.
+    def damaged(source, allowed, starting):
+        raise av.error.PermissionError(1, "Operation not permitted", "avcodec_send_packet()")
+        yield
+
+    monkeypatch.setattr(audio, "decode_pieces", damaged)
+    assert isinstance(av.error.PermissionError(1, ""), PermissionError)
+
+    assert decode_child._decode(Path("call.m4a"), io.BytesIO(), 2**30) == {
+        "result": "failed",
+        "message": "the audio in call.m4a is damaged",
+    }
 
 
 ENGINE = """
@@ -199,7 +339,7 @@ def test_the_decoder_goes_when_the_engine_does(tmp_path: Path, folders):
     )
 
     def hanging() -> bool:  # it has written some audio, and sleeps
-        return any(path.stat().st_size for path in folders.glob("*/audio.f32"))
+        return any(path.stat().st_size for path in folders.glob(f"*/{decode_child.AUDIO}"))
 
     try:
         said: list[bytes] = []
@@ -222,7 +362,7 @@ def test_folders_left_by_a_stopped_engine_go_a_day_on(tmp_path: Path, folders):
     folders.mkdir()
     for name in ("left", "in-use"):
         (folders / name).mkdir()
-        (folders / name / "audio.f32").write_bytes(bytes(64))
+        (folders / name / decode_child.AUDIO).write_bytes(bytes(64))
     a_day_ago = time.time() - decode_child.STALE - 60
     os.utime(folders / "left", (a_day_ago, a_day_ago))
 

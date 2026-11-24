@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import av
 import numpy as np
@@ -7,7 +8,7 @@ import pytest
 import soundfile as sf
 from PIL import Image
 
-from zachcap import audio, imports
+from zachcap import audio, decode_child, imports
 
 RATE = 16000
 
@@ -128,6 +129,51 @@ def test_import_converts_to_16k_mono_and_keeps_only_the_range(tmp_path: Path):
     assert abs(seconds - 1.5) < 0.01 and abs(len(data) / out_rate - 1.5) < 0.01
     assert np.abs(data[: int(0.4 * out_rate)]).max() > 0.2  # the tone from 0.5 to 1.0 s
     assert np.abs(data[int(0.6 * out_rate) :]).max() < 0.01  # silence after it
+
+
+def test_an_import_keeps_every_sample_as_decoded(tmp_path: Path):
+    # Decoded as int16 and stored as 16-bit FLAC: every value there is comes through unchanged.
+    samples = np.random.default_rng(1).permutation(np.arange(-32768, 32768)).astype(np.int16)
+    sf.write(tmp_path / "in.wav", samples, RATE, subtype="PCM_16")
+
+    audio.import_media(tmp_path / "in.wav", tmp_path / "out.flac")
+
+    assert np.array_equal(sf.read(tmp_path / "out.flac", dtype="int16")[0], samples)
+    assert np.array_equal(audio.load_mono_16k(tmp_path / "out.flac"), samples / np.float32(32768))
+
+
+def test_an_import_leaves_space_to_spare_on_the_drive_it_goes_to(tmp_path: Path, monkeypatch):
+    # The decoder's temp folder can be on another drive than the recordings.
+    free = {"GB": 10}
+    monkeypatch.setattr(decode_child, "decode", lambda source: np.ones(RATE * 3600, np.int16))
+    monkeypatch.setattr(
+        shutil, "disk_usage", lambda folder: SimpleNamespace(free=free["GB"] * 2**30)
+    )
+    folder = tmp_path / "2026-11-21_093000-import"
+    folder.mkdir()
+    free["GB"] = 0.5  # an hour of audio is 110 MB, and 500 MB is kept for a recording
+
+    with pytest.raises(audio.NoRoom, match=r"^call\.mp4 needs at least 610 MB free on drive .:$"):
+        audio.import_media(tmp_path / "call.mp4", folder / "system.flac")
+
+    assert list(folder.iterdir()) == []
+    free["GB"] = 0.6
+    assert audio.import_media(tmp_path / "call.mp4", folder / "system.flac") == 3600
+
+
+def test_whether_there_is_room_is_still_known_once_the_import_is_gone(tmp_path: Path, monkeypatch):
+    asked = []
+
+    def usage(folder):
+        asked.append(Path(folder))
+        return SimpleNamespace(free=audio.SPARE)
+
+    monkeypatch.setattr(shutil, "disk_usage", usage)
+    gone = tmp_path / "2026-11-21_093000-import"  # removed when its import failed
+
+    assert not audio.NoRoom("call.mp4", gone, 1).over()
+    assert audio.NoRoom("call.mp4", gone, 0).over()
+    assert asked == [tmp_path, tmp_path]
 
 
 @pytest.mark.parametrize("suffix", sorted(imports.MEDIA))

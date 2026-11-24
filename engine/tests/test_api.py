@@ -114,6 +114,25 @@ def test_an_import_that_crashes_the_decoder_says_so(
     assert client.get("/api/stats", headers=AUTH).json()["meetings"] == 0  # and the engine is up
 
 
+def test_an_import_there_is_no_room_to_decode_says_how_much_it_takes(
+    client: TestClient, tmp_path: Path, monkeypatch
+):
+    import shutil
+    from types import SimpleNamespace
+
+    import numpy as np
+    import soundfile as sf
+
+    sf.write(tmp_path / "call.wav", np.zeros(16000, np.float32), 16000)
+    monkeypatch.setattr(shutil, "disk_usage", lambda folder: SimpleNamespace(free=100 * 2**20))
+
+    refused = client.post("/api/import", headers=AUTH, json={"path": str(tmp_path / "call.wav")})
+
+    assert refused.status_code == 400
+    assert refused.json()["detail"].startswith("call.wav needs at least 500 MB free on drive ")
+    assert client.get("/api/stats", headers=AUTH).json()["meetings"] == 0
+
+
 def test_there_are_no_open_docs_pages(client: TestClient):
     for path in ("/docs", "/redoc", "/openapi.json"):
         assert client.get(path).status_code == 401  # the gate: no token, no answer

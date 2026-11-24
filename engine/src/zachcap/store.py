@@ -161,7 +161,7 @@ CREATE TABLE IF NOT EXISTS watched_files (
     path        TEXT NOT NULL,
     size        INTEGER NOT NULL,
     mtime_ns    INTEGER NOT NULL,
-    status      TEXT NOT NULL,                   -- imported|skipped|failed
+    status      TEXT NOT NULL,                   -- imported|skipped|failed|waiting
     meeting_id  INTEGER,                         -- what it became (kept after a delete)
     error       TEXT,
     seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
@@ -348,7 +348,7 @@ class Store:
         prefix = os.path.join(str(Path(folder)), "")  # with the trailing separator
         return self.db.execute(
             "SELECT path, size, mtime_ns, error, seen_at FROM watched_files "
-            "WHERE status = 'failed' "
+            "WHERE status IN ('failed', 'waiting') "
             "AND substr(path, 1, length(?)) = ? ORDER BY seen_at DESC, rowid DESC",
             (prefix, prefix),
         ).fetchall()
