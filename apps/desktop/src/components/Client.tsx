@@ -1,7 +1,8 @@
 import { Building2 } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 
 import { Input } from "@/components/ui/input";
+import { clientShown, closing, saveShowing, type Closing } from "@/lib/clients";
 import { cn } from "@/lib/utils";
 
 /** The clients named so far, offered while typing a client's name. */
@@ -27,33 +28,32 @@ export function ClientField({
 }: {
   value: string | null;
   known: string[];
-  /** Shown lighter: it comes from the people in the meeting, not set on it. */
+  /** Shown dashed: it comes from the people in the meeting, not set on it. */
   inferred?: boolean;
   empty?: string;
   hint: string;
-  onSave: (client: string) => void;
+  /** Saves it; done once the engine has answered and the page has caught up. */
+  onSave: (client: string) => Promise<unknown>;
 }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState("");
-  // What it was when the box opened, and what was saved until the page catches up: a quick
-  // reopen shows the new name, and leaving the box unchanged saves nothing.
-  const [opened, setOpened] = useState("");
-  const [saved, setSaved] = useState<string | null>(null);
-  useEffect(() => setSaved(null), [value]);
+  // What the box opened with (left as it was, nothing is saved), and a name being saved,
+  // shown until the save is over.
+  const [start, setStart] = useState("");
+  const [pending, setPending] = useState<string | null>(null);
+  // Closed once only: Enter, then the box's blur as it goes away, is one close.
+  const open = useRef(false);
   const button = useRef<HTMLButtonElement>(null);
   const listId = useId();
-  const shown = saved !== null ? saved || null : value;
+  const shown = clientShown(value, inferred, pending);
 
-  const close = () => {
+  const finish = (how: Closing) => {
+    if (!open.current) return;
+    open.current = false;
     setEditing(false);
-    requestAnimationFrame(() => button.current?.focus());
-  };
-  const save = () => {
-    close();
-    const wanted = text.trim();
-    if (wanted === opened) return;
-    setSaved(wanted);
-    onSave(wanted);
+    const { save, refocus } = closing(how, start, text);
+    if (refocus) requestAnimationFrame(() => button.current?.focus());
+    if (save !== null) void saveShowing(save, onSave, setPending);
   };
 
   if (editing) {
@@ -66,11 +66,12 @@ export function ClientField({
           maxLength={80}
           placeholder="Client"
           aria-label="Client"
+          onFocus={(event) => event.currentTarget.select()}
           onChange={(event) => setText(event.target.value)}
-          onBlur={save}
+          onBlur={() => finish("blur")}
           onKeyDown={(event) => {
-            if (event.key === "Enter") save();
-            if (event.key === "Escape") close();
+            if (event.key === "Enter") finish("Enter");
+            if (event.key === "Escape") finish("Escape");
           }}
           className="h-6 w-40 text-xs"
         />
@@ -83,19 +84,19 @@ export function ClientField({
       ref={button}
       title={hint}
       onClick={() => {
-        const start = inferred && saved === null ? "" : (shown ?? "");
-        setText(start);
-        setOpened(start);
+        setText(shown.start);
+        setStart(shown.start);
+        open.current = true;
         setEditing(true);
       }}
       className={cn(
         "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs transition-colors hover:bg-muted hover:text-foreground",
-        shown && !(inferred && saved === null) && "border text-foreground",
-        shown && inferred && saved === null && "border border-dashed",
+        shown.name && !shown.dashed && "border text-foreground",
+        shown.dashed && "border border-dashed",
       )}
     >
       <Building2 className="size-3" />
-      {shown ?? empty}
+      {shown.name ?? empty}
     </button>
   );
 }
