@@ -21,6 +21,26 @@ MODEL = models.SPEAKER_MODEL.repo
 EMBEDDING_MODEL = MODEL
 MODEL_PAGE = f"https://huggingface.co/{MODEL}"
 
+SETTING = "faster_speakers"  # "1": separate speakers faster (FASTER_STEP)
+# How far the speaker model's 10 s window moves between looks, as a share of it. pyannote's
+# own (a tenth) is thorough; twice that takes a third to a half less time on a CPU (measured
+# on a 6-core laptop CPU: a 2.4-minute synthetic track alone, 85 s at 0.1 and 46 s at 0.2;
+# a whole meeting processed, 194 s and 135 s; the same speakers found), with the edges of
+# each turn a little less exact.
+FASTER_STEP = 0.2
+
+
+def step_for(setting: str | None) -> float | None:
+    """The step for the saved setting; None keeps the model's own."""
+    return FASTER_STEP if setting == "1" else None
+
+
+def set_step(pipeline, step: float) -> None:
+    """Makes a speaker pipeline look every ``step`` of its window. The pipeline takes it
+    only when it's built, so both of its copies are set."""
+    pipeline.segmentation_step = step
+    pipeline._segmentation.step = step * pipeline._segmentation.duration
+
 
 class SpeakerModelUnavailable(RuntimeError):
     """No Hugging Face token, or the model's terms aren't accepted: transcribe without names."""
@@ -61,7 +81,7 @@ class FixedBatchEmbedding:
 
 
 class Diarizer:
-    def __init__(self, token: str | None) -> None:
+    def __init__(self, token: str | None, step: float | None = None) -> None:
         gpu = cuda.prepare()
         import torch
 
@@ -81,6 +101,8 @@ class Diarizer:
             raise SpeakerModelUnavailable(_access_help(token))
         self.device = torch.device("cuda" if gpu else "cpu")
         self.pipeline = pipeline.to(self.device)
+        if step is not None:
+            set_step(self.pipeline, step)
         self.pipeline._embedding = FixedBatchEmbedding(
             self.pipeline._embedding, self.pipeline.embedding_batch_size
         )

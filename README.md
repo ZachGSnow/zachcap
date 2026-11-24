@@ -97,6 +97,7 @@ Everything is set in the app under **Settings**:
 | Language | Whisper's language, or automatic detection | English |
 | Words to know | Terms to spell right, one per line; `Term: misheard, misheard` adds corrections | empty |
 | Claude model | Opus 5.5, Sonnet 5.5 or Fable 5.1 | Opus 5.5 |
+| Faster speaker separation | Looks for who's speaking half as often: a third to a half less time separating speakers on a PC without an NVIDIA GPU; turn edges a little less exact | Off |
 | Usual kind of meeting | What summaries focus on unless a meeting says otherwise; Automatic picks one for each meeting | Automatic (a usual kind chosen before is kept) |
 | Kinds of meeting, one-click documents | Edit the built-in ones (and reset them), or add your own with your own instructions | As shipped |
 | API keys | Hugging Face token and Anthropic key | not set |

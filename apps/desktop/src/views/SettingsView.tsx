@@ -80,6 +80,7 @@ const KEYS = [
 type SettingsChange = Partial<{
   summary_model: string;
   language: string;
+  faster_speakers: boolean;
   mic_device: string;
   output_device: string;
   vocabulary: string;
@@ -889,6 +890,17 @@ export function SettingsView() {
               value={settings?.language ?? "en"}
               onChange={(value) => void save({ language: value })}
               options={(settings?.languages ?? []).map((l) => ({ value: l.id, label: l.label }))}
+            />
+          </Row>
+          <Row
+            label="Faster speaker separation"
+            help="On a PC without an NVIDIA GPU, telling speakers apart takes longer than transcribing. This looks less often, which saves a third to a half of that time, so the edges of each person's turn are a little less exact."
+          >
+            <Switch
+              className="ml-auto"
+              aria-label="Faster speaker separation"
+              checked={settings?.faster_speakers ?? false}
+              onCheckedChange={(on) => void save({ faster_speakers: on })}
             />
           </Row>
           <WordsToKnow saved={settings?.vocabulary ?? ""} onSave={(vocabulary) => save({ vocabulary })} />

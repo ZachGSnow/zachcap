@@ -38,7 +38,9 @@ def process(store: Store, meeting_id: int, log: Log = print) -> str:
         duration = max(len(a) for a in tracks.values()) / audio.RATE
         vocab = vocabulary.parse(store.setting("vocabulary"))
         words = _transcribe(store, tracks, duration, log, vocab)
-        diarized, separated = _diarize(tracks, words, log)
+        from .diarize import SETTING, step_for
+
+        diarized, separated = _diarize(tracks, words, log, step_for(store.setting(SETTING)))
 
         utterances = {
             name: transcript.build_utterances(name, words[name], result.turns)
@@ -104,14 +106,14 @@ def _transcribe(
     return words
 
 
-def _diarize(tracks: dict, words: dict, log: Log) -> tuple[dict, bool]:
+def _diarize(tracks: dict, words: dict, log: Log, step: float | None = None) -> tuple[dict, bool]:
     """Speaker turns per track, and whether speakers were really separated."""
     from .diarize import Diarization, Diarizer, SpeakerModelUnavailable
 
     log("separating speakers")
     started = time.perf_counter()
     try:
-        diarizer = Diarizer(apikeys.get("huggingface"))
+        diarizer = Diarizer(apikeys.get("huggingface"), step=step)
     except SpeakerModelUnavailable as exc:
         # Still useful without it: one speaker per track ("You" and "Call audio").
         log(f"speaker separation unavailable: {exc}")
