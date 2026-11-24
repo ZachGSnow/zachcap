@@ -45,8 +45,8 @@ export function AskView({ library, onOpen }: { library: LibraryAsk; onOpen: (mee
             <div className="min-w-0 flex-1">
               <h1 className="font-heading text-2xl font-semibold tracking-tight">Ask</h1>
               <p className="mt-1 text-sm text-muted-foreground">
-                Questions about every meeting. Claude searches your transcripts, summaries and action items (text
-                only) and links each answer to the moment it came from.
+                Questions about every meeting, except private ones. Claude searches your transcripts, summaries and
+                action items (text only) and links each answer to the moment it came from.
               </p>
             </div>
             {history.length > 0 && (

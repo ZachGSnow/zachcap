@@ -6,6 +6,8 @@ import {
   FileDown,
   FileText,
   Loader2,
+  Lock,
+  LockOpen,
   MoreHorizontal,
   Pencil,
   RotateCw,
@@ -19,6 +21,7 @@ import { toast } from "sonner";
 import { AskPanel } from "@/components/AskPanel";
 import { NotesPanel } from "@/components/NotesPanel";
 import { PlayerBar, type PlayerState } from "@/components/PlayerBar";
+import { PrivateNote } from "@/components/PrivateNote";
 import { RedactDialog } from "@/components/RedactDialog";
 import { SummaryPanel } from "@/components/SummaryPanel";
 import { ClientField } from "@/components/Client";
@@ -323,6 +326,20 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
     if (saved) await refresh();
   };
 
+  /** Keeps the meeting from Claude, or lets Claude read it. */
+  const savePrivate = async (on: boolean) => {
+    const saved = await attempt(on ? "Couldn't make the meeting private" : "Couldn't change the meeting", () =>
+      api(`/api/meetings/${id}`, { method: "PATCH", json: { private: on } }),
+    );
+    if (!saved) return;
+    await refresh();
+    toast.success(on ? "Kept from Claude" : "Claude can read it", {
+      description: on
+        ? "Nothing in this meeting is sent to Claude from now on. A summary it already has stays."
+        : "Summaries, documents, Ask and the MCP server can use this meeting.",
+    });
+  };
+
   // A file the user picks in the save dialog (or a download, outside the desktop app).
   const exportAs = (format: "md" | "txt" | "srt") =>
     attempt("Couldn't export the meeting", async () => {
@@ -371,7 +388,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
             ? "The summary was written before: regenerate it if it mentions this."
             : "",
       ];
-      const again = done.summary_removed || done.has_summary;
+      const again = (done.summary_removed || done.has_summary) && !meeting?.private;
       toast.success(`Redacted ${clock(start)} to ${clock(end)}`, {
         description: changed.filter(Boolean).join(" "),
         duration: 12_000,
@@ -546,8 +563,14 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
             />
           </div>
         </div>
+        {meeting.private && (
+          <Badge variant="outline" className="gap-1" title="Nothing in this meeting is sent to Claude">
+            <Lock className="size-3" />
+            Private
+          </Badge>
+        )}
         <StatusBadge meeting={meeting} />
-        {!data.summary && data.segments.length > 0 && !processing && (
+        {!data.summary && data.segments.length > 0 && !processing && !meeting.private && (
           <Button size="sm" disabled={summarizing} onClick={() => void summarize()}>
             {summarizing ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
             Summarize
@@ -567,6 +590,10 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
             <DropdownMenuItem onSelect={copyTranscript}>
               <ClipboardCopy className="size-4" />
               Copy transcript
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void savePrivate(!meeting.private)}>
+              {meeting.private ? <LockOpen className="size-4" /> : <Lock className="size-4" />}
+              {meeting.private ? "Let Claude read it" : "Keep from Claude"}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void exportAs("md")}>
@@ -672,7 +699,11 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
 
             {/* Kept mounted, so questions and an answer still on its way survive a tab switch. */}
             <TabsContent value="ask" forceMount className="data-[state=inactive]:hidden">
-              <AskPanel meetingId={id} onSeek={seek} />
+              {meeting.private ? (
+                <PrivateNote what="so there's nothing to ask about it." onAllow={() => void savePrivate(false)} />
+              ) : (
+                <AskPanel meetingId={id} onSeek={seek} />
+              )}
             </TabsContent>
 
             <TabsContent value="summary" forceMount className="data-[state=inactive]:hidden">
@@ -688,6 +719,8 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 kind={shownKind.value}
                 pickedAutomatically={shownKind.automatic}
                 unpicked={shownKind.unpicked}
+                isPrivate={meeting.private ?? false}
+                onAllow={() => void savePrivate(false)}
                 onKindChange={setKind}
                 summarizing={summarizing}
                 onSummarize={() => void summarize()}

@@ -964,8 +964,9 @@ export function SettingsView() {
           <div className="px-4 py-3.5">
             <p className="text-xs leading-relaxed text-muted-foreground">
               Add ZachCap to Claude Code or the Claude desktop app and ask about your meetings there. It's a read-only MCP
-              server that can search transcripts and read summaries, action items and notes; it can't change anything. What
-              it looks up goes to that app and its model, like anything else you share with it.
+              server that can search transcripts and read summaries, action items and notes; it can't change anything, and
+              private meetings aren't in it. What it looks up goes to that app and its model, like anything else you share
+              with it.
             </p>
             <div className="mt-3 flex flex-wrap gap-2">
               <Button

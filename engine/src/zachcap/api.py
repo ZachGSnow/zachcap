@@ -99,6 +99,7 @@ class MeetingChange(BaseModel):
     title: str | None = None
     ticket: str | None = None  # "" takes it off
     client: str | None = None  # "" is "no client"; null follows the people in it again
+    private: bool | None = None  # on: nothing in it is sent to Claude
 
 
 class ClientBody(BaseModel):
@@ -150,6 +151,10 @@ class RecordBody(BaseModel):
 
 class PauseBody(BaseModel):
     paused: bool
+
+
+class PrivateBody(BaseModel):
+    private: bool
 
 
 class RecordingRef(BaseModel):
@@ -525,7 +530,12 @@ def create_app(token: str) -> FastAPI:
             except Exception:  # never worth losing the recording over
                 traceback.print_exc()
             recording.update(
-                recorder=recorder, meeting_id=meeting_id, title=title, notes=0, watch=watch
+                recorder=recorder,
+                meeting_id=meeting_id,
+                title=title,
+                notes=0,
+                watch=watch,
+                private=False,
             )
             stop_live()  # the last recording's (stopped already, normally)
             live_state["now"] = None
@@ -769,6 +779,7 @@ def create_app(token: str) -> FastAPI:
         return [
             {
                 **dict(m),
+                "private": privacy.is_private(store, m),
                 "progress": worker.progress.get(m["id"]),
                 "participants": participants.get(m["id"], []),
                 "mentions": mentioned.get(m["id"], 0),
@@ -788,6 +799,7 @@ def create_app(token: str) -> FastAPI:
         return {
             "meeting": {
                 **dict(meeting),
+                "private": privacy.is_private(store, meeting),
                 "progress": worker.progress.get(meeting_id),
                 **clients.fields(client),
             },
@@ -822,11 +834,13 @@ def create_app(token: str) -> FastAPI:
 
     @app.patch("/api/meetings/{meeting_id}", dependencies=auth)
     def change_meeting(meeting_id: int, body: MeetingChange, store: Store = Depends(db)):
-        """A new title, the ticket it was about ("" takes the ticket off), or its client ("" for
-        no client, null to follow its people again)."""
+        """A new title, the ticket it was about ("" takes the ticket off), its client ("" for
+        no client, null to follow its people again), or whether it's kept from Claude."""
         meeting = meeting_or_404(store, meeting_id)
         changes: dict = {}
         renamed: list[int] = []
+        if body.private is not None:
+            changes["private"] = int(body.private)
         if body.title is not None:
             if not body.title.strip():
                 raise HTTPException(status_code=400, detail="The title can't be empty")
@@ -860,6 +874,7 @@ def create_app(token: str) -> FastAPI:
         return {
             "title": meeting["title"],
             "ticket": meeting["ticket"],
+            "private": privacy.is_private(store, meeting),
             **clients.fields(clients.of_meeting(store, meeting)),
         }
 
@@ -1435,6 +1450,7 @@ def create_app(token: str) -> FastAPI:
             "devices": {name: t.device["name"] for name, t in recorder.tracks.items()},
             "errors": recorder.errors(),
             "paused": recorder.paused,
+            "private": recording.get("private", False),
             "notes": recording.get("notes", 0),
             # Warnings, whether the call app still holds the mic, and how long it's been quiet
             # (for stopping when the call ends).
@@ -1449,6 +1465,17 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=409, detail="Not recording")
         recorder.pause(body.paused)
         return {"paused": recorder.paused}
+
+    @app.post("/api/record/private", dependencies=auth)
+    def record_private(body: PrivateBody, store: Store = Depends(db)):
+        """Keeps the meeting being recorded from Claude, or stops keeping it: set before it
+        ends, it's never there to be read (the MCP server has a meeting once it's recorded)."""
+        with lock:
+            if recording.get("recorder") is None:
+                raise HTTPException(status_code=409, detail="Not recording")
+            store.update_meeting(recording["meeting_id"], private=int(body.private))
+            recording["private"] = body.private
+        return {"private": body.private}
 
     @app.post("/api/record/note", dependencies=auth)
     def record_note(body: NoteBody, store: Store = Depends(db)):

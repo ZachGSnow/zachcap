@@ -9,6 +9,7 @@ import {
   Clock3,
   ListChecks,
   Loader2,
+  Lock,
   Ticket,
   Users,
 } from "lucide-react";
@@ -296,6 +297,11 @@ export function MeetingsView({
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="truncate text-sm font-medium">{meeting.title}</span>
+                        {meeting.private && (
+                          <span className="shrink-0 text-muted-foreground" title="Private: kept from Claude">
+                            <Lock className="size-3" aria-label="Private" />
+                          </span>
+                        )}
                         {meeting.ticket && (
                           <span
                             className="inline-flex shrink-0 items-center gap-1 font-mono text-[11px] text-muted-foreground"
