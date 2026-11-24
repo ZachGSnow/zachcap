@@ -137,10 +137,10 @@ class Transcriber:
     def _model(self, name: str):
         with self._lock:
             if name not in self._models:
-                from faster_whisper import WhisperModel
+                from . import models
 
                 threads = max(2, (os.cpu_count() or 4) // 2)
-                self._models[name] = WhisperModel(
+                self._models[name] = models.whisper(
                     name, device="cpu", compute_type="int8", cpu_threads=threads
                 )
             return self._models[name]

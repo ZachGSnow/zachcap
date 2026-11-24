@@ -9,14 +9,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from . import cuda
+from . import cuda, models
 from .transcript import Turn
 
 # pyannote reports usage (file durations, speaker counts) to its servers by
 # default. ZachCap keeps everything on the machine, so turn that off first.
 os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
 
-MODEL = "pyannote/speaker-diarization-community-1"
+MODEL = models.SPEAKER_MODEL.repo
 # Voiceprints only compare within one embedding model; stored samples are tagged with it.
 EMBEDDING_MODEL = MODEL
 MODEL_PAGE = f"https://huggingface.co/{MODEL}"
@@ -72,7 +72,9 @@ class Diarizer:
 
         self._torch = torch
         try:
-            pipeline = Pipeline.from_pretrained(MODEL, token=token or None)
+            pipeline = Pipeline.from_pretrained(
+                MODEL, revision=models.SPEAKER_MODEL.revision, token=token or None
+            )
         except Exception as exc:
             raise SpeakerModelUnavailable(_access_help(token)) from exc
         if pipeline is None:

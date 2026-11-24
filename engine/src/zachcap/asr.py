@@ -6,7 +6,7 @@ import gc
 
 import numpy as np
 
-from . import cuda
+from . import cuda, models
 from .transcript import Word
 
 DEFAULT_MODEL = "large-v3-turbo"
@@ -17,11 +17,11 @@ class Transcriber:
         self, model: str = DEFAULT_MODEL, device: str | None = None, compute_type: str | None = None
     ) -> None:
         gpu = cuda.prepare()
-        from faster_whisper import BatchedInferencePipeline, WhisperModel
+        from faster_whisper import BatchedInferencePipeline
 
         self.device = device or ("cuda" if gpu else "cpu")
         self.compute_type = compute_type or ("int8_float16" if self.device == "cuda" else "int8")
-        self.model = WhisperModel(model, device=self.device, compute_type=self.compute_type)
+        self.model = models.whisper(model, device=self.device, compute_type=self.compute_type)
         # Batching speech chunks is ~3x faster on the RTX A500 (2 min per meeting hour,
         # 2.3 GB peak); on CPU the plain decoder is the better choice.
         self.batched = BatchedInferencePipeline(model=self.model) if self.device == "cuda" else None
