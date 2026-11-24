@@ -386,7 +386,10 @@ export async function api<T>(path: string, init: RequestInit & { json?: unknown 
 
 /** URL for <audio> elements, which can't send an Authorization header. */
 export function mediaUrl(path: string): string {
-  return `${base()}${path}${path.includes("?") ? "&" : "?"}token=${info?.token}`;
+  // Asked while the page draws, so it never throws: during an engine restart there's no
+  // address for a moment, and the next draw after it's back has the new one.
+  if (!info) return "";
+  return `${base()}${path}${path.includes("?") ? "&" : "?"}token=${info.token}`;
 }
 
 /** Waits until the engine answers. While an installed copy sets its engine up (the first
