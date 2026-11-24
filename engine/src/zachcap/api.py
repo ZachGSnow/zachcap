@@ -23,7 +23,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import numpy as np
 import soundfile as sf
@@ -47,7 +47,9 @@ from . import (
     imports,
     insights,
     live,
+    local_summary,
     mentions,
+    ollama,
     paths,
     pipeline,
     privacy,
@@ -111,14 +113,19 @@ class QuestionBody(BaseModel):
     question: str
 
 
+Writes = Literal["claude", "local"]  # Claude, or the model on this PC
+
+
 class SummaryBody(BaseModel):
     template: str | None = None  # a kind of meeting, or "auto" (Automatic) to have one picked
+    by: Writes | None = None  # who writes it, the usual one if not given
 
 
 class RecipeBody(BaseModel):
     recipe: str
     previous: str | None = None  # the document as it stands, to rewrite...
     change: str | None = None  # ...this way ("shorter, for the client")
+    by: Writes | None = None  # who writes it, the usual one if not given
 
 
 class PromptBody(BaseModel):
@@ -194,6 +201,8 @@ class ImportBody(BaseModel):
 
 class SettingsBody(BaseModel):
     summary_model: str | None = None
+    writer: Writes | None = None  # who writes summaries and documents
+    local_model: str | None = None  # the model on this PC, by Ollama's name; "" for none
     language: str | None = None
     faster_speakers: bool | None = None  # separate speakers faster (see diarize.SETTING)
     mic_device: str | None = None
@@ -253,12 +262,44 @@ class LiveTranscript(NamedTuple):
     run: str
 
 
+class Job:
+    """Something besides a meeting to process that takes this PC's models for minutes (a
+    summary written here): it has its turn on the worker's thread, so there's one at a time."""
+
+    def __init__(self, work: Callable[[], object]) -> None:
+        self._work = work
+        self._lock = threading.Lock()
+        self._state = "waiting"  # started or skipped, whichever is first
+        self.done = threading.Event()
+        self.result: object = None
+        self.error: BaseException | None = None
+
+    def _settle(self, state: str) -> bool:
+        with self._lock:
+            if self._state != "waiting":
+                return False
+            self._state = state
+            return True
+
+    def skip(self) -> bool:
+        """Takes it back, if it hasn't started."""
+        return self._settle("skipped")
+
+    def run(self) -> None:
+        if self._settle("started"):
+            try:
+                self.result = self._work()
+            except BaseException as exc:  # raised where it's waited for
+                self.error = exc
+        self.done.set()
+
+
 class Worker:
     """Runs processing jobs one at a time and remembers the latest message per meeting.
     Each takes the GPU from the live transcript first (``gpu``), which waits meanwhile."""
 
     def __init__(self) -> None:
-        self.jobs: queue.Queue[int] = queue.Queue()
+        self.jobs: queue.Queue[int | Job] = queue.Queue()
         self.progress: dict[int, str] = {}
         self.gpu = live.GpuTurns()
         threading.Thread(target=self._run, name="zachcap-worker", daemon=True).start()
@@ -270,9 +311,29 @@ class Worker:
         self.gpu.meeting_waiting()  # the live transcript lets go of the GPU now
         self.jobs.put(meeting_id)
 
+    def in_turn(self, work: Callable[[], object], cancel: ollama.Cancel) -> object:
+        """Does something else after the meetings waiting now, and waits for it. Cancelled
+        while it waits its turn, it's never started."""
+        job = Job(work)
+        self.gpu.meeting_waiting()
+        self.jobs.put(job)
+        while not job.done.wait(0.3):
+            if cancel.asked and job.skip():
+                cancel.check()
+        if job.error is not None:
+            raise job.error
+        return job.result
+
     def _run(self) -> None:
         while True:
-            meeting_id = self.jobs.get()
+            job = self.jobs.get()
+            if isinstance(job, Job):
+                with self.gpu.for_meeting():
+                    job.run()
+                if self.jobs.empty():
+                    self.gpu.meetings_done()
+                continue
+            meeting_id = job
             store = None
             try:
                 store = Store()
@@ -293,6 +354,23 @@ class Worker:
                     store.close()
                 if self.jobs.empty():  # none left: the live transcript may have the GPU
                     self.gpu.meetings_done()
+
+
+class Writing:
+    """A summary or a document being written by the model on this PC: how far it is, and how
+    to stop it."""
+
+    def __init__(self, what: Literal["summary", "document"], by: str) -> None:
+        self.what = what
+        self.by = by
+        self.part = self.of = 0  # 0: waiting for its turn
+        self.cancel = ollama.Cancel()
+
+    def at(self, part: int, of: int) -> None:
+        self.part, self.of = part, of
+
+    def shown(self) -> dict:
+        return {"what": self.what, "by": self.by, "part": self.part, "of": self.of}
 
 
 def recover(store: Store, submit: Callable[[int], None]) -> None:
@@ -746,6 +824,48 @@ def create_app(token: str) -> FastAPI:
             with jobs_lock:
                 jobs.pop(meeting_id, None)
 
+    writing: dict[int, Writing] = {}  # by meeting: what is being written on this PC
+
+    def written_by(store: Store, meeting, asked: str | None) -> str:
+        """Who writes for a meeting: as asked, else the usual one; for a private meeting,
+        the model on this PC when there is one."""
+        if asked is not None:
+            return asked
+        if privacy.is_private(store, meeting) and store.setting(local_summary.MODEL):
+            return "local"
+        return store.setting(local_summary.WRITER, "claude")
+
+    def write_here(store: Store, meeting_id: int, what: str, write: Callable[[Writing], object]):
+        """Has the model on this PC write for a meeting, in its turn: what ``write`` returns."""
+        model = store.setting(local_summary.MODEL)
+        if not model:
+            raise RuntimeError("Choose a model on this PC in Settings first.")
+        run = writing[meeting_id] = Writing(what, model)
+        try:
+            return worker.in_turn(lambda: write(run), run.cancel)
+        finally:
+            writing.pop(meeting_id, None)
+
+    def summarize_here(store: Store, meeting_id: int, template: str | None) -> None:
+        write_here(
+            store,
+            meeting_id,
+            "summary",
+            lambda run: local_summary.summary(
+                store, meeting_id, run.by, template, run.cancel, run.at
+            ),
+        )
+
+    def document_here(store: Store, meeting_id: int, body: RecipeBody) -> dict:
+        def write(run: Writing) -> dict:
+            run.at(1, 1)
+            return local_summary.document(
+                store, meeting_id, body.recipe, run.by, body.previous, body.change, run.cancel
+            )
+
+        with only_job(meeting_id, "writing a document"):
+            return write_here(store, meeting_id, "document", write)
+
     def refuse_if_busy(meeting) -> None:
         """Changing a transcript while it is being recorded or (re)processed would be lost
         or would mix with the new results."""
@@ -810,6 +930,9 @@ def create_app(token: str) -> FastAPI:
             "speakers": speakers,
             "segments": [dict(row) for row in store.transcript(meeting_id)],
             "summary": store.summary(meeting_id),
+            # A summary or document being written on this PC now: by which model, the part it's
+            # on of how many (0: it waits for its turn; one past them: it puts them together).
+            "writing": run.shown() if (run := writing.get(meeting_id)) else None,
             "notes": [dict(row) for row in store.notes(meeting_id)],
             "insights": insights.meeting_insights(store, meeting_id),
             "talk_time": [dict(row) for row in store.talk_time(meeting_id)],
@@ -890,6 +1013,8 @@ def create_app(token: str) -> FastAPI:
     def delete_meeting(meeting_id: int, store: Store = Depends(db)):
         meeting = meeting_or_404(store, meeting_id)
         folder = Path(meeting["folder"]).resolve()
+        if (run := writing.get(meeting_id)) is not None:  # nothing left to write it for
+            run.cancel.cancel()
         store.delete_meeting(meeting_id)
         store.scrub_deleted_text()  # its words leave the search index and the log as well
         # Its copy leaves the export folder too, and it leaves that day's work log.
@@ -927,31 +1052,53 @@ def create_app(token: str) -> FastAPI:
     ):
         from .summarize import summarize
 
-        meeting_or_404(store, meeting_id)
+        body = body or SummaryBody()
+        by = written_by(store, meeting_or_404(store, meeting_id), body.by)
         try:
             with only_job(meeting_id, "writing its summary"):
-                summarize(store, meeting_id, body.template if body else None)
+                write = summarize_here if by == "local" else summarize
+                write(store, meeting_id, body.template)
+        except ollama.Cancelled as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except HTTPException:
             raise
         except Exception as exc:  # network, auth, rate limits: show the reason in the app
-            raise HTTPException(status_code=502, detail=f"Claude request failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail=f"{failed(by)}: {exc}") from exc
         export.auto_export(store, meeting_id)
         return store.summary(meeting_id)
+
+    @app.post("/api/meetings/{meeting_id}/writing/stop", dependencies=auth)
+    def stop_writing(meeting_id: int):
+        """Stops what is being written on this PC for a meeting; its last summary stays."""
+        run = writing.get(meeting_id)
+        if run is None:
+            raise HTTPException(status_code=409, detail="Nothing is being written")
+        run.cancel.cancel()
+        return {"stopping": True}
+
+    def failed(by: str) -> str:
+        return "Couldn't write it" if by == "local" else "Claude request failed"
 
     @app.post("/api/meetings/{meeting_id}/recipe", dependencies=auth)
     def make_recipe(meeting_id: int, body: RecipeBody, store: Store = Depends(db)):
         """A document made from the meeting: follow-up email, status update, ticket notes."""
         from .summarize import recipe
 
-        meeting_or_404(store, meeting_id)
+        by = written_by(store, meeting_or_404(store, meeting_id), body.by)
         try:
+            if by == "local":
+                return document_here(store, meeting_id, body)
             return recipe(store, meeting_id, body.recipe, body.previous, body.change)
+        except ollama.Cancelled as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Claude request failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail=f"{failed(by)}: {exc}") from exc
 
     @app.post("/api/meetings/{meeting_id}/ask", dependencies=auth)
     def ask(meeting_id: int, body: QuestionBody, store: Store = Depends(db)):
@@ -1759,6 +1906,21 @@ def create_app(token: str) -> FastAPI:
         except ValueError as exc:
             return "", {"folder": saved, "reason": str(exc)}
 
+    @app.get("/api/local-models", dependencies=auth)
+    def local_models():
+        """The models on this PC that could write summaries (Ollama's), or why there are
+        none to choose from."""
+        try:
+            found, reason = ollama.models(), None
+        except RuntimeError as exc:
+            found, reason = [], str(exc)
+        return {
+            "running": reason is None,
+            "reason": reason,
+            "models": [{"name": m.name, "size": m.size, "parameters": m.parameters} for m in found],
+            "suggested": local_summary.SUGGESTED,
+        }
+
     @app.get("/api/settings", dependencies=auth)
     def get_settings(store: Store = Depends(db)):
         from .summarize import MODELS, PRICES, meeting_template, summary_model
@@ -1770,6 +1932,8 @@ def create_app(token: str) -> FastAPI:
             headers=NO_STORE,
             content={
                 "summary_model": summary_model(store),
+                "writer": store.setting(local_summary.WRITER, "claude"),
+                "local_model": store.setting(local_summary.MODEL, ""),
                 "summary_models": [
                     {
                         "id": model,
@@ -1931,6 +2095,20 @@ def create_app(token: str) -> FastAPI:
             if body.summary_model not in MODELS:
                 raise HTTPException(status_code=400, detail="Unknown summary model")
             store.set_setting("summary_model", body.summary_model)
+        if body.local_model is not None:
+            name = body.local_model.strip()
+            if name:
+                try:
+                    name = ollama.model(name).name
+                except RuntimeError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+            store.set_setting(local_summary.MODEL, name)
+            if not name:  # none to write with: Claude does again
+                store.set_setting(local_summary.WRITER, "claude")
+        if body.writer is not None:
+            if body.writer == "local" and not store.setting(local_summary.MODEL):
+                raise HTTPException(status_code=400, detail="Choose a model on this PC first")
+            store.set_setting(local_summary.WRITER, body.writer)
         if body.language is not None:
             if body.language not in LANGUAGES:
                 raise HTTPException(status_code=400, detail="Unknown language")

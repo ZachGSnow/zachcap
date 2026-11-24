@@ -147,6 +147,19 @@ export type TopicOverview = {
   meetings: { id: number; title: string; started_at: string; client: string | null; count: number }[];
 };
 
+/** A summary or document being written by the model on this PC (``by``): the part it's on, of
+ * how many (0: it waits for its turn; one past them: it puts them together). */
+export type Writing = { what: "summary" | "document"; by: string; part: number; of: number };
+
+/** The models on this PC that could write (Ollama's), or why there are none. */
+export type LocalModels = {
+  running: boolean;
+  reason: string | null;
+  models: { name: string; size: number; parameters: string }[];
+  /** The one to get when there's none yet. */
+  suggested: string;
+};
+
 export type MeetingDetail = {
   meeting: Meeting;
   speakers: Speaker[];
@@ -162,6 +175,8 @@ export type MeetingDetail = {
   ticket_suggestions: TicketFound[];
   /** The topics said in it, most said first. */
   topics?: TopicFound[];
+  /** What the model on this PC is writing for it now. */
+  writing?: Writing | null;
   /** The clients of the people in it, and every client named so far. */
   clients_heard: string[];
   clients_known: string[];
@@ -305,6 +320,10 @@ export type RefusedFolder = { folder: string; reason: string };
 
 export type Settings = {
   summary_model: string;
+  /** Who writes summaries and documents unless asked otherwise. */
+  writer: "claude" | "local";
+  /** The model on this PC, by Ollama's name; "" for none. */
+  local_model: string;
   summary_models: { id: string; label: string; input_usd: number; output_usd: number }[];
   language: string;
   languages: { id: string; label: string }[];

@@ -26,8 +26,8 @@ AUDIO_SUFFIXES = {".flac", ".wav", ".mp3", ".m4a", ".ogg", ".redacting"}
 # A private meeting: none of it is sent to Claude. It isn't summarized, asked about or
 # written from, and the library Ask and MCP clients read (assistant.py) doesn't have it.
 PRIVATE = (
-    "This meeting is private: nothing in it is sent to Claude. To let Claude read it, turn "
-    "that off in the meeting's menu."
+    "This meeting is private: nothing in it is sent to Claude. A model on this PC can write "
+    "from it (Settings > Summaries), or let Claude read it in the meeting's menu."
 )
 
 

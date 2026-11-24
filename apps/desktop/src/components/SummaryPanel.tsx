@@ -16,20 +16,12 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useReturnFocus } from "@/hooks/useReturnFocus";
-import { api, type ActionItem, type RecipeResult, type Summary } from "@/lib/engine";
-import { attempt, copyText } from "@/lib/feedback";
+import { api, type ActionItem, type RecipeResult, type Summary, type Writing } from "@/lib/engine";
+import { attempt, copyText, reason } from "@/lib/feedback";
 import { clock, toSeconds, type SpeakerColor } from "@/lib/format";
 import { summaryMarkdown } from "@/lib/markdown";
 import { cn } from "@/lib/utils";
-
-export function modelLabel(id: string): string {
-  const known: Record<string, string> = {
-    "claude-opus-5-5": "Claude Opus 5.5",
-    "claude-sonnet-5-5": "Claude Sonnet 5.5",
-    "claude-fable-5-1": "Claude Fable 5.1",
-  };
-  return known[id] ?? id;
-}
+import { costLabel, modelLabel, writingLabel, type Writer } from "@/lib/writer";
 
 function Section({ title, count, children }: { title: string; count?: number; children: ReactNode }) {
   return (
@@ -154,6 +146,43 @@ function KindPicker({
   );
 }
 
+/** Who writes, when there is a choice: Claude, or the model on this PC. */
+function WriterPicker({
+  value,
+  names,
+  onChange,
+}: {
+  value: Writer;
+  names: Record<Writer, string>;
+  onChange: (writer: Writer) => void;
+}) {
+  return (
+    <select
+      aria-label="Written by"
+      title="Who writes: Claude gets the transcript's text; a model on this PC sends nothing"
+      value={value}
+      onChange={(event) => onChange(event.target.value as Writer)}
+      className="h-8 rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+    >
+      <option value="claude">{names.claude}</option>
+      <option value="local">{names.local}</option>
+    </select>
+  );
+}
+
+/** How far the model on this PC is, with a way to stop it. */
+function WritingNote({ writing, onStop, className }: { writing: Writing; onStop: () => void; className?: string }) {
+  return (
+    <p role="status" className={cn("flex items-center gap-2 text-sm text-muted-foreground", className)}>
+      <Loader2 className="size-4 animate-spin" />
+      {writingLabel(writing)}
+      <Button size="sm" variant="outline" className="h-7" onClick={onStop}>
+        Stop
+      </Button>
+    </p>
+  );
+}
+
 /** One "write from this meeting" request; results from an older run are ignored. ``text``
  * is the document as edited by hand; ``refining`` while a change is being written. */
 type RecipeRun = {
@@ -165,10 +194,13 @@ type RecipeRun = {
   refining?: boolean;
 };
 
-/** A document Claude wrote from the meeting, ready to copy. */
+/** A document written from the meeting, ready to copy. */
 function RecipeDialog({
   open,
   run,
+  by,
+  writing,
+  onStop,
   onClose,
   onRewrite,
   onEdit,
@@ -177,6 +209,11 @@ function RecipeDialog({
 }: {
   open: boolean;
   run: RecipeRun | null;
+  /** Who is asked to write it. */
+  by: string;
+  /** The document the model on this PC is on, if it is. */
+  writing: Writing | null;
+  onStop: () => void;
   onClose: () => void;
   onRewrite: (recipe: Choice) => void;
   /** The document edited by hand: kept with its run, so it survives closing and reopening. */
@@ -185,7 +222,7 @@ function RecipeDialog({
   onRefine: (recipe: Choice, previous: string, change: string) => void;
   onCloseAutoFocus: (event: Event) => void;
 }) {
-  const writing = run !== null && !run.result && !run.error;
+  const unwritten = run !== null && !run.result && !run.error;
   const text = run?.text ?? run?.result?.text ?? "";
   const [change, setChange] = useState("");
   const refine = () => {
@@ -198,7 +235,10 @@ function RecipeDialog({
       <DialogContent className="sm:max-w-2xl" onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>{run?.recipe.label}</DialogTitle>
-          <DialogDescription>Written by Claude from this meeting. Read it over before you send it.</DialogDescription>
+          <DialogDescription>
+            Written by {run?.result ? modelLabel(run.result.model) : by} from this meeting. Read it over before you send
+            it.
+          </DialogDescription>
         </DialogHeader>
         {run?.error && (
           <p className="text-sm text-destructive">
@@ -234,23 +274,27 @@ function RecipeDialog({
             </div>
           </>
         ) : (
-          !run?.error && (
+          !run?.error &&
+          (writing ? (
+            <WritingNote writing={writing} onStop={onStop} className="py-10" />
+          ) : (
             <p className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" />
               Writing...
             </p>
-          )
+          ))
         )}
+        {run?.refining && writing && <WritingNote writing={writing} onStop={onStop} />}
         <DialogFooter className="items-center">
           {run?.result && (
             <span className="mr-auto text-xs text-muted-foreground">
-              {modelLabel(run.result.model)} {"\u00b7"} ${run.result.cost_usd.toFixed(3)}
+              {modelLabel(run.result.model)} {"\u00b7"} {costLabel(run.result.model, run.result.cost_usd)}
             </span>
           )}
           <Button variant="outline" onClick={onClose}>
             Close
           </Button>
-          <Button variant="outline" disabled={writing || run?.refining} onClick={() => run && onRewrite(run.recipe)}>
+          <Button variant="outline" disabled={unwritten || run?.refining} onClick={() => run && onRewrite(run.recipe)}>
             <RotateCw className="size-4" />
             Write again
           </Button>
@@ -279,6 +323,12 @@ export function SummaryPanel({
   isPrivate,
   onAllow,
   onKindChange,
+  writer,
+  writerNames,
+  onWriterChange,
+  writing,
+  onWritingHere,
+  onStop,
   summarizing,
   onSummarize,
   onSeek,
@@ -299,10 +349,21 @@ export function SummaryPanel({
   pickedAutomatically: boolean;
   /** The meeting is Automatic, and no kind could be picked for its summary. */
   unpicked: boolean;
-  /** Kept from Claude: nothing is written from it until it's allowed (``onAllow``). */
+  /** Kept from Claude: only the model on this PC writes from it, until it's allowed
+   * (``onAllow``). */
   isPrivate: boolean;
   onAllow: () => void;
   onKindChange: (kind: string) => void;
+  /** Who writes (null: nobody may), and what each is called; the picker shows when there
+   * is a choice. */
+  writer: Writer | null;
+  writerNames: Record<Writer, string>;
+  onWriterChange: ((writer: Writer) => void) | null;
+  /** What the model on this PC is writing for this meeting now. */
+  writing: Writing | null;
+  /** A document is asked of the model on this PC (so the page follows how far it is). */
+  onWritingHere: (on: boolean) => void;
+  onStop: () => void;
   /** Owned by the meeting page, so its header button and this panel can't both start one. */
   summarizing: boolean;
   onSummarize: () => void;
@@ -335,14 +396,17 @@ export function SummaryPanel({
     }));
     setShown(recipe.id);
     setDialogOpen(true);
+    if (writer === "local") onWritingHere(true);
     try {
       const result = await api<RecipeResult>(`/api/meetings/${meetingId}/recipe`, {
         method: "POST",
-        json: { recipe: recipe.id, ...refine },
+        json: { recipe: recipe.id, by: writer, ...refine },
       });
       settle({ result, text: result.text, refining: false, error: undefined });
     } catch (error) {
-      settle({ error: String(error), refining: false });
+      settle({ error: reason(error), refining: false });
+    } finally {
+      if (writer === "local") onWritingHere(false);
     }
   };
 
@@ -359,7 +423,30 @@ export function SummaryPanel({
     } else void write(recipe);
   };
 
-  if (!summary && isPrivate) return <PrivateNote what="so there's no summary of it." onAllow={onAllow} />;
+  const summaryHere = writing?.what === "summary" ? writing : null;
+  const pickers = (asked: boolean) => (
+    <>
+      {writer !== null && onWriterChange && (
+        <WriterPicker value={writer} names={writerNames} onChange={onWriterChange} />
+      )}
+      <KindPicker
+        templates={templates}
+        value={kind}
+        automatic={pickedAutomatically}
+        unpicked={asked && unpicked}
+        onChange={onKindChange}
+      />
+    </>
+  );
+
+  if (!summary && writer === null) {
+    return (
+      <PrivateNote
+        what="so there's no summary of it. A model on this PC could write one: see Summaries in Settings."
+        onAllow={onAllow}
+      />
+    );
+  }
 
   if (!summary) {
     return (
@@ -369,22 +456,19 @@ export function SummaryPanel({
         </div>
         <p className="mt-4 font-medium">Summarize this meeting</p>
         <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-          Claude reads the named transcript (text only, never audio) and pulls out decisions, action items,
-          commitments and who said what. Pick the kind of meeting to set the focus.
+          {writer === "local"
+            ? `${writerNames.local} reads the named transcript and pulls out decisions, action items, commitments and who said what. Nothing is sent; it takes a few minutes.`
+            : "Claude reads the named transcript (text only, never audio) and pulls out decisions, action items, commitments and who said what."}{" "}
+          Pick the kind of meeting to set the focus.
         </p>
-        <div className="mt-5 flex items-center gap-2">
-          <KindPicker
-            templates={templates}
-            value={kind}
-            automatic={pickedAutomatically}
-            unpicked={false}
-            onChange={onKindChange}
-          />
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+          {pickers(false)}
           <Button disabled={summarizing} onClick={onSummarize}>
             {summarizing ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-            {summarizing ? "Summarizing..." : "Summarize with Claude"}
+            {summarizing ? "Summarizing..." : writer === "local" ? "Summarize on this PC" : "Summarize with Claude"}
           </Button>
         </div>
+        {summaryHere && <WritingNote writing={summaryHere} onStop={onStop} className="mt-4" />}
       </div>
     );
   }
@@ -397,10 +481,10 @@ export function SummaryPanel({
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant="secondary">{modelLabel(summary.model)}</Badge>
         <span className="text-xs text-muted-foreground">
-          {((summary.input_tokens + summary.output_tokens) / 1000).toFixed(1)}k tokens {"\u00b7"} $
-          {summary.cost_usd.toFixed(3)}
+          {((summary.input_tokens + summary.output_tokens) / 1000).toFixed(1)}k tokens {"\u00b7"}{" "}
+          {costLabel(summary.model, summary.cost_usd)}
         </span>
-        <div className="ml-auto flex gap-2">
+        <div className="ml-auto flex flex-wrap justify-end gap-2">
           <Button
             size="sm"
             variant="outline"
@@ -409,15 +493,9 @@ export function SummaryPanel({
             <Copy className="size-3.5" />
             Copy
           </Button>
-          {!isPrivate && (
+          {writer !== null && (
             <>
-              <KindPicker
-                templates={templates}
-                value={kind}
-                automatic={pickedAutomatically}
-                unpicked={unpicked}
-                onChange={onKindChange}
-              />
+              {pickers(true)}
               <Button size="sm" variant="outline" disabled={summarizing} onClick={onSummarize}>
                 {summarizing ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
                 Regenerate
@@ -427,12 +505,15 @@ export function SummaryPanel({
         </div>
       </div>
 
+      {summaryHere && <WritingNote writing={summaryHere} onStop={onStop} className="mt-3" />}
       {isPrivate && (
         <p className="mt-3 text-xs text-muted-foreground">
-          This meeting is private now: Claude can't regenerate the summary or write from it.
+          {writer === null
+            ? "This meeting is private now: Claude can't regenerate the summary or write from it."
+            : `This meeting is private: ${writerNames.local} writes from it, and nothing is sent.`}
         </p>
       )}
-      {recipes.length > 0 && !isPrivate && (
+      {recipes.length > 0 && writer !== null && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">Write from this meeting:</span>
           {recipes.map((recipe) => {
@@ -459,6 +540,9 @@ export function SummaryPanel({
       <RecipeDialog
         open={dialogOpen}
         run={shown ? (runs[shown] ?? null) : null}
+        by={writerNames[writer ?? "claude"]}
+        writing={writing?.what === "document" ? writing : null}
+        onStop={onStop}
         onClose={() => setDialogOpen(false)}
         onRewrite={(recipe) => void write(recipe)}
         onEdit={edit}
