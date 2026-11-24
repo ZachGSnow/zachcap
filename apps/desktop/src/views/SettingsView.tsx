@@ -90,6 +90,7 @@ type SettingsChange = Partial<{
   stop_when_call_ends: boolean;
   auto_record: boolean;
   auto_record_apps: string[];
+  live_transcript: boolean;
   export_work_log: boolean;
   dictation: boolean;
   dictation_snippets: string;
@@ -857,6 +858,17 @@ export function SettingsView() {
               })}
             </div>
           )}
+          <Row
+            label="Live panel during calls"
+            help="A small panel over the call shows what's being said a moment after each person stops talking (your GPU works during the call). It's left out of screen shares and screenshots; close it for one call with its X."
+          >
+            <Switch
+              className="ml-auto"
+              aria-label="Live panel during calls"
+              checked={settings?.live_transcript ?? true}
+              onCheckedChange={(on) => void save({ live_transcript: on })}
+            />
+          </Row>
           <Row
             label="Stop when the call ends"
             help="For recordings you start: once Teams or another call app lets go of your microphone and nobody has spoken for ten seconds, ZachCap stops a few seconds later; after ten quiet minutes in a room, a minute later. Keep recording calls it off."

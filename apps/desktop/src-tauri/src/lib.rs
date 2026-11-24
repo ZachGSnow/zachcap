@@ -88,6 +88,28 @@ fn trim_log(log: &Path, limit: u64) {
     }
 }
 
+/// The live panel's window: a small window over the call while a recording runs, with the
+/// live transcript (the page shows it when its window has this label). Left out of screen
+/// shares and screenshots, never in the taskbar, and it doesn't take the keyboard from the
+/// call when it appears.
+const LIVE: &str = "live";
+
+/// What the shell follows of the engine, once a second, so the live panel and the
+/// notifications about calls never wait on the page (a hidden window's timers run late).
+#[derive(Default)]
+struct Following {
+    recording: bool,
+    /// The meeting being recorded.
+    meeting: Option<i64>,
+    /// The meeting whose live panel was closed: it isn't opened again for it.
+    dismissed: Option<i64>,
+    /// The last call event seen (None until the first look: older ones are old news).
+    event: Option<i64>,
+    looked: bool,
+}
+
+struct Follow(Mutex<Following>);
+
 /// Where the page reaches the engine; None while it starts (the page asks again).
 #[tauri::command]
 fn engine_info(engine: tauri::State<Engine>) -> Option<EngineInfo> {
@@ -859,6 +881,157 @@ fn stop_recording(info: &EngineInfo) {
     }
 }
 
+/// GET from the engine, as JSON; None if it isn't answering.
+fn engine_get(info: &EngineInfo, path: &str) -> Option<serde_json::Value> {
+    let address = SocketAddr::from(([127, 0, 0, 1], info.port));
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500)).ok()?;
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\n\
+         Connection: close\r\n\r\n",
+        info.port, info.token
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).ok()?;
+    let text = String::from_utf8_lossy(&response);
+    let (head, body) = text.split_once("\r\n\r\n")?;
+    if !head.starts_with("HTTP/1.1 200") {
+        return None;
+    }
+    serde_json::from_str(body).ok()
+}
+
+/// Opens the live panel (or shows it again) at the top right of the main screen.
+fn open_live_panel(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(LIVE) {
+        let _ = window.show();
+        return;
+    }
+    let (width, height) = (360.0, 480.0);
+    let mut builder =
+        tauri::WebviewWindowBuilder::new(app, LIVE, tauri::WebviewUrl::App("index.html".into()))
+            .title("ZachCap live")
+            .inner_size(width, height)
+            .min_inner_size(260.0, 120.0)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .decorations(false)
+            .shadow(true)
+            .focused(false)
+            .content_protected(true)
+            .resizable(true);
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let area = monitor.work_area();
+        let right = (f64::from(area.position.x) + f64::from(area.size.width)) / scale;
+        let top = f64::from(area.position.y) / scale;
+        builder = builder.position(right - width - 16.0, top + 16.0);
+    }
+    let _ = builder.build();
+}
+
+fn close_live_panel(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(LIVE) {
+        let _ = window.destroy();
+    }
+}
+
+/// Shows the live panel again after it was closed (the recording bar's button).
+#[tauri::command]
+fn show_live_panel(app: AppHandle) {
+    if let Some(follow) = app.try_state::<Follow>() {
+        follow.0.lock().unwrap().dismissed = None;
+    }
+    open_live_panel(&app);
+}
+
+/// A Windows notification for what the engine did on its own about a call, unless ZachCap's
+/// window is in front (it says so there).
+fn tell_about_call(app: &AppHandle, event: &serde_json::Value) {
+    let name = event["app"].as_str().unwrap_or("The call app");
+    let (title, body) = match event["kind"].as_str() {
+        Some("started") => (
+            format!("Recording your {name} call"),
+            "It stops when the call ends. Not one to keep? Press Don't record in the live panel."
+                .to_string(),
+        ),
+        Some("stopped") => (
+            "Recording saved".to_string(),
+            if event["reason"].as_str() == Some("quiet") {
+                "It stopped after ten quiet minutes. Transcribing and finding speakers..."
+            } else {
+                "It stopped when the call ended. Transcribing and finding speakers..."
+            }
+            .to_string(),
+        ),
+        Some("failed") => (
+            format!("Couldn't record the {name} call"),
+            event["detail"].as_str().unwrap_or_default().to_string(),
+        ),
+        _ => return,
+    };
+    let in_front = app
+        .get_webview_window("main")
+        .and_then(|window| window.is_focused().ok())
+        .unwrap_or(false);
+    if in_front {
+        return;
+    }
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// Once a second: opens the live panel when a recording with a live transcript starts,
+/// closes it when the recording ends, and tells about calls recorded or stopped on their own.
+fn follow_engine(app: AppHandle) {
+    std::thread::spawn(move || {
+        while !EXITING.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_secs(1));
+            // Read again on every look: each start of the engine has a port and a token of
+            // its own, and there's none while it starts.
+            let Some(info) = app
+                .try_state::<Engine>()
+                .and_then(|engine| engine.info.lock().unwrap().clone())
+            else {
+                continue;
+            };
+            let Some(state) = engine_get(&info, "/api/record") else {
+                continue;
+            };
+            let Some(follow) = app.try_state::<Follow>() else {
+                continue;
+            };
+            let recording = state["recording"].as_bool().unwrap_or(false);
+            let meeting = state["meeting_id"].as_i64();
+            let live = state["live"].as_bool().unwrap_or(false);
+            let event = state["event"]["id"].as_i64();
+            let (open, close, news) = {
+                let mut seen = follow.0.lock().unwrap();
+                let started = recording && (!seen.recording || seen.meeting != meeting);
+                let open = started && live && seen.dismissed != meeting;
+                let close = !recording && seen.recording;
+                let news = seen.looked && event.is_some() && event != seen.event;
+                seen.recording = recording;
+                seen.meeting = if recording { meeting } else { None };
+                seen.event = event.or(seen.event);
+                seen.looked = true;
+                (open, close, news)
+            };
+            if open {
+                open_live_panel(&app);
+            }
+            if close {
+                close_live_panel(&app);
+            }
+            if news {
+                tell_about_call(&app, &state["event"]);
+            }
+        }
+    });
+}
+
 fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -932,6 +1105,8 @@ pub fn run() {
                 uv: Mutex::new(None),
             });
             begin(app.handle().clone());
+            app.manage(Follow(Mutex::new(Following::default())));
+            follow_engine(app.handle().clone());
 
             // Notice when the engine stops later (a crash), so the window can offer a restart;
             // and keep its log from growing without end (ZachCap runs for weeks in the tray).
@@ -1048,11 +1223,19 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the window keeps ZachCap (and any recording) running in the tray.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
-                tell_about_tray(window.app_handle());
+                if window.label() == LIVE {
+                    // Closed for this recording; the recording bar's button brings it back.
+                    if let Some(follow) = window.app_handle().try_state::<Follow>() {
+                        let mut seen = follow.0.lock().unwrap();
+                        seen.dismissed = seen.meeting;
+                    }
+                } else {
+                    // Closing the window keeps ZachCap (and any recording) running in the tray.
+                    tell_about_tray(window.app_handle());
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1065,7 +1248,8 @@ pub fn run() {
             set_dictation,
             set_shortcuts,
             shortcut_status,
-            pause_shortcuts
+            pause_shortcuts,
+            show_live_panel
         ])
         .build(tauri::generate_context!())
         .expect("error while building ZachCap")
@@ -1111,6 +1295,46 @@ fn end_process(pid: u32) {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    /// One request answered by a pretend engine: what it was asked, and the reply.
+    fn answer_once(reply: &'static str) -> (EngineInfo, std::thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asked = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let read = stream.read(&mut request).unwrap();
+            stream.write_all(reply.as_bytes()).unwrap();
+            String::from_utf8_lossy(&request[..read]).into_owned()
+        });
+        let info = EngineInfo {
+            port,
+            token: "secret".into(),
+        };
+        (info, asked)
+    }
+
+    #[test]
+    fn the_engine_is_asked_with_the_token_and_its_json_read() {
+        let body = r#"{"recording": true, "meeting_id": 7, "live": true}"#;
+        let reply = Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .into_boxed_str(),
+        );
+        let (info, asked) = answer_once(reply);
+        let state = engine_get(&info, "/api/record").expect("an answer");
+        assert_eq!(state["meeting_id"].as_i64(), Some(7));
+        let request = asked.join().unwrap();
+        assert!(request.starts_with("GET /api/record HTTP/1.1"));
+        assert!(request.contains("Authorization: Bearer secret"));
+
+        let (info, asked) = answer_once("HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\n\r\n{}");
+        assert!(engine_get(&info, "/api/record").is_none());
+        asked.join().unwrap();
+    }
 
     #[test]
     fn a_port_is_read_only_once_the_engine_has_written_it_whole() {

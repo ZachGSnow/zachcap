@@ -200,12 +200,29 @@ export type CallEvent = {
  * run of the engine, whose event ids count from 1. */
 type CallEvents = { boot?: string; events?: CallEvent[] };
 
+/** A line of the live transcript: said on your mic, or on the call. */
+export type LiveLine = { id: number; track: "mic" | "system"; start: number; end: number; text: string };
+
+/** The live transcript of the recording running now (or the last one), from /api/live. */
+export type LiveState = {
+  recording: boolean;
+  meeting_id: number | null;
+  /** Whether a live transcript runs (off in Settings: no). */
+  on: boolean;
+  lines: LiveLine[];
+  error: string | null;
+  /** Seconds not transcribed live to keep up (a slow GPU on battery). */
+  skipped: number;
+};
+
 export type RecordState =
   | ({ recording: false } & CallEvents)
   | ({
       recording: true;
       /** The meeting it's recording into. */
       meeting_id: number;
+      /** A live transcript runs for it (the live panel shows it). */
+      live?: boolean;
       title: string | null;
       elapsed: number;
       levels: { mic: number; system: number };
@@ -290,6 +307,8 @@ export type Settings = {
   auto_record_apps: string[];
   /** The call apps that can (never a web browser). */
   auto_record_choices: string[];
+  /** A live transcript in a small panel over the call while recording. */
+  live_transcript: boolean;
   /** Keep a daily and weekly work log in the export folder too. */
   export_work_log: boolean;
   /** When a sound check last heard both sides (null: never). */

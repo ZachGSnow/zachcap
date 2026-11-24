@@ -44,6 +44,7 @@ from . import (
     gate,
     imports,
     insights,
+    live,
     mentions,
     paths,
     pipeline,
@@ -196,6 +197,7 @@ class SettingsBody(BaseModel):
     stop_when_call_ends: bool | None = None
     auto_record: bool | None = None  # start recording when a chosen call app takes the mic
     auto_record_apps: list[str] | None = None  # the call apps that do (see autorecord)
+    live_transcript: bool | None = None  # a live transcript (and notes) during recordings
     export_work_log: bool | None = None  # keep a daily and weekly work log in the export folder
     dictation: bool | None = None  # hold the dictation keys to dictate into any app
     dictation_snippets: str | None = None  # "cue: text to type", one per line
@@ -360,10 +362,24 @@ def create_app(token: str) -> FastAPI:
 
     threading.Thread(target=remove_old_audio, name="zachcap-retention", daemon=True).start()
 
+    # The live transcript of the recording running now, or of the last one (until the next
+    # starts): memory only.
+    live_state: dict = {"live": None, "meeting_id": None}
+
     def finish_recording(meeting_id: int | None = None) -> int | None:
         """Stop the recorder, if one is running, and save its meeting. Returns the meeting id.
         Used by Stop, and by the engine itself when the app goes away mid-recording. With a
         ``meeting_id``, only that recording: None when another one runs (or none does)."""
+        try:
+            return _finish_recording(meeting_id)
+        finally:
+            # The live transcript's speech model leaves the GPU before the meeting's own
+            # transcript is made (the caller submits it next).
+            current = live_state["live"]
+            if current is not None and recording.get("recorder") is None:
+                current.stop()
+
+    def _finish_recording(meeting_id: int | None) -> int | None:
         with lock:
             if meeting_id is not None and recording.get("meeting_id") != meeting_id:
                 return None  # stopped already, maybe with another one started since
@@ -406,10 +422,18 @@ def create_app(token: str) -> FastAPI:
             while folder.exists():
                 stamp += timedelta(seconds=1)
                 folder = paths.meetings_dir() / stamp.strftime("%Y-%m-%d_%H%M%S")
+            listening = None
+            if store.setting(live.SETTING, "1") == "1":
+                names = [
+                    p["name"] for p in store.people() if p["name"].lower() not in {"you", "me"}
+                ]
+                hotwords = words.parse(store.setting("vocabulary")).hotwords(names)
+                listening = live.Live(live.Speech(language_of(store), hotwords))
             recorder = Recorder(
                 folder,
                 mic_name=store.setting("mic_device") or None,
                 output_name=store.setting("output_device") or None,
+                listener=listening.feed if listening is not None else None,
             )
             try:
                 recorder.start()
@@ -445,6 +469,11 @@ def create_app(token: str) -> FastAPI:
             recording.update(
                 recorder=recorder, meeting_id=meeting_id, title=title, notes=0, watch=watch
             )
+            if live_state["live"] is not None:
+                live_state["live"].stop()  # the last recording's (stopped already, normally)
+            live_state.update(live=listening, meeting_id=meeting_id)
+            if listening is not None:
+                listening.start()
         return meeting_id
 
     def stop_recording(meeting_id: int | None = None) -> int | None:
@@ -488,6 +517,8 @@ def create_app(token: str) -> FastAPI:
                 shutil.rmtree(folder, ignore_errors=True)
         finally:
             store.close()
+        if live_state["meeting_id"] == meeting_id:  # nothing of it is kept, live lines included
+            live_state.update(live=None, meeting_id=None)
         return "deleted"
 
     def recording_now() -> dict | None:
@@ -1335,6 +1366,8 @@ def create_app(token: str) -> FastAPI:
             **call_watch.status(meeting_id),
             "recording": True,
             "meeting_id": meeting_id,
+            # A live transcript runs for it (the shell opens the live panel then).
+            "live": live_state["live"] is not None and live_state["meeting_id"] == meeting_id,
             "title": recording.get("title"),
             "elapsed": round(recorder.elapsed, 1),
             "levels": recorder.levels(),
@@ -1379,6 +1412,23 @@ def create_app(token: str) -> FastAPI:
         if meeting_id is None:
             raise HTTPException(status_code=409, detail="Not recording")
         return {"meeting_id": meeting_id}
+
+    @app.get("/api/live", dependencies=auth)
+    def live_lines(after: int = 0):
+        """The live transcript of the recording running now (or of the one that just
+        ended): the lines after ``after``. Kept in memory only, never cached by the page."""
+        current = live_state["live"]
+        return JSONResponse(
+            {
+                "recording": recording.get("recorder") is not None,
+                "meeting_id": live_state["meeting_id"],
+                "on": current is not None,
+                "lines": current.lines(after) if current is not None else [],
+                "error": current.error if current is not None else None,
+                "skipped": round(current.skipped) if current is not None else 0,
+            },
+            headers=NO_STORE,
+        )
 
     @app.post("/api/record/keep", dependencies=auth)
     def record_keep(body: RecordingRef | None = None):
@@ -1639,6 +1689,8 @@ def create_app(token: str) -> FastAPI:
                     autorecord.chosen(store.setting(autorecord.APPS_SETTING))
                 ),
                 "auto_record_choices": autorecord.choosable(),
+                # A live transcript, notes and alerts during recordings (the GPU works then).
+                "live_transcript": store.setting(live.SETTING, "1") == "1",
                 "export_work_log": store.setting("export_work_log") == "1",
                 "dictation": store.setting(dictation.SETTING) == "1",
                 "dictation_snippets": store.setting(dictation.SNIPPETS, ""),
@@ -1710,6 +1762,8 @@ def create_app(token: str) -> FastAPI:
             store.set_setting("stop_when_call_ends", "1" if body.stop_when_call_ends else "0")
         if body.auto_record is not None:
             store.set_setting(autorecord.SETTING, "1" if body.auto_record else "0")
+        if body.live_transcript is not None:
+            store.set_setting(live.SETTING, "1" if body.live_transcript else "0")
         if body.auto_record_apps is not None:  # checked above
             store.set_setting(autorecord.APPS_SETTING, ", ".join(sorted(body.auto_record_apps)))
         call_settings_changed()  # the call watch reads the new ones at its next look
