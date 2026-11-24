@@ -14,7 +14,8 @@
     uncommitted changes is refused unless -AllowDirty is given (for a test build).
 
     ZachCap's own code goes in as a wheel built here with that uv, so the installed app only
-    installs pinned, hash-checked files and never fetches a build tool.
+    installs pinned, hash-checked files and never fetches a build tool. The tools that build
+    it here are pinned with hashes as well (build-constraints.txt).
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File apps\desktop\scripts\build-installer.ps1
 #>
@@ -84,8 +85,10 @@ $engine = Join-Path $stage 'engine'
 & $uv lock --check --project $engine --no-config
 if ($LASTEXITCODE -ne 0) { throw "engine\uv.lock doesn't match engine\pyproject.toml: run 'uv lock' in engine and commit it" }
 
-# ZachCap's own code as a wheel, from the staged copy (only what git tracks).
-& $uv build $engine --wheel --out-dir (Join-Path $engine 'wheel') --no-config
+# ZachCap's own code as a wheel, from the staged copy (only what git tracks), by build tools
+# pinned with hashes (build-constraints.in says how to refresh them).
+& $uv build $engine --wheel --out-dir (Join-Path $engine 'wheel') --no-config `
+    --build-constraints (Join-Path $PSScriptRoot 'build-constraints.txt') --require-hashes
 if ($LASTEXITCODE -ne 0) { throw "uv build failed ($LASTEXITCODE)" }
 $wheel = "zachcap-$version-py3-none-any.whl"
 $built = @(Get-ChildItem (Join-Path $engine 'wheel') -Filter '*.whl').Name -join ', '

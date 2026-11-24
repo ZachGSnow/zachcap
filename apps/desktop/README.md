@@ -16,8 +16,9 @@ built again from scratch. It also puts ZachCap in the tray: closing the window k
 `src-tauri/installer/`, then runs `tauri build --config src-tauri/tauri.installer.conf.json`
 (NSIS, per-user, into `%LOCALAPPDATA%\Programs\ZachCap`; see `src-tauri/windows/installer-hooks.nsh`).
 It stops when `uv.lock` or the version of the engine doesn't go with the app's, which would make
-every first start fail. The plain `tauri.conf.json` keeps bundling off, so `cargo check` and
-`npm run tauri dev` need none of it.
+every first start fail. The tools that build the engine's wheel are pinned with hashes
+(`scripts/build-constraints.txt`; `build-constraints.in` says how to refresh them). The plain
+`tauri.conf.json` keeps bundling off, so `cargo check` and `npm run tauri dev` need none of it.
 
 ## Develop
 

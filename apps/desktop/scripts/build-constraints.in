@@ -1,0 +1,7 @@
+# What builds the engine's wheel (the [build-system] in engine/pyproject.toml). build-installer.ps1
+# has uv use only the versions in build-constraints.txt, and check their hashes.
+#
+# To refresh those, run the command at the top of build-constraints.txt from the repo root, with
+# --upgrade. It leaves out what was released in the last two weeks (P14D), so that a bad release
+# has time to be noticed.
+hatchling
