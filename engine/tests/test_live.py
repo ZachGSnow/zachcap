@@ -51,6 +51,23 @@ def said(seconds: float = 2.0) -> np.ndarray:
     return np.concatenate([tone(seconds), quiet(1)])
 
 
+def talk(seconds: float, seed: int, rate: int = 48000) -> np.ndarray:
+    """Speech-like sound: noise whose loudness rises and falls with each syllable (five a
+    second), a different person for each seed."""
+    rng = np.random.default_rng(seed)
+    syllables = np.repeat(rng.uniform(0.1, 1.0, int(seconds * 5) + 1), rate // 5)
+    smooth = np.convolve(syllables, np.ones(rate // 50) / (rate // 50), mode="same")
+    loudness_ = smooth[: int(seconds * rate)]
+    return (0.4 * loudness_ * rng.standard_normal(len(loudness_))).astype(np.float32)
+
+
+def heard_late(audio: np.ndarray, delay: float, gain: float, rate: int = 48000) -> np.ndarray:
+    """The speakers heard through the mic: that audio, later and quieter, with a little hiss."""
+    late = np.concatenate([np.zeros(int(delay * rate), np.float32), gain * audio])[: len(audio)]
+    hiss = 0.001 * np.random.default_rng(9).standard_normal(len(audio))
+    return (late + hiss).astype(np.float32)
+
+
 class Feeder:
     """Feeds a track the way the recorder's writer does: 0.1 s blocks on the timeline."""
 
@@ -173,6 +190,90 @@ def test_a_mic_line_found_to_be_echo_later_is_taken_away():
     transcript.step()
     assert [line["track"] for line in transcript.lines()] == ["system"]
     assert transcript.dropped(upto=mine["id"]) == [mine["id"]]  # and takes it away again
+
+
+def test_the_speakers_heard_through_the_mic_are_never_transcribed():
+    transcript, heard = make({"system": "the cutover is friday", "mic": "follow me"})
+    call_audio = np.concatenate([quiet(1), talk(3, seed=1), quiet(2)])
+    Feeder(transcript, "system").play(call_audio)
+    Feeder(transcript, "mic").play(heard_late(call_audio, delay=0.12, gain=0.3))
+    transcript.step()
+    assert [line["track"] for line in transcript.lines()] == ["system"]
+    assert [track for track, _ in heard] == ["system"]  # not even transcribed
+
+
+def test_someone_speaking_over_the_call_is_heard():
+    transcript, heard = make({"system": "the cutover is friday", "mic": "no, saturday"})
+    call_audio = np.concatenate([quiet(1), talk(3, seed=1), quiet(2)])
+    mine = np.concatenate([quiet(1.5), 1.5 * talk(2, seed=2), quiet(2.5)])
+    Feeder(transcript, "system").play(call_audio)
+    Feeder(transcript, "mic").play(heard_late(call_audio, delay=0.12, gain=0.3) + mine)
+    transcript.step()
+    assert [line["text"] for line in transcript.lines()] == [
+        "the cutover is friday",
+        "no, saturday",
+    ]
+
+
+def test_the_echo_measure_follows_the_speakers_not_the_people():
+    call_audio = talk(4, seed=1, rate=RATE)
+    call = live.loudness(call_audio)
+    delay = round(live.ECHO_DELAY * 100)
+    span = slice(100, 300)  # 2 s of the mic, compared with the call from 250 ms before
+    theirs = call[span.start - delay : span.stop]
+    echo = live.loudness(heard_late(call_audio, delay=0.12, gain=0.2, rate=RATE))[span]
+    assert live.echo_measure(echo, theirs) > 0.95
+    person = live.loudness(talk(4, seed=2, rate=RATE))[span]
+    assert live.echo_measure(person, theirs) < live.ECHO_LIKE
+    over = live.loudness(heard_late(call_audio, 0.12, 0.2, RATE) + talk(4, seed=2, rate=RATE))
+    assert live.echo_measure(over[span], theirs) < live.ECHO_LIKE  # double-talk
+    assert live.echo_measure(echo, np.zeros_like(theirs)) == 0  # the call quiet
+    assert live.echo_measure(echo, np.full_like(theirs, np.nan)) == 0  # nothing known of it
+
+
+def test_the_calls_loudness_is_kept_on_the_timeline():
+    history = live.Loudness()
+    history.add(np.full(1680, 0.5, np.float32), 0)  # ten frames and a half
+    history.add(np.full(80, 0.5, np.float32), 1680)  # the eleventh, whole
+    assert np.allclose(history.span(0, 11), 0.5) and np.isnan(history.span(11, 12)).all()
+    history.add(np.full(1600, 0.25, np.float32), RATE)  # a gap: audio from 1 s on
+    known = history.span(0, 110)
+    assert np.isnan(known[11:100]).all() and np.allclose(known[100:], 0.25)
+    history.add(np.zeros(int(live.HISTORY * RATE), np.float32), RATE + 1600)
+    assert np.isnan(history.span(0, 110)).all()  # older than HISTORY: let go
+    assert history.span(history.first, history.first + 1)[0] == 0
+
+
+class Doubtful(str):
+    """Text neither Whisper nor Silero takes for speech, as Speech marks it (live.Heard)."""
+
+    doubtful = True
+
+
+class Doubting:
+    """A transcriber that hears stock phrases nobody said, as Whisper does in what's left of
+    the speakers in the mic once an audio chip cancelled the echo."""
+
+    def __call__(self, audio, track):
+        return "the cutover is friday" if track == "system" else Doubtful("Thank you.")
+
+
+def test_a_doubtful_mic_line_while_the_call_plays_is_left_out():
+    transcript = Live(Doubting(), speech=loud_spans)
+    call_audio = np.concatenate([quiet(1), talk(3, seed=1), quiet(2)])
+    leak = np.concatenate([quiet(2), 0.5 * talk(1, seed=3), quiet(3)])  # nothing like the call
+    Feeder(transcript, "system").play(call_audio)
+    Feeder(transcript, "mic").play(leak)
+    transcript.step()
+    assert [line["track"] for line in transcript.lines()] == ["system"]
+
+
+def test_with_the_call_quiet_every_mic_line_is_kept():
+    transcript = Live(Doubting(), speech=loud_spans)
+    Feeder(transcript, "system").play(quiet(6))
+    Feeder(transcript, "mic").play(np.concatenate([quiet(2), 0.5 * talk(1, seed=3), quiet(3)]))
+    transcript.step()
+    assert [line["text"] for line in transcript.lines()] == ["Thank you."]  # maybe said
 
 
 def test_a_track_starting_late_is_placed_on_the_timeline():
@@ -316,7 +417,8 @@ class FakeModel:
         FakeModel.loaded.append((name, options))
 
     def transcribe(self, audio, **options):
-        return [SimpleNamespace(text=" what was said ")], None
+        said = SimpleNamespace(text=" what was said ", no_speech_prob=0.01, avg_logprob=-0.2)
+        return [said], None
 
 
 @pytest.fixture
@@ -412,6 +514,31 @@ def test_while_a_meeting_has_the_gpu_the_audio_waits(monkeypatch: pytest.MonkeyP
     assert waiting <= BEHIND and transcript.skipped > BEHIND - live.CAUGHT_UP
     # Every second since the line is still waiting, or counted as skipped.
     assert abs(waiting + transcript.skipped - (1 + 1.5 * BEHIND)) < 0.1
+
+
+def test_a_line_is_doubtful_only_when_whisper_and_silero_both_doubt_it(
+    whisper: list, monkeypatch: pytest.MonkeyPatch
+):
+    asked: list = []
+    said = {"logprob": -0.9, "peak": 0.5}
+
+    def transcribe(self, audio, **options):
+        segment = SimpleNamespace(
+            text=" Thank you.", no_speech_prob=0.0, avg_logprob=said["logprob"]
+        )
+        return [segment], None
+
+    monkeypatch.setattr(FakeModel, "transcribe", transcribe)
+    monkeypatch.setattr(live, "speech_peak", lambda audio: asked.append(1) or said["peak"])
+    speech = Speech("en", None, gpu=GpuTurns())
+    assert speech.ready()
+    clip = np.zeros(RATE, np.float32)
+    assert speech(clip, "mic").doubtful  # the echo's leftovers: unlikely, and not speech
+    said["peak"] = 0.95
+    assert not speech(clip, "mic").doubtful  # Silero is sure: someone said it
+    said.update(logprob=-0.2, peak=0.5)
+    asked.clear()
+    assert not speech(clip, "mic").doubtful and asked == []  # likely words: no need to ask
 
 
 def test_a_model_that_doesnt_load_is_tried_once_a_recording(monkeypatch: pytest.MonkeyPatch):

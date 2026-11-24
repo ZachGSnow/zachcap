@@ -4,8 +4,16 @@ The recorder hands each track's audio over as it writes it (capture.ChunkWriter)
 thread turns it into 16 kHz, finds where each person stopped talking (Silero VAD, the filter
 Whisper itself uses) and transcribes each stretch of speech as soon as it ends, so a line
 shows a second or two after it was said. Your microphone's lines are yours; the call's are
-the others'. A mic line that repeats what the call said at the same moment is the mic
-hearing the speakers (echo), and is left out.
+the others'.
+
+The mic can hear the speakers (echo), and none of that may show as something you said. A mic
+stretch whose loudness follows the call's at the same moments, allowing the speakers' delay
+into the mic, is left out before it's transcribed. Some laptops' audio chips cancel most of
+the echo, and what's left doesn't follow the call closely; Whisper hears stock phrases in it
+("Thank you."). So while the call plays, a mic line that both Whisper and Silero doubt is
+speech is left out too: only real speech over the call gets through, and with the call
+quiet every word said into the mic does. A mic line that repeats what the call said at the
+same moment is left out as well.
 
 This is for glancing at during the call: the live panel, its notes, being asked something.
 The transcript kept with the meeting is still made after the call by the full pipeline.
@@ -44,6 +52,12 @@ CAUGHT_UP = 20.0  # ... to this much
 PAD = 3200  # 0.2 s of audio either side of the speech, as Whisper likes it
 LINES_KEPT = 2000
 GPU_WAIT = 30.0  # a meeting waits this long at most for the live transcript to let go
+# The echo check compares loudness, RMS per 10 ms, on the recording's timeline.
+HOP = RATE // 100
+ECHO_DELAY = 0.25  # the speakers reach the mic at most this late (the audio buffers)
+ECHO_LIKE = 0.7  # a mic stretch's loudness following the call's this closely: the speakers
+PLAYING_DBFS = -70.0  # the call plays something (capture.CALL_SPEECH_DBFS: a quiet call too)
+HISTORY = BEHIND + SEARCH  # seconds of the call's loudness kept to compare the mic with
 
 
 @dataclass
@@ -123,6 +137,88 @@ class TrackState:
     next_frame: int | None = None  # where the next block starts (native rate), if no gap
 
 
+def loudness(audio: np.ndarray) -> np.ndarray:
+    """RMS per 10 ms of 16 kHz audio (whole frames only)."""
+    frames = len(audio) // HOP
+    power = (audio[: frames * HOP].reshape(frames, HOP).astype(np.float64) ** 2).mean(axis=1)
+    return np.sqrt(power).astype(np.float32)
+
+
+class Loudness:
+    """A track's loudness on the recording's timeline, RMS per 10 ms, for the last HISTORY
+    seconds: the call's, which the echo check compares mic stretches with. NaN where nothing
+    arrived (audio let go when the worker couldn't keep up)."""
+
+    def __init__(self) -> None:
+        self.first = 0  # the timeline frame (10 ms) of values[0]
+        self.values = np.zeros(0, np.float32)
+        self._rest = np.zeros(0, np.float32)  # the samples of a frame not whole yet
+        self._next: int | None = None  # the timeline sample the next audio should start at
+
+    def add(self, audio: np.ndarray, at: int) -> None:
+        """16 kHz audio starting at timeline sample ``at``."""
+        if at != self._next:
+            # The first audio, or the first after a gap: frames from the next 10 ms on.
+            skip = -at % HOP
+            audio, at = audio[skip:], at + skip
+            self._rest = np.zeros(0, np.float32)
+            frame, end = at // HOP, self.first + len(self.values)
+            if not len(self.values) or frame < end:
+                self.first, self.values = frame, np.zeros(0, np.float32)
+            else:
+                gap = np.full(frame - end, np.nan, np.float32)
+                self.values = np.concatenate([self.values, gap])
+        self._next = at + len(audio)
+        rest = np.concatenate([self._rest, np.asarray(audio, np.float32)])
+        whole = len(rest) // HOP * HOP
+        if whole:
+            self.values = np.concatenate([self.values, loudness(rest[:whole])])
+        self._rest = rest[whole:]
+        excess = len(self.values) - int(HISTORY * 100)
+        if excess > 0:
+            self.values = self.values[excess:]
+            self.first += excess
+
+    def span(self, start: int, end: int) -> np.ndarray:
+        """Frames ``start`` to ``end`` (exclusive), NaN for any not known."""
+        out = np.full(end - start, np.nan, np.float32)
+        low, high = max(start, self.first), min(end, self.first + len(self.values))
+        if low < high:
+            out[low - start : high - start] = self.values[low - self.first : high - self.first]
+        return out
+
+
+def echo_measure(mic: np.ndarray, call: np.ndarray) -> float:
+    """How closely a mic stretch's loudness follows the call's, allowing for the speakers'
+    delay into the mic: the best correlation over the delays the call allows. ``mic`` and
+    ``call`` are RMS per 10 ms, ``call`` starting up to ECHO_DELAY earlier (NaN where it
+    isn't known). Near 1 for the speakers heard through the mic; low for someone speaking,
+    alone or over the call; 0 with nothing to compare (the call quiet)."""
+    delays = len(call) - len(mic)
+    best = 0.0
+    for delay in range(delays + 1):
+        theirs = call[delays - delay : delays - delay + len(mic)]
+        known = ~np.isnan(theirs)
+        if known.sum() < max(10, len(mic) // 2):
+            continue
+        mine, theirs = mic[known], theirs[known]
+        if mine.std() < 1e-9 or theirs.std() < 1e-9:
+            continue  # flat: nothing follows anything
+        best = max(best, float(np.corrcoef(mine, theirs)[0, 1]))
+    return best
+
+
+def call_playing(call: np.ndarray, frames: int) -> bool:
+    """Whether the call played something during most of a mic stretch ``frames`` long (its
+    sound could reach the mic up to ECHO_DELAY later). ``call`` as for echo_measure."""
+    if frames <= 0:
+        return False
+    on = np.nan_to_num(call, nan=0.0) > 10 ** (PLAYING_DBFS / 20)
+    window = len(call) - frames + 1
+    heard = np.lib.stride_tricks.sliding_window_view(on, window)[:frames].any(axis=1)
+    return bool(heard.mean() >= 0.5)
+
+
 class GpuTurns:
     """The GPU, shared by the meetings being processed (the worker in api.py) and the live
     transcript, with one model on it at a time: a 4 GB GPU can't hold both. Meetings come
@@ -192,10 +288,10 @@ class Live:
     """A live transcript of the recording running now. ``feed`` takes audio from the
     recorder's writer threads; ``start`` runs the worker; ``lines`` is what the page reads.
 
-    ``transcribe(audio, track)`` turns a stretch of 16 kHz speech into text, and
-    ``speech(audio)`` finds the speech in it as (start, end) sample pairs: given, so tests can
-    pretend. ``transcribe`` may have a ``ready()`` (False: not now, the audio waits) and a
-    ``close()``, which the worker calls as it ends."""
+    ``transcribe(audio, track)`` turns a stretch of 16 kHz speech into text (a Heard, or a
+    plain str), and ``speech(audio)`` finds the speech in it as (start, end) sample pairs:
+    given, so tests can pretend. ``transcribe`` may have a ``ready()`` (False: not now, the
+    audio waits) and a ``close()``, which the worker calls as it ends."""
 
     def __init__(
         self,
@@ -208,6 +304,7 @@ class Live:
         self._arriving: dict[str, Arriving] = {}
         self._lock = threading.Lock()  # the lines
         self._tracks: dict[str, TrackState] = {}  # the worker's own
+        self._call = Loudness()  # the call's loudness, to tell the speakers in the mic
         self._lines: list[Line] = []
         self._next_id = 1
         self._done = threading.Event()
@@ -319,8 +416,10 @@ class Live:
             self._look(state, final)
 
     def _take(self, state: TrackState, blocks: list, final: bool) -> None:
-        """Adds what arrived to the track's 16 kHz audio, on the recording's timeline."""
+        """Adds what arrived to the track's 16 kHz audio, on the recording's timeline; the
+        call's loudness is kept for the echo check as well."""
         pieces = [state.audio]
+        at = state.offset + len(state.audio)  # where the next piece goes on the timeline
         for frame, block in blocks:
             if state.next_frame is None or frame != state.next_frame:
                 # The first audio of the track, or the first after some was let go (feed):
@@ -328,10 +427,13 @@ class Live:
                 if state.next_frame is not None:
                     self._behind += sum(len(piece) for piece in pieces) / RATE
                 state.resampler = Resampler(state.resampler.rate)
-                state.offset = round(frame * RATE / state.resampler.rate)
+                state.offset = at = round(frame * RATE / state.resampler.rate)
                 pieces = []
             pieces.append(state.resampler.push(block))
             state.next_frame = frame + len(block)
+            if state.name == "system":
+                self._call.add(pieces[-1], at)
+            at += len(pieces[-1])
         if final:
             pieces.append(state.resampler.flush())
         state.audio = np.concatenate(pieces) if pieces else np.zeros(0, np.float32)
@@ -382,8 +484,25 @@ class Live:
             cut_short = too_long and not ended
             if cut_short:
                 last = min(last, first + int(LONGEST * RATE))
-            self._say(state, first, last, pad_end=not cut_short)
+            speakers, playing = self._against_call(state, first, last)
+            if not speakers:  # the speakers heard through the mic aren't transcribed at all
+                self._say(state, first, last, pad_end=not cut_short, while_call=playing)
             self._advance(state, last)
+
+    def _against_call(self, state: TrackState, start: int, end: int) -> tuple[bool, bool]:
+        """For a mic stretch (samples of its audio): whether it's the speakers heard through
+        the mic, its loudness following the call's (echo_measure), and whether the call was
+        playing then (call_playing). The call's own stretches: neither."""
+        if state.name != "mic":
+            return False, False
+        first = -(-(state.offset + start) // HOP)  # its whole 10 ms frames on the timeline
+        last = (state.offset + end) // HOP
+        if last - first < 10:  # under 0.1 s: nothing to tell
+            return False, False
+        mic = loudness(state.audio[first * HOP - state.offset : last * HOP - state.offset])
+        call = self._call.span(first - round(ECHO_DELAY * 100), last)
+        speakers = echo_measure(mic, call) >= ECHO_LIKE
+        return speakers, call_playing(call, len(mic))
 
     def _may_say(self, final: bool) -> bool:
         """Whether to go on transcribing now: not once stopping (the rest isn't needed),
@@ -398,16 +517,30 @@ class Live:
         state.audio = state.audio[samples:]
         state.offset += samples
 
-    def _say(self, state: TrackState, start: int, end: int, pad_end: bool = True) -> None:
+    def _say(
+        self,
+        state: TrackState,
+        start: int,
+        end: int,
+        pad_end: bool = True,
+        while_call: bool = False,
+    ) -> None:
         # Cut in the middle of someone talking, the next piece starts right there: no
         # padding at that end, or the words at the cut would be in both.
         clip = state.audio[max(0, start - PAD) : end + (PAD if pad_end else 0)]
         try:
-            text = self._transcribe(clip, state.name).strip()
+            heard = self._transcribe(clip, state.name)
         except Exception as exc:  # this line is lost; the next ones aren't
             self._went_wrong(exc)
             return
+        text = str(heard).strip()
         if not text:
+            return
+        if while_call and getattr(heard, "doubtful", False):
+            # What's left of the speakers once the audio chip cancelled the echo: neither
+            # Whisper nor Silero takes it for speech (Heard), and the call was playing. Real
+            # speech over the call convinces them, and with the call quiet nothing in the
+            # mic can be echo, so every word said into it is kept then.
             return
         line = Line(0, state.name, (state.offset + start) / RATE, (state.offset + end) / RATE, text)
         with self._lock:
@@ -473,6 +606,16 @@ def _utterance(track: str, line: Line) -> transcript.Utterance:
     return transcript.Utterance(track, None, line.start, line.end, [word])
 
 
+def speech_peak(audio: np.ndarray) -> float:
+    """How sure Silero VAD is, at its surest (each 32 ms), that 16 kHz audio has speech."""
+    from faster_whisper.vad import get_vad_model
+
+    if len(audio) < 512:
+        return 0.0
+    padded = np.pad(audio, (0, -len(audio) % 512))
+    return float(np.max(get_vad_model()(padded)))
+
+
 def find_speech(audio: np.ndarray) -> list[tuple[int, int]]:
     """Where people speak in 16 kHz audio, as (start, end) samples (Silero VAD)."""
     from faster_whisper.vad import VadOptions, get_speech_timestamps
@@ -486,6 +629,24 @@ def find_speech(audio: np.ndarray) -> list[tuple[int, int]]:
     return [(span["start"], span["end"]) for span in found]
 
 
+class Heard(str):
+    """The text Speech made of a stretch, knowing whether it's doubtful that it was speech at
+    all (``doubtful``, see DOUBT_LOGPROB); a transcriber may return a plain str instead."""
+
+    doubtful = False
+
+
+# A line is doubtful when two judges agree it isn't speech: Whisper, its words this unlikely
+# in every segment (avg_logprob; its no_speech_prob is no help, always 0 with large-v3-turbo),
+# and Silero VAD, never this sure of speech anywhere in the clip. Measured on a laptop whose
+# audio chip cancels echo (2026-11-24, large-v3-turbo and small.en): what got through of the
+# call into the mic came out as "Thank you.", "Hello.", "Ready?" and the like, at -0.54 to
+# -1.31 and Silero 0.70 at most; "Yes.", "No.", "Thanks.", "Okay." said into the mic, alone
+# or over the call and as quietly as that leak, at -0.05 to -0.64 and Silero 0.90 or more.
+DOUBT_LOGPROB = -0.5
+SURE_SPEECH = 0.8
+
+
 class Speech:
     """Whisper for the live transcript, loaded when the first speech needs it: the meeting
     model on the GPU, one pass without beam search (a second or less a line), or the small
@@ -493,7 +654,8 @@ class Speech:
 
     On the GPU it takes its turn (``gpu``): while a meeting is being processed it lets go of
     its model and waits (``ready()`` is False), and loads it again after. It only loads a
-    model already on this PC; one that isn't is downloaded once it stops (close)."""
+    model already on this PC; one that isn't is downloaded once it stops (close). Each line
+    says whether it's doubtful that it was speech at all (Heard)."""
 
     def __init__(
         self, language: str | None, hotwords: str | None, gpu: GpuTurns | None = None
@@ -557,7 +719,7 @@ class Speech:
             raise RuntimeError(self._failed) from exc
         return self._model
 
-    def __call__(self, audio: np.ndarray, track: str) -> str:
+    def __call__(self, audio: np.ndarray, track: str) -> Heard:
         if self._closed:
             raise RuntimeError("The live transcript has stopped")
         if self.device is None and not self.ready():
@@ -572,7 +734,14 @@ class Speech:
             without_timestamps=True,
             hotwords=self.hotwords,
         )
-        return " ".join(segment.text.strip() for segment in segments).strip()
+        segments = list(segments)
+        heard = Heard(" ".join(segment.text.strip() for segment in segments).strip())
+        heard.doubtful = (
+            bool(segments)
+            and all(segment.avg_logprob <= DOUBT_LOGPROB for segment in segments)
+            and speech_peak(audio) < SURE_SPEECH
+        )
+        return heard
 
     def _let_go(self) -> None:
         """Frees the model, and the GPU's turn with it."""
