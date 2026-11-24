@@ -496,16 +496,30 @@ class ListeningRecorder:
         return {"duration": 3.0}
 
 
+def with_gpu(monkeypatch: pytest.MonkeyPatch, usable: bool) -> None:
+    monkeypatch.setattr(cuda, "prepare", lambda: usable)
+
+
 @pytest.fixture
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    """The engine with a pretend recorder and live transcript."""
+def engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """The engine with a pretend recorder and live transcript, on a PC without a CUDA GPU
+    unless a test says otherwise (with_gpu): never this PC's own."""
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
     monkeypatch.setattr(capture, "Recorder", ListeningRecorder)
     monkeypatch.setattr(pipeline, "process", lambda *args, **kwargs: "ready")
     monkeypatch.setattr(live, "Live", FakeLive)
     monkeypatch.setattr(live, "Speech", lambda language, hotwords, gpu: ("speech", language))
+    with_gpu(monkeypatch, False)
     FakeLive.made = []
     return TestClient(create_app("test-token"), base_url=LOCAL)
+
+
+@pytest.fixture
+def client(engine: TestClient, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """The engine on a PC with a CUDA GPU, which has been looked for (as at startup)."""
+    with_gpu(monkeypatch, True)
+    engine.app.state.look_for_gpu()
+    return engine
 
 
 def test_a_recording_has_a_live_transcript_until_the_next_one(client: TestClient):
@@ -587,6 +601,68 @@ def test_turning_it_off_stops_the_one_running_and_the_next_has_none(client: Test
     assert FakeLive.made == [made]
     assert client.get("/api/record", headers=AUTH).json()["live"] is False
     client.post("/api/record/stop", headers=AUTH)
+
+
+def test_on_by_default_only_with_a_cuda_gpu(engine: TestClient, monkeypatch):
+    with_gpu(monkeypatch, False)
+    assert client_setting(engine) is False  # Settings waits for the look
+    engine.post("/api/record/start", headers=AUTH, json={})
+    assert FakeLive.made == []  # on the CPU it waits to be turned on
+    engine.post("/api/record/stop", headers=AUTH)
+    engine.put("/api/settings", headers=AUTH, json={"live_transcript": True})
+    engine.post("/api/record/start", headers=AUTH, json={})
+    assert len(FakeLive.made) == 1  # turned on, the CPU does it
+    engine.post("/api/record/stop", headers=AUTH)
+
+
+def test_on_by_default_with_a_cuda_gpu_unless_turned_off(engine: TestClient, monkeypatch):
+    with_gpu(monkeypatch, True)
+    engine.app.state.look_for_gpu()  # as the engine does as it starts
+    assert client_setting(engine) is True
+    engine.post("/api/record/start", headers=AUTH, json={})
+    assert len(FakeLive.made) == 1
+    engine.post("/api/record/stop", headers=AUTH)
+    engine.put("/api/settings", headers=AUTH, json={"live_transcript": False})
+    assert client_setting(engine) is False
+    engine.post("/api/record/start", headers=AUTH, json={})
+    assert len(FakeLive.made) == 1
+    engine.post("/api/record/stop", headers=AUTH)
+
+
+def test_a_recording_never_waits_for_the_gpu_check(engine: TestClient, monkeypatch):
+    looking, done = threading.Event(), threading.Event()
+
+    def slow_look():
+        looking.set()
+        done.wait(5)  # importing torch for the first time
+        return True
+
+    monkeypatch.setattr(cuda, "prepare", slow_look)
+    check = threading.Thread(target=engine.app.state.look_for_gpu)
+    check.start()
+    assert looking.wait(5)
+    started = time.monotonic()
+    engine.post("/api/record/start", headers=AUTH, json={})
+    assert time.monotonic() - started < 2
+    assert FakeLive.made == []  # started before the look was done: none this time
+    engine.post("/api/record/stop", headers=AUTH)
+    done.set()
+    check.join(5)
+    engine.post("/api/record/start", headers=AUTH, json={})
+    assert len(FakeLive.made) == 1
+    engine.post("/api/record/stop", headers=AUTH)
+
+
+def test_a_set_choice_needs_no_gpu_check(engine: TestClient, monkeypatch):
+    looked = []
+    monkeypatch.setattr(cuda, "prepare", lambda: looked.append(1) or True)
+    engine.put("/api/settings", headers=AUTH, json={"live_transcript": False})
+    engine.app.state.look_for_gpu()
+    assert client_setting(engine) is False and looked == []
+
+
+def client_setting(client: TestClient) -> bool:
+    return client.get("/api/settings", headers=AUTH).json()["live_transcript"]
 
 
 def test_a_meeting_is_processed_only_once_the_live_transcript_let_go(

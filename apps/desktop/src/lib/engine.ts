@@ -307,7 +307,8 @@ export type Settings = {
   auto_record_apps: string[];
   /** The call apps that can (never a web browser). */
   auto_record_choices: string[];
-  /** A live transcript in a small panel over the call while recording. */
+  /** A live transcript in a small panel over the call while recording. Unless turned on or
+   * off here, on only with a CUDA GPU. */
   live_transcript: boolean;
   /** Keep a daily and weekly work log in the export folder too. */
   export_work_log: boolean;

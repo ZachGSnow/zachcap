@@ -860,12 +860,12 @@ export function SettingsView() {
           )}
           <Row
             label="Live panel during calls"
-            help="A small panel over the call shows what's being said a moment after each person stops talking (your GPU works during the call). It's left out of screen shares and screenshots; close it for one call with its X."
+            help="A small panel over the call shows what's being said a moment after each person stops talking. It uses the GPU during the call, or the CPU when there's none, so it's off by default on a PC without an NVIDIA GPU. It's left out of screen shares and screenshots; close it for one call with its X. Turning it off stops it at once; turning it on starts it with the next recording."
           >
             <Switch
               className="ml-auto"
               aria-label="Live panel during calls"
-              checked={settings?.live_transcript ?? true}
+              checked={settings?.live_transcript ?? false}
               onCheckedChange={(on) => void save({ live_transcript: on })}
             />
           </Row>

@@ -32,7 +32,7 @@ import numpy as np
 
 from . import cuda, transcript
 
-SETTING = "live_transcript"  # "1" (the default): a live transcript during recordings
+SETTING = "live_transcript"  # "1": a live transcript during recordings; unset: see api.live_on
 RATE = 16000
 TICK = 0.5  # how often the worker looks for speech that ended
 END_SILENCE = 0.7  # this much quiet after speech: the person stopped talking
@@ -161,6 +161,31 @@ class GpuTurns:
 
     def give_back(self) -> None:
         self._lock.release()
+
+
+class GpuCheck:
+    """Whether a CUDA GPU is usable (cuda.prepare), looked up once: the live transcript is on
+    by default only then (see api.py). The first look imports torch, which takes seconds, so
+    the engine starts it in the background as it starts; a recording never waits for it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._usable: bool | None = None
+
+    def look(self) -> bool:
+        """Whether there's one, waiting for the look if it's under way (Settings asks)."""
+        with self._lock:
+            if self._usable is None:
+                try:
+                    self._usable = cuda.prepare()
+                except Exception:  # a broken CUDA install: no GPU, then
+                    traceback.print_exc()
+                    self._usable = False
+            return self._usable
+
+    def known(self) -> bool:
+        """What the look found, without waiting: no GPU until it's done."""
+        return bool(self._usable)
 
 
 class Live:

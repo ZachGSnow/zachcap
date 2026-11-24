@@ -366,6 +366,33 @@ def create_app(token: str) -> FastAPI:
     finally:
         startup.close()
 
+    # Whether there's a CUDA GPU: until Settings says otherwise, recordings have a live
+    # transcript only then (live_on). The first look takes seconds, so serve() has it done
+    # on its own thread as the engine starts.
+    gpu = live.GpuCheck()
+
+    def look_for_gpu() -> None:
+        """Looks for a CUDA GPU, when the live transcript's default still depends on it."""
+        store = Store()
+        try:
+            undecided = store.setting(live.SETTING) is None
+        finally:
+            store.close()
+        if undecided:
+            gpu.look()
+
+    app.state.look_for_gpu = look_for_gpu
+
+    def live_on(store: Store, wait: bool = False) -> bool:
+        """Whether recordings have a live transcript: as set in Settings, else only with a
+        CUDA GPU, where a line takes a fraction of a second. On the CPU it competes with the
+        call app and the recorder for cores, so there it waits to be turned on. A recording
+        doesn't ``wait`` for the GPU check: one started before it's done has none."""
+        setting = store.setting(live.SETTING)
+        if setting is not None:
+            return setting == "1"
+        return gpu.look() if wait else gpu.known()
+
     def remove_old_audio() -> None:
         """The "keep recordings" setting, applied at startup and every few hours after."""
         while True:
@@ -451,7 +478,7 @@ def create_app(token: str) -> FastAPI:
             # A live transcript of its own: one that ended a moment ago (Stop, then Start)
             # may still be finishing a line, and it's never this one's.
             listening = None
-            if store.setting(live.SETTING, "1") == "1":
+            if live_on(store):
                 names = [
                     p["name"] for p in store.people() if p["name"].lower() not in {"you", "me"}
                 ]
@@ -1737,8 +1764,9 @@ def create_app(token: str) -> FastAPI:
                     autorecord.chosen(store.setting(autorecord.APPS_SETTING))
                 ),
                 "auto_record_choices": autorecord.choosable(),
-                # A live transcript in a panel over the call while recording.
-                "live_transcript": store.setting(live.SETTING, "1") == "1",
+                # A live transcript in a panel over the call while recording: as set, else
+                # on only with a CUDA GPU (live_on).
+                "live_transcript": live_on(store, wait=True),
                 "export_work_log": store.setting("export_work_log") == "1",
                 "dictation": store.setting(dictation.SETTING) == "1",
                 "dictation_snippets": store.setting(dictation.SNIPPETS, ""),
@@ -1952,8 +1980,8 @@ def serve(port: int, token: str) -> None:
             daemon=True,
         ).start()
     # Recordings saved in the watch folder import themselves (off until a folder is chosen),
-    # and calls are recorded on their own. Started here rather than in create_app, so tests
-    # never leave one running.
+    # calls are recorded on their own, and the GPU is looked for (the live transcript's
+    # default). Started here rather than in create_app, so tests never leave one running.
     threading.Thread(
         target=app.state.folder_watch.run_forever,
         name="zachcap-watch-folder",
@@ -1962,6 +1990,7 @@ def serve(port: int, token: str) -> None:
     threading.Thread(
         target=app.state.call_watch.run_forever, name="zachcap-call-watch", daemon=True
     ).start()
+    threading.Thread(target=app.state.look_for_gpu, name="zachcap-gpu-check", daemon=True).start()
     sock = listen_on(port)
     report_port(sock, os.environ.get("ZACHCAP_PORT_FILE"))
     uvicorn.Server(uvicorn.Config(app, log_level="warning")).run(sockets=[sock])
