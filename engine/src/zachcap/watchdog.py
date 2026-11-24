@@ -25,6 +25,10 @@ LOW_DISK_BYTES = 500 * 1024 * 1024  # about three hours of recording
 # A meeting app (Teams, Zoom, a browser...) holding the mic this long is a call; Windows
 # Settings' input meter, a quick mic test or a screen recorder never count.
 CALL_AFTER = 60.0
+# A meeting app gone from the mic this long has let go of it: Teams closes and reopens the
+# mic for a moment when you join from the preview, and that is neither the end of the call
+# nor the start of a new one.
+LET_GO = 3.0
 CHECK_EVERY = 2.0
 
 ES_CONTINUOUS = 0x80000000
@@ -82,6 +86,7 @@ class Watch:
         self.call_seen: list[str] = []  # meeting apps that held the mic long enough
         self.call_ended_at: float | None = None
         self._holding: dict[str, float] = {}  # meeting app -> since when it holds the mic
+        self._gone: dict[str, float] = {}  # meeting app -> since when it's away (not yet let go)
         self.warnings: dict[str, str] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -120,13 +125,29 @@ class Watch:
             apps = []
         self.call_apps = apps
         meeting = [app for app in apps if self._meeting_app(app)]
-        self._holding = {app: self._holding.get(app, now) for app in meeting}
-        calls = [app for app, since in self._holding.items() if now - since >= CALL_AFTER]
+        for app in meeting:
+            self._holding.setdefault(app, now)
+            self._gone.pop(app, None)
+        let_go_at = None
+        for app in list(self._holding):
+            if app in meeting:
+                continue
+            gone_at = self._gone.setdefault(app, now)
+            if now - gone_at >= LET_GO:  # away a moment still holds it
+                del self._holding[app], self._gone[app]
+                let_go_at = gone_at if let_go_at is None else max(let_go_at, gone_at)
+        # Held a minute or more (until it went away, for one away now): a call.
+        calls = [
+            app
+            for app, since in self._holding.items()
+            if self._gone.get(app, now) - since >= CALL_AFTER
+        ]
         self.call_seen += [app for app in calls if app not in self.call_seen]
         if self._holding:
             self.call_ended_at = None  # on a call (again)
         elif self.call_seen and self.call_ended_at is None:
-            self.call_ended_at = now  # the call app let go of the microphone
+            # The call app let go of the microphone: counted from when it went away.
+            self.call_ended_at = now if let_go_at is None else let_go_at
 
         paused = bool(getattr(self.recorder, "paused", False))
         self._warn(
@@ -164,22 +185,27 @@ class Watch:
         else:
             self.warnings.pop(key, None)
 
-    def status(self) -> dict:
+    def quiet_for(self, *tracks: str) -> float:
+        """Seconds since anyone was heard on those tracks (both when none are named): "system"
+        alone is the call's side, which talk in the room doesn't reach."""
         now = self._clock()
-        quiet = min(self._since("mic", "heard_at"), self._since("system", "heard_at"))
+        quiet = min(self._since(name, "heard_at") for name in tracks or ("mic", "system"))
         # A private pause is silent on purpose: quiet starts again when it ends.
         if getattr(self.recorder, "paused", False):
             quiet = 0.0
         resumed = getattr(self.recorder, "resumed_at", None)
         if resumed is not None:
             quiet = min(quiet, now - resumed)
+        return round(quiet, 1)
+
+    def status(self) -> dict:
+        now = self._clock()
+        ended_at = self.call_ended_at  # read once: the watch's own look may change it meanwhile
         return {
             "warnings": [{"key": key, "text": text} for key, text in self.warnings.items()],
             "call": {
                 "apps": self.call_apps,
-                "ended_for": None
-                if self.call_ended_at is None
-                else round(now - self.call_ended_at, 1),
+                "ended_for": None if ended_at is None else round(now - ended_at, 1),
             },
-            "quiet_for": round(quiet, 1),
+            "quiet_for": self.quiet_for(),
         }

@@ -91,13 +91,34 @@ def test_the_end_of_the_call_is_when_the_app_lets_go_of_the_mic(tmp_path: Path):
 
     calls["apps"] = []
     clock.now += 5
-    watch.check()
-    clock.now += 12.5
+    watch.check()  # away a moment: not yet let go
+    assert watch.status()["call"]["ended_for"] is None
+    clock.now += 3
+    watch.check()  # away long enough: it let go, counted from when it went away
+    clock.now += 9.5
     assert watch.status()["call"]["ended_for"] == 12.5
 
     calls["apps"] = ["Microsoft Teams"]  # back on a call: not ended after all
     watch.check()
     assert watch.status()["call"]["ended_for"] is None
+
+
+def test_a_moment_away_from_the_mic_doesnt_end_the_call_or_restart_it(tmp_path: Path):
+    watch, clock, _, _, calls = setup(tmp_path)
+    calls["apps"] = ["Microsoft Teams"]
+    watch.check()
+    clock.now += 40
+    watch.check()
+    calls["apps"] = []  # Teams closes and reopens the mic as you join
+    clock.now += 2
+    watch.check()
+    assert watch.status()["call"]["ended_for"] is None
+    calls["apps"] = ["Microsoft Teams"]
+    clock.now += 2
+    watch.check()
+    clock.now += 20
+    watch.check()  # a minute on the mic, counting the moment away: a call
+    assert watch.call_seen == ["Microsoft Teams"]
 
 
 def test_quiet_is_the_time_since_anyone_was_heard(tmp_path: Path):
