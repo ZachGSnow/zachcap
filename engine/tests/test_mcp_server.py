@@ -132,3 +132,26 @@ def test_no_library_yet_is_a_clear_error(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path / "empty"))
     with pytest.raises(ToolError, match="no ZachCap library"):
         asyncio.run(mcp_server.create_server().call_tool("list_people", {}))
+
+
+def test_a_server_from_before_an_update_reads_no_more(library, tmp_path: Path):
+    """Its code may not know what a newer library keeps from Claude."""
+    server = mcp_server.create_server()
+    newer = sqlite3.connect(tmp_path / "zachcap.db")
+    assert newer.execute("PRAGMA user_version").fetchone()[0] == mcp_server.VERSION
+    newer.execute(f"PRAGMA user_version = {mcp_server.VERSION + 1}")
+    newer.commit()
+    newer.close()
+    for tool, arguments in (
+        ("list_people", {}),
+        ("list_meetings", {}),
+        ("get_meeting", {"meeting_id": library}),
+        ("search_meetings", {"query": "firewall"}),
+    ):
+        with pytest.raises(Exception, match="Restart the app that runs it"):
+            asyncio.run(server.call_tool(tool, arguments))
+    # Nor does opening it here make it an older one.
+    Store().close()
+    newer = sqlite3.connect(tmp_path / "zachcap.db")
+    assert newer.execute("PRAGMA user_version").fetchone()[0] == mcp_server.VERSION + 1
+    newer.close()

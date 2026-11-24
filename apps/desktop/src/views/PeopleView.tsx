@@ -103,7 +103,7 @@ export function PeopleView({ onBrief }: { onBrief: (name: string) => void }) {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-48">
-                      {!isMe && person.meetings > 0 && (
+                      {!isMe && person.meetings > 0 && !person.private && (
                         <>
                           <DropdownMenuItem onSelect={() => onBrief(person.name)}>
                             <Sparkles className="size-4" />

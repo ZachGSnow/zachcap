@@ -208,9 +208,25 @@ _by_lines_lock = threading.Lock()
 LAST_MEETING_ID = "last_meeting_id"  # the highest meeting id ever given out
 LAST_NOTE_ID = "last_note_id"  # the highest note id ever given out
 
+# The library's version: raised when an older ZachCap shouldn't go on reading it. A read-only
+# reader that was started before an update (the MCP server) then refuses to.
+VERSION = 1
+
 # Suggestions show as "Speaker 2 (Dana?)" until confirmed.
 SPEAKER_NAME = (
     "CASE WHEN ms.status = 'suggested' THEN ms.label || ' (' || p.name || '?)' "
+    "ELSE COALESCE(p.name, ms.label, 'Unknown') END"
+)
+# A person Claude may know of: you, and anyone named or recognized in a meeting that isn't
+# private. A suggestion of anyone else would be a name from a private meeting.
+IN_SHARED = (
+    "(p.is_me = 1 OR EXISTS (SELECT 1 FROM meeting_speakers heard "
+    "JOIN meetings shared ON shared.id = heard.meeting_id WHERE heard.person_id = p.id "
+    "AND heard.status IN ('auto', 'confirmed') AND shared.private = 0))"
+)
+SHARED_NAME = (
+    f"CASE WHEN ms.status = 'suggested' AND {IN_SHARED} "
+    "THEN ms.label || ' (' || p.name || '?)' WHEN ms.status = 'suggested' THEN ms.label "
     "ELSE COALESCE(p.name, ms.label, 'Unknown') END"
 )
 
@@ -262,11 +278,17 @@ class Store:
         if "edited" not in columns:
             self.db.execute("ALTER TABLE segments ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
             self.db.commit()
+        if self.version() < VERSION:
+            self.db.execute(f"PRAGMA user_version = {VERSION}")
+            self.db.commit()
         # Notes from before their ids were counted: none of those ids is given out again,
         # whichever way the note goes (deleted, redacted, or with its meeting).
         if self.setting(LAST_NOTE_ID) is None:
             highest = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM meeting_notes").fetchone()
             self.set_setting(LAST_NOTE_ID, str(highest[0]))
+
+    def version(self) -> int:
+        return self.db.execute("PRAGMA user_version").fetchone()[0]
 
     def close(self) -> None:
         self.db.close()
@@ -468,6 +490,22 @@ class Store:
         rows = self.db.execute("SELECT id FROM meetings WHERE private = 1")
         return {row["id"] for row in rows}
 
+    def private_people(self) -> set[int]:
+        """The people named or recognized in private meetings only."""
+        if not self.has_private():
+            return set()
+        rows = self.db.execute(
+            "SELECT ms.person_id AS id FROM meeting_speakers ms "
+            "JOIN meetings m ON m.id = ms.meeting_id JOIN people p ON p.id = ms.person_id "
+            "WHERE p.is_me = 0 AND ms.status IN ('auto', 'confirmed') "
+            "GROUP BY ms.person_id HAVING MIN(m.private) = 1"
+        )
+        return {row["id"] for row in rows}
+
+    def _speaker(self, private: bool) -> str:
+        """The SQL for a speaker's name; with ``private`` off, as Claude may know it."""
+        return SPEAKER_NAME if private or not self.has_private() else SHARED_NAME
+
     def meetings_with_status(self, *statuses: str) -> list[sqlite3.Row]:
         marks = ", ".join("?" * len(statuses))
         return self.db.execute(
@@ -568,9 +606,11 @@ class Store:
         )
         self._commit()
 
-    def transcript(self, meeting_id: int) -> list[sqlite3.Row]:
+    def transcript(self, meeting_id: int, private: bool = True) -> list[sqlite3.Row]:
+        """A meeting's lines. With ``private`` off, for Claude: no voice is suggested to be
+        someone known only from private meetings."""
         return self.db.execute(
-            f"SELECT s.*, {SPEAKER_NAME} AS speaker, ms.status AS speaker_status "
+            f"SELECT s.*, {self._speaker(private)} AS speaker, ms.status AS speaker_status "
             "FROM segments s "
             "LEFT JOIN meeting_speakers ms ON ms.id = s.meeting_speaker_id "
             "LEFT JOIN people p ON p.id = ms.person_id "
@@ -599,7 +639,8 @@ class Store:
         if not private and self.has_private():
             one += "AND m.private = 0 "
         return self.db.execute(
-            f"SELECT s.meeting_id, m.title, m.started_at, s.start, {SPEAKER_NAME} AS speaker, "
+            "SELECT s.meeting_id, m.title, m.started_at, s.start, "
+            f"{self._speaker(private)} AS speaker, "
             "s.text FROM segments_fts f JOIN segments s ON s.id = f.rowid "
             "JOIN meetings m ON m.id = s.meeting_id "
             "LEFT JOIN meeting_speakers ms ON ms.id = s.meeting_speaker_id "
@@ -975,16 +1016,11 @@ class Store:
 
     def people_stats(self, private: bool = True) -> list[sqlite3.Row]:
         """Everyone, with what they said and when; with ``private`` off, as if private
-        meetings weren't there (people heard only in those aren't either)."""
+        meetings weren't there: you, and who was named or recognized in another."""
         heard, known = "ms.status IN ('auto', 'confirmed')", ""
         if not private and self.has_private():
-            hidden = "(SELECT id FROM meetings WHERE private = 1)"
-            heard += f" AND ms.meeting_id NOT IN {hidden}"
-            in_any = "SELECT 1 FROM meeting_speakers ms WHERE ms.person_id = p.id"
-            known = (
-                f"WHERE p.is_me = 1 OR NOT EXISTS ({in_any} AND ms.meeting_id IN {hidden}) "
-                f"OR EXISTS ({in_any} AND ms.meeting_id NOT IN {hidden}) "
-            )
+            heard += " AND ms.meeting_id NOT IN (SELECT id FROM meetings WHERE private = 1)"
+            known = f"WHERE {IN_SHARED} "
         return self.db.execute(
             "SELECT p.*, "
             "(SELECT COUNT(*) FROM voice_samples v WHERE v.person_id = p.id) AS samples, "

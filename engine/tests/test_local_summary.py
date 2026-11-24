@@ -550,11 +550,58 @@ def test_a_question_about_a_long_meeting_is_answered_from_the_lines_that_say_its
     )
     size = sum(len(line.said()) + 1 for line in many)
     assert 3000 < size <= local_summary.PART_CHARS + len(many) and many == sorted(many)
-    monkeypatch.setattr(local_summary, "PART_CHARS", 2000)
     few = local_summary.lines_about(
-        store, meeting, local_summary.lines_of(store, meeting), "word line"
+        store, meeting, local_summary.lines_of(store, meeting), "word line", 2000
     )
     assert 0 < sum(len(line.said()) + 1 for line in few) <= 2000 + len(few)
+
+
+def test_a_question_about_someone_is_answered_from_what_they_said(store, model):
+    talk = [*LONG]
+    for i in (20, 80):
+        talk[i] = (talk[i][0], "Will", f"The switch in closet {i} is mine.")
+    meeting = add_meeting(store, talk)
+    found = local_summary.lines_about(
+        store, meeting, local_summary.lines_of(store, meeting), "What did Will say?"
+    )
+    assert [line.text for line in found if line.speaker == "Will"] == [
+        "The switch in closet 20 is mine.",
+        "The switch in closet 80 is mine.",
+    ]
+    # An everyday word that is nobody's name here isn't looked for.
+    assert not local_summary.lines_about(
+        store, meeting, local_summary.lines_of(store, meeting), "What can you do?"
+    )
+
+
+def test_a_question_whose_lines_dont_fit_is_asked_with_fewer(store, model):
+    meeting = add_meeting(store, SHORT * 30)
+    sizes: list[int] = []
+
+    def answer(call):
+        sizes.append(len(call.user))
+        return ollama.TooLong("too long") if len(sizes) < 3 else "On Friday [00:03]."
+
+    model.answer = answer
+    said = local_summary.answer(store, meeting, "When is the cutover?", "small:4b")
+    assert said["answer"] == "On Friday [00:03]."
+    assert len(sizes) == 3 and sizes[0] >= sizes[1] > sizes[2]
+    model.answer = lambda call: ollama.TooLong("too long")
+    with pytest.raises(ollama.TooLong):
+        local_summary.answer(store, meeting, "When is the cutover?", "small:4b")
+    assert model.unloaded[-1] == "small:4b"
+
+
+def test_an_answers_times_are_lines_times_and_the_rest_is_as_written():
+    said = [Line(5.0, 9.0, "Dana", "x"), Line(65.4, 70.0, "Priya", "y")]
+    for text, right in (
+        ("They put .NET 8 on it [00:05].", "They put .NET 8 on it [00:05]."),
+        ("Dana [00:07], Priya [01:05].", "Dana [00:05], Priya [01:05]."),
+        ("Nobody [09:20] said .. that [09:21].", "Nobody said .. that."),
+        ("Run:\n-  .\\setup.ps1 [09:20]\n- 1 , 2", "Run:\n-  .\\setup.ps1\n- 1 , 2"),
+        ("[09:20] Nobody.", "Nobody."),
+    ):
+        assert local_summary.cited(text, said) == right
 
 
 # Through the API ----------------------------------------------------------------------------

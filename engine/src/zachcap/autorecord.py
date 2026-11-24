@@ -80,28 +80,30 @@ class CallWatch:
       "call_quiet_for" counts the computer's audio only), "call_seen" (the call apps it heard
       holding the mic), "heard" and "call_heard" (whether anyone, and the call's side, was
       heard) and "notes" (how many notes, bookmarks and snapshots it has);
-    - ``start(app)``: starts a recording for that app's call and returns its meeting id
-      (raises Busy when it can't just now);
+    - ``start(app, after)``: starts a recording for that app's call and returns its meeting
+      id (raises Busy when it can't just now); ``after`` is the meeting that app was last
+      recorded in, if it let go of the mic less than a few minutes ago (a hold, a preview
+      closed before joining): the new one is kept as private as that was;
     - ``stop(meeting_id)``: stops and saves that recording (it's then transcribed); None if
       it isn't the one recording any more;
     - ``discard(meeting_id, only_if_worthless)``: stops that recording and deletes it, and
       says "deleted", "gone" (not that recording any more), or "kept" (only_if_worthless, and
       a note came in or the call was heard meanwhile: saved instead).
 
-    ``continuing``: the engine started again mid-recording (a crash, a quit), so a call on
-    the mic at the first look is the one that was being recorded, not a mic test.
+    ``continuing``: the meeting that was being recorded when the engine stopped (a crash, a
+    quit), so a call on the mic at the first look is that one, not a mic test.
     """
 
     def __init__(
         self,
         settings: Callable[[], dict],
         recording: Callable[[], dict | None],
-        start: Callable[[str], int],
+        start: Callable[[str, int | None], int],
         stop: Callable[[int], int | None],
         discard: Callable[[int, bool], str],
         apps_using_mic: Callable[[], list[str]] | None = None,
         clock: Callable[[], float] = time.monotonic,
-        continuing: bool = False,
+        continuing: int | None = None,
     ) -> None:
         self._settings = settings
         self._recording = recording
@@ -115,6 +117,8 @@ class CallWatch:
         self._gone: dict[str, float] = {}  # call app -> since when it's away (not yet let go)
         self._let_go: dict[str, float] = {}  # call app -> when it let go of a call
         self._same_call: set[str] = set()  # back on the mic soon after a call: that call
+        self._left: dict[str, float] = {}  # call app -> when it let go, of a call or not
+        self._recorded: dict[str, int] = {}  # call app -> the meeting it was recorded in
         self._declined: set[str] = set()  # not started again until the app lets go
         self._failed: set[str] = set()  # couldn't start for this call: the page offers it
         self._continuing = continuing
@@ -236,6 +240,8 @@ class CallWatch:
                 # calls it was recording aren't recorded again until their apps let go.
                 self._declined.update(held.intersection(self._holding))
             self._last = None if current is None else current["meeting_id"]
+            if current is not None:
+                self._recorded.update(dict.fromkeys(self._holding, current["meeting_id"]))
             if current is None:
                 self._not_recording(apps, now, settings)
             else:
@@ -247,11 +253,15 @@ class CallWatch:
         for app in apps:
             if app not in self._holding:
                 let_go = self._let_go.pop(app, None)
-                if self._continuing or (let_go is not None and now - let_go <= SAME_CALL_WITHIN):
+                self._left.pop(app, None)
+                if self._continuing is not None:
+                    self._same_call.add(app)
+                    self._recorded[app] = self._continuing
+                elif let_go is not None and now - let_go <= SAME_CALL_WITHIN:
                     self._same_call.add(app)
                 self._holding[app] = now
             self._gone.pop(app, None)
-        self._continuing = False  # only the calls on the mic at the first look
+        self._continuing = None  # only the calls on the mic at the first look
         for app in list(self._holding):
             if app in apps:
                 continue
@@ -260,6 +270,7 @@ class CallWatch:
                 continue
             since = self._holding.pop(app)
             del self._gone[app]
+            self._left[app] = gone_at
             if gone_at - since >= CALL_AFTER or app in self._same_call:
                 self._let_go[app] = gone_at  # a call: back within a few minutes, the same one
             self._same_call.discard(app)
@@ -267,6 +278,9 @@ class CallWatch:
         self._failed.intersection_update(self._holding)
         for app in [app for app, at in self._let_go.items() if now - at > SAME_CALL_WITHIN]:
             del self._let_go[app]
+        for app in [app for app, at in self._left.items() if now - at > SAME_CALL_WITHIN]:
+            del self._left[app]
+            self._recorded.pop(app, None)
 
     def _not_recording(self, apps: list[str], now: float, settings: dict) -> None:
         self.auto = self.stopping = None
@@ -278,7 +292,7 @@ class CallWatch:
                 continue
             self._declined.add(app)  # one recording per call, even if starting fails
             try:
-                meeting_id = self._start(app)
+                meeting_id = self._start(app, self._recorded.get(app))
             except Busy:
                 self._declined.discard(app)  # a sound check, say: tried again at the next look
                 return

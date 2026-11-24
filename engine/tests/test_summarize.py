@@ -62,7 +62,7 @@ def fake_claude(
     )
 
     class Client:
-        def __init__(self, api_key):
+        def __init__(self, api_key, **options):
             calls["api_key"] = api_key
             self.beta = SimpleNamespace(
                 messages=SimpleNamespace(parse=self.parse, create=self.create)

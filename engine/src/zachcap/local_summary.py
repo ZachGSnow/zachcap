@@ -29,6 +29,7 @@ PREFIX = "ollama/"  # before the model's name, in what is saved of a summary
 # of up to ANSWER tokens, fits in the CONTEXT the model holds at once. Every call asks for the
 # same CONTEXT: Ollama loads the model again when it changes.
 PART_CHARS = 9_500
+LINE_CHARS = 8_000  # of one line (a line is a sentence or a few): more is cut off
 CONTEXT = 8192
 ANSWER = 3000
 NOTES_CHARS = 12_000  # of the parts' notes, in the call that writes the overview from them
@@ -132,8 +133,11 @@ class Line(NamedTuple):
 
 
 def lines_of(store: Store, meeting_id: int) -> list[Line]:
+    def text(said: str) -> str:
+        return said if len(said) <= LINE_CHARS else said[:LINE_CHARS] + " [cut off]"
+
     return [
-        Line(row["start"], row["end"], row["speaker"], row["text"][:PART_CHARS])
+        Line(row["start"], row["end"], row["speaker"], text(row["text"]))
         for row in store.transcript(meeting_id)
     ]
 
@@ -726,26 +730,43 @@ fact is from in square brackets, like [12:34]. If the meeting doesn't say, answe
 doesn't."""
 
 
-def lines_about(store: Store, meeting_id: int, lines: list[Line], question: str) -> list[Line]:
+def lines_about(
+    store: Store, meeting_id: int, lines: list[Line], question: str, most: int = PART_CHARS
+) -> list[Line]:
     """The lines to answer a question from: all of them when they fit, else the ones that say its
-    words, the best matches first, each with the lines around it, as many as fit; in order."""
-    if sum(len(line.said()) + 1 for line in lines) <= PART_CHARS * 1.25:
+    words, the best matches first, each with the lines around it, and then those of the people
+    it names, as many as fit; in order."""
+    if sum(len(line.said()) + 1 for line in lines) <= most * 1.25:
         return lines
     from .assistant import fts_query
 
+    # Names count as words to look for, though one may be an everyday word too ("Will").
+    names = {
+        word
+        for name in [line.speaker for line in lines] + [p["name"] for p in store.people()]
+        for word in re.findall(r"\w+", name.casefold())
+    } - {"you", "speaker", "call", "audio", "unknown"}
+    match = fts_query(question, any_word=True, names=names)
     at = {line.start: i for i, line in enumerate(lines)}
-    match = fts_query(question, any_word=True)
     found = store.search_lines(match, HITS, meeting_id) if match else []
+    middles = [at[row["start"]] for row in found if row["start"] in at]
+    asked = set(re.findall(r"\w+", question.casefold())) & names
+    theirs = [
+        i
+        for i, line in enumerate(lines)
+        if asked & set(re.findall(r"\w+", line.speaker.casefold()))
+    ]
+    order = [
+        i
+        for middle in middles
+        for i in range(max(0, middle - AROUND), min(len(lines), middle + AROUND + 1))
+    ]
     chosen: set[int] = set()
     size = 0
-    for row in found:
-        middle = at.get(row["start"])
-        if middle is None:
-            continue
-        for i in range(max(0, middle - AROUND), min(len(lines), middle + AROUND + 1)):
-            if i not in chosen and size + len(lines[i].said()) <= PART_CHARS:
-                chosen.add(i)
-                size += len(lines[i].said()) + 1
+    for i in [*order, *theirs]:
+        if i not in chosen and size + len(lines[i].said()) <= most:
+            chosen.add(i)
+            size += len(lines[i].said()) + 1
     return [lines[i] for i in sorted(chosen)]
 
 
@@ -761,31 +782,46 @@ def answer(
     lines = lines_of(store, meeting_id)
     if not lines:
         raise RuntimeError("This meeting has no transcript yet.")
-    about = lines_about(store, meeting_id, lines, question)
     saved = store.summary(meeting_id)
-    if not about and saved is None:
-        raise RuntimeError(
-            "Nothing said in this meeting matches that, and it is too long for a model on this PC "
-            "to read whole. Ask with words that were said, or write the summary first."
-        )
     me = store.me()["name"]
-    context = summarize.heading(meeting)
-    if saved is not None:
-        context += summarize.summary_block(saved["content"]) + "\n\n"
-    if about:
-        which = "Transcript" if len(about) == len(lines) else "Lines of the transcript"
-        context += transcript_block("\n".join(line.said() for line in about), which)
-    if len(about) == len(lines):
-        context += own_notes(store, meeting_id, me, 0.0, math.inf)
+
+    def context(most: int) -> str:
+        """The meeting, as far as it fits in ``most`` characters of transcript."""
+        about = lines_about(store, meeting_id, lines, question, most)
+        if not about and saved is None:
+            raise RuntimeError(
+                "Nothing said in this meeting matches that, and it is too long for a model on "
+                "this PC to read whole. Ask with words that were said, or write the summary first."
+            )
+        text = summarize.heading(meeting)
+        if saved is not None:
+            text += summarize.summary_block(saved["content"]) + "\n\n"
+        if about:
+            which = "Transcript" if len(about) == len(lines) else "Lines of the transcript"
+            text += transcript_block("\n".join(line.said() for line in about), which)
+        if len(about) == len(lines):
+            text += own_notes(store, meeting_id, me, 0.0, math.inf)
+        return text
+
+    most = PART_CHARS
+    asked = context(most)
     on = ollama.model(model)
     writer = Writer(on, cancel or ollama.Cancel())
     try:
-        text = writer.text(
-            summarize.ASK_SYSTEM.format(me=me) + spellings(store),
-            context + ASK_REMINDER.format(question=question),
-            None,
-            REPLY,
-        )
+        while True:
+            try:
+                text = writer.text(
+                    summarize.ASK_SYSTEM.format(me=me) + spellings(store),
+                    asked + ASK_REMINDER.format(question=question),
+                    None,
+                    REPLY,
+                )
+                break
+            except ollama.TooLong:  # a dense script, or a long summary and notes
+                most //= 2
+                if most < 1000:
+                    raise
+                asked = context(most)
     finally:
         ollama.unload(on.name)
     if not text:
@@ -800,8 +836,9 @@ def cited(text: str, lines: list[Line]) -> str:
     def checked(stamp: re.Match[str]) -> str:
         at = to_seconds(stamp[1]) or 0.0
         nearest = min(lines, key=lambda line: abs(int(line.start) - at))
-        near = abs(int(nearest.start) - at) <= 5
-        return f"[{summarize._clock(nearest.start)}]" if near else ""
+        if abs(int(nearest.start) - at) > 5:
+            return ""
+        space = stamp[0][: stamp[0].index("[")]
+        return f"{space}[{summarize._clock(nearest.start)}]"
 
-    text = re.sub(r"\[(\d{1,2}:\d{2}(?::\d{2})?)\]", checked, text)
-    return re.sub(r" +([.,;])", r"\1", text).strip()
+    return re.sub(r"[ \t]*\[(\d{1,2}:\d{2}(?::\d{2})?)\]", checked, text).strip()

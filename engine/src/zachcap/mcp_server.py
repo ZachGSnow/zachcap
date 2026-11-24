@@ -19,7 +19,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from . import __version__, assistant, paths, privacy
-from .store import Store
+from .store import VERSION, Store
 
 INSTRUCTIONS = """Meetings recorded with ZachCap, a local meeting recorder: transcripts with \
 named speakers, Claude summaries, action items and commitments, and the user's own notes. \
@@ -39,6 +39,11 @@ def library() -> Iterator[Store]:
         raise ToolError("There's no ZachCap library on this computer yet.")
     store = Store(readonly=True)
     try:
+        if store.version() > VERSION:  # this code may not know what is private in it
+            raise ToolError(
+                "ZachCap was updated since this MCP server started. Restart the app that runs "
+                "it (Claude Desktop, or the Claude Code session)."
+            )
         yield store
     finally:
         store.close()
@@ -132,7 +137,7 @@ def create_server() -> MCPServer:
     def list_people() -> str:
         """Everyone ZachCap knows by voice, with how many meetings and how long they talked."""
         with library() as store:
-            return assistant.people_list(store)
+            return privacy.outgoing(store, assistant.people_list(store))
 
     return server
 

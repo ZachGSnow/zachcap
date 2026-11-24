@@ -192,6 +192,8 @@ export type Person = {
   last_seen: string | null;
   /** The client they work for. */
   org: string | null;
+  /** Known from private meetings only: not someone to ask Claude about. */
+  private?: boolean;
 };
 
 export type Stats = {

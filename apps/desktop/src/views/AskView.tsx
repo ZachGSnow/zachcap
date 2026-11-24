@@ -29,7 +29,7 @@ export function AskView({ library, onOpen }: { library: LibraryAsk; onOpen: (mee
     void bottom.current?.scrollIntoView({ block: "end", behavior: "smooth" });
   }, [history.length, busy]);
 
-  const names = (people ?? []).filter((p) => !p.is_me && p.meetings > 0).map((p) => p.name);
+  const names = (people ?? []).filter((p) => !p.is_me && p.meetings > 0 && !p.private).map((p) => p.name);
   const starters = [
     "What did I commit to this week?",
     names[0] ? `What's still open with ${names[0]}?` : "Which action items are still open?",
