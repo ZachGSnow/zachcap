@@ -192,3 +192,41 @@ def test_merging_removing_and_saving_keep_clients(tmp_path: Path, monkeypatch: p
     assert "Review" in text and "Cutover" not in text  # only that client's meetings
     assert first
     store.close()
+
+
+def test_saved_client_work_logs_forget_deleted_and_redacted_meetings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    client = TestClient(create_app("test-token"))
+    store = Store()
+    cutover = meeting(store, tmp_path, "Cutover", "2026-11-23T09:00:00-05:00", ["Dana"])
+    review = meeting(store, tmp_path, "Review", "2026-11-23T11:00:00-05:00", ["Dana"])
+    prospect = meeting(store, tmp_path, "Prospect", "2026-11-23T14:00:00-05:00")
+    store.set_client(store.person_id("Dana"), "Contoso")
+    store.update_meeting(prospect, client="Northwind", client_source=clients.YOURS)
+    said = {"overview": "Moving the vault server.", "decisions": [], "open_questions": []}
+    store.save_summary(review, "claude-opus-5-5", said, 1, 1, 0.0)
+    folder = tmp_path / "exports"
+    folder.mkdir()
+    client.put("/api/settings", headers=AUTH, json={"export_folder": str(folder)})
+    mine = folder / "Work log 2026-11-23 Notes.md"  # a file of your own, never touched
+    mine.write_text("# My notes\n", encoding="utf-8")
+    for name in ("Contoso", "Northwind"):
+        for period in ("day", "week"):
+            saved = {"day": "2026-11-23", "period": period, "client": name}
+            assert client.post("/api/worklog/save", headers=AUTH, json=saved).status_code == 200
+    day = folder / "Work log 2026-11-23 Contoso.md"
+    assert "Cutover" in day.read_text(encoding="utf-8")
+
+    client.delete(f"/api/meetings/{cutover}", headers=AUTH)
+    client.delete(f"/api/meetings/{prospect}", headers=AUTH)  # Northwind's only meeting
+    client.post(f"/api/meetings/{review}/redact", headers=AUTH, json={"start": 0, "end": 1})
+
+    for log in (day, folder / "Work log 2026-W48 Contoso.md"):
+        text = log.read_text(encoding="utf-8")
+        assert "Cutover" not in text and "vault server" not in text and "Review" in text
+    northwind = (folder / "Work log 2026-11-23 Northwind.md").read_text(encoding="utf-8")
+    assert "Prospect" not in northwind and "No meetings recorded." in northwind
+    assert mine.read_text(encoding="utf-8") == "# My notes\n"
+    store.close()

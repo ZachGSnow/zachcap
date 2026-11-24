@@ -119,7 +119,7 @@ def build(store: Store, period: str, day: date, client: str | None = None) -> di
         "period": period,
         "start": start.isoformat(),
         "end": end.isoformat(),
-        "title": _title(period, start) + (f" for {client}" if client else ""),
+        "title": title(period, day, client),
         "client": client,
         "me": me,
         "totals": {
@@ -142,10 +142,15 @@ def build(store: Store, period: str, day: date, client: str | None = None) -> di
     return log
 
 
-def _title(period: str, start: date) -> str:
+def title(period: str, day: date, client: str | None = None) -> str:
+    """The log's title, its first line in Markdown ("Work log: Monday, November 23, 2026",
+    then "for Contoso" when it's one client's)."""
+    start = period_range(period, day)[0]
     if period == "week":
-        return f"Work log: week of {start:%B} {start.day}, {start.year}"
-    return f"Work log: {start:%A, %B} {start.day}, {start.year}"
+        when = f"week of {start:%B} {start.day}, {start.year}"
+    else:
+        when = f"{start:%A, %B} {start.day}, {start.year}"
+    return f"Work log: {when}" + (f" for {client}" if client else "")
 
 
 def _duration(seconds: float) -> str:

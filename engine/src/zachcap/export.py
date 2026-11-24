@@ -226,8 +226,40 @@ def save_work_log(store: Store, period: str, day: date, client: str | None = Non
 
 
 def refresh_work_logs(store: Store, day: date) -> None:
-    """Keep the day's and the week's work logs current, if Settings keeps them."""
-    if store.setting("export_work_log") != "1":
+    """Keep the day's and the week's work logs current, if Settings keeps them, and rewrite
+    every other work log of that day and week saved in the export folder (one client's, or
+    one saved by hand), so none keeps a meeting that was deleted, redacted or given another
+    client."""
+    folder = _export_folder(store)
+    if folder is None:
         return
+    every = store.setting("export_work_log") == "1"
     for period in ("day", "week"):
-        save_work_log(store, period, day)
+        if every:
+            save_work_log(store, period, day)
+        for client in _saved_work_logs(folder, period, day):
+            if client or not every:
+                save_work_log(store, period, day, clients.canonical(store, client) or None)
+
+
+def _saved_work_logs(folder: Path, period: str, day: date) -> list[str]:
+    """The work logs of this day or week saved in the folder, by the client each is for (""
+    for everyone's). A file counts only when it's named and titled as save_work_log writes
+    it, so a file of your own is never rewritten; a client's is found from its title, even
+    when no meeting or person has that client any more."""
+    from . import digest
+
+    title = f"# {digest.title(period, day)}"
+    found = []
+    for path in folder.glob(f"{Path(digest.file_name(period, day)).stem}*.md"):
+        try:
+            with path.open(encoding="utf-8") as file:
+                first = file.readline().rstrip("\n")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if first != title and not first.startswith(f"{title} for "):
+            continue
+        client = first[len(title) + len(" for ") :] if first != title else ""
+        if digest.file_name(period, day, client).casefold() == path.name.casefold():
+            found.append(client)
+    return found
