@@ -11,6 +11,8 @@ from zachcap.api import create_app
 from zachcap.store import Store
 from zachcap.summarize import notes_text
 
+LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
+
 AUTH = {"Authorization": "Bearer test-token"}
 
 
@@ -40,7 +42,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
     monkeypatch.setattr(capture, "Recorder", FakeRecorder)
     monkeypatch.setattr(pipeline, "process", lambda *args, **kwargs: "ready")
-    return TestClient(create_app("test-token"))
+    return TestClient(create_app("test-token"), base_url=LOCAL)
 
 
 def fake_take(text: str):

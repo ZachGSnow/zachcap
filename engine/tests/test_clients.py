@@ -11,6 +11,8 @@ from zachcap.api import create_app
 from zachcap.store import Store
 from zachcap.voiceprint import Match
 
+LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
+
 AUTH = {"Authorization": "Bearer test-token"}
 
 
@@ -101,7 +103,7 @@ def test_a_library_not_yet_opened_to_write_still_lists(store: Store, tmp_path: P
 
 def test_clients_through_the_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     store = Store()
     meeting_id = meeting(store, tmp_path, "Cutover", "2026-11-23T09:00:00-05:00", ["Dana"])
     dana = store.person_id("Dana")
@@ -162,7 +164,7 @@ def test_one_spelling_per_client_whoever_speaks_first(store: Store, tmp_path: Pa
 
 def test_merging_removing_and_saving_keep_clients(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     store = Store()
     first = meeting(store, tmp_path, "Cutover", "2026-11-23T09:00:00-05:00", ["Mark Smith"])
     second = meeting(store, tmp_path, "Review", "2026-11-23T11:00:00-05:00", ["Lee"])

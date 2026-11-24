@@ -9,6 +9,8 @@ from zachcap import attachments, export, summarize, tickets
 from zachcap.api import create_app
 from zachcap.store import Store
 
+LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
+
 AUTH = {"Authorization": "Bearer test-token"}
 
 
@@ -71,7 +73,7 @@ def test_attached_files_go_to_claude_labelled_and_offer_tickets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     store = Store()
     store.set_setting(tickets.SETTING, "#######")
     meeting_id = store.create_meeting("Printer down", "2026-11-23T09:00:00", tmp_path / "m")

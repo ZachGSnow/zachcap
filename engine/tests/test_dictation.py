@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 from zachcap import capture, dictation, pipeline
 from zachcap.api import create_app
 
+LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
+
 AUTH = {"Authorization": "Bearer test-token"}
 REAL_WINDOWS = dictation._windows
 REAL_TYPE_INTO = dictation.type_into
@@ -485,7 +487,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(dictation, "Transcriber", lambda: FakeTranscriber("Ticket closed."))
     monkeypatch.setattr(capture, "Recorder", FakeRecorder)
     monkeypatch.setattr(pipeline, "process", lambda *args, **kwargs: "ready")
-    return TestClient(create_app("test-token"))
+    return TestClient(create_app("test-token"), base_url=LOCAL)
 
 
 def test_dictation_through_the_api(client: TestClient, monkeypatch: pytest.MonkeyPatch):
@@ -582,7 +584,7 @@ def test_failures_say_what_went_wrong(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(dictation, "Microphone", FakeMic)
     broken = FakeTranscriber(RuntimeError("The model couldn't load"))
     monkeypatch.setattr(dictation, "Transcriber", lambda: broken)
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     client.put("/api/settings", headers=AUTH, json={"dictation": True})
     started = client.post("/api/dictate/start", headers=AUTH).json()
 
@@ -600,7 +602,7 @@ def test_a_mic_that_wont_open_is_reported_and_nothing_is_left_listening(
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
     monkeypatch.setattr(dictation, "Microphone", no_mic)
     monkeypatch.setattr(dictation, "Transcriber", lambda: FakeTranscriber("unused"))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     client.put("/api/settings", headers=AUTH, json={"dictation": True})
 
     failed = client.post("/api/dictate/start", headers=AUTH)

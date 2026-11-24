@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import threading
 from datetime import datetime
@@ -18,6 +19,9 @@ from pathlib import Path
 
 from . import __version__, apikeys, paths
 from .store import Store
+
+# What serve takes as its token: 16 or more printable characters, no spaces.
+TOKEN = re.compile(r"[!-~]{16,}")
 
 
 def _clock(seconds: float) -> str:
@@ -246,6 +250,12 @@ def main(argv: list[str] | None = None) -> int:
 
         if not args.token:
             parser.error("serve needs --token or ZACHCAP_TOKEN")
+        # The shell's are 32 random hex digits; a short or guessable one isn't taken.
+        if not TOKEN.fullmatch(args.token):
+            parser.error(
+                "the token must be at least 16 characters: letters, digits and punctuation, "
+                "no spaces"
+            )
         serve(args.port, args.token)
         return 0
     if args.command == "keys":
