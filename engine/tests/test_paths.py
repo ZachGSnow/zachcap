@@ -1,5 +1,6 @@
-"""Paths the app sends: only plain paths on this PC's own drives are used. One on another
-computer, a device or a stream is refused with a reason to show, before anything looks at it."""
+"""Paths the app sends: only plain paths on a drive letter are used, this PC's own or a mapped
+network drive. A network path naming a server, a device or a stream is refused with a reason
+to show, before anything looks at it."""
 
 import builtins
 import io
@@ -18,33 +19,42 @@ from zachcap.store import Store
 LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
 
 AUTH = {"Authorization": "Bearer test-token"}
-DRIVE_REMOVABLE, DRIVE_FIXED, DRIVE_REMOTE = 2, 3, 4  # as GetDriveTypeW says them
 SHARE = r"\\fileserver\share"
-REFUSED = "Choose a {} on this PC; network and device paths aren't used"
-
-
-@pytest.fixture
-def drives(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
-    """The drives Windows reports, by root: a local disk unless a test says otherwise, and
-    Z: a letter mapped to a share on another computer."""
-    types = {"Z:\\": DRIVE_REMOTE}
-    monkeypatch.setattr(paths, "drive_type", lambda root: types.get(root.upper(), DRIVE_FIXED))
-    return types
+NETWORK = (
+    r"Network paths (\\server\share) aren't used; map the share to a drive letter in File "
+    "Explorer and choose the {} there"
+)
+REFUSED = "Choose a {} on this PC or a mapped drive; device paths aren't used"
 
 
 @pytest.mark.parametrize(
     "path",
     [
-        SHARE + r"\call.mp4",  # another computer
+        SHARE + r"\call.mp4",
+        SHARE,
+        "//fileserver/share/call.mp4",  # Windows reads / as \ too
+        r"\/fileserver/share\call.mp4",
         r"\\fileserver@SSL@443\share\call.mp4",  # the same over the web (WebDAV)
+    ],
+)
+def test_a_network_path_is_refused_with_what_to_do_instead(path: str):
+    with pytest.raises(ValueError) as refused:
+        paths.on_a_drive(path, "folder")
+    assert str(refused.value) == NETWORK.format("folder")
+    with pytest.raises(ValueError) as refused:
+        paths.on_a_drive(path)
+    assert str(refused.value).endswith("and choose the file there")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         r"\\?\UNC\fileserver\share\call.mp4",  # Windows' namespaces, even for C:
         r"\\?\GLOBALROOT\Device\Mup\fileserver\share\call.mp4",
         r"\\?\C:\Calls\call.mp4",
         r"\\.\C:\Calls\call.mp4",
         r"\\.\pipe\zachcap",
         r"\??\UNC\fileserver\share\call.mp4",
-        "//fileserver/share/call.mp4",  # Windows reads / as \ too
-        r"\/fileserver/share\call.mp4",
         "//?/C:/Calls/call.mp4",
         r"\Calls\call.mp4",  # no drive, or no folder on it: wherever the engine happens to be
         r"Calls\call.mp4",
@@ -57,22 +67,22 @@ def drives(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
         r"C:\Calls\NUL.",  # Windows drops the dot, and it's NUL
         r"C:\Calls\prn.tar.gz",
         r"C:\LPT1\call.mp4",
-        r"C:\Calls\COM9.mp4",
+        r"Z:\Recordings\COM9.mp4",
         "C:\\Calls\\COM\u00b9.mp4",
         r"C:\Calls\CONIN$",
         r"C:\Calls\Old\..\NUL",
-        r"C:\Calls\notes.txt:secret",  # a hidden stream of a file
+        r"C:\Calls\notes.txt:hidden",  # a hidden stream of a file
         r"C:\Calls\notes.txt::$DATA",
-        r"C:\Calls:secret\call.mp4",
+        r"C:\Calls:hidden\call.mp4",
         r"C:\Calls\call?.mp4",  # never part of a file name
         r"C:\Calls\*.mp4",
         r"C:\Calls\a|b.mp4",
         "C:\\Calls\\call\x00.mp4",
     ],
 )
-def test_network_device_and_odd_paths_are_refused(drives, path: str):
+def test_device_paths_streams_and_odd_paths_are_refused(path: str):
     with pytest.raises(ValueError) as refused:
-        paths.on_this_pc(path)
+        paths.on_a_drive(path)
     assert str(refused.value) == REFUSED.format("file")
 
 
@@ -85,6 +95,7 @@ def test_network_device_and_odd_paths_are_refused(drives, path: str):
             r"D:\Recordings\Contoso call 2026-11-23.m4a",
             r"D:\Recordings\Contoso call 2026-11-23.m4a",
         ),
+        (r"Z:\Phone system\Exports", r"Z:\Phone system\Exports"),  # a mapped network drive
         (
             "C:\\Users\\Dana\\M\u00fasica\\Llamada con Zo\u00eb \u4f1a\u8b70.m4a",
             "C:\\Users\\Dana\\M\u00fasica\\Llamada con Zo\u00eb \u4f1a\u8b70.m4a",
@@ -102,36 +113,21 @@ def test_network_device_and_odd_paths_are_refused(drives, path: str):
         (r"C:\Calls\con-call.mp4", r"C:\Calls\con-call.mp4"),
     ],
 )
-def test_plain_paths_on_this_pc_are_used(drives, path: str, used: str):
-    assert str(paths.on_this_pc(path)) == used
+def test_plain_paths_on_a_drive_letter_are_used(path: str, used: str):
+    assert str(paths.on_a_drive(path)) == used
 
 
-def test_a_long_path_is_used_whole(drives):
+def test_a_long_path_is_used_whole():
     folders = "\\".join(["Recordings kept for the quarterly review"] * 10)
     long = f"C:\\{folders}\\Weekly sync.mp4"
     assert len(long) > 400
-    assert str(paths.on_this_pc(long)) == long
+    assert str(paths.on_a_drive(long)) == long
 
 
-def test_a_drive_letter_mapped_to_a_share_is_refused_and_says_so(drives):
-    with pytest.raises(ValueError) as refused:
-        paths.on_this_pc(r"Z:\Recordings", "folder")
-    assert str(refused.value) == "Z: is a network drive; choose a folder on this PC"
-    with pytest.raises(ValueError, match="^Z: is a network drive"):
-        paths.on_this_pc(r"z:\Recordings\..\call.mp4")
-
-    drives["E:\\"] = DRIVE_REMOVABLE  # a USB stick is on this PC
-    assert str(paths.on_this_pc(r"E:\call.mp4")) == r"E:\call.mp4"
-
-
-def test_windows_says_this_pcs_own_drive_is_a_local_disk():
-    assert paths.drive_type(os.environ.get("SystemDrive", "C:") + "\\") == DRIVE_FIXED
-
-
-def test_a_saved_folder_is_used_only_when_it_is_on_this_pc(drives):
+def test_a_saved_folder_is_used_unless_it_is_refused():
     assert paths.saved_folder(None) is None and paths.saved_folder("") is None
-    assert paths.saved_folder(SHARE) is None
-    assert paths.saved_folder(r"Z:\Recordings") is None
+    assert paths.saved_folder(SHARE) is None and paths.saved_folder(r"\\.\pipe\zachcap") is None
+    assert str(paths.saved_folder(r"Z:\Recordings")) == r"Z:\Recordings"
     assert str(paths.saved_folder("C:/Calls/")) == r"C:\Calls"
 
 
@@ -145,7 +141,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def far(path) -> bool:
-    """A path on another computer: a share, or the Z: drive these tests map to one."""
+    """A path on another computer: a network path, or Z:, a mapped network drive here."""
     if not isinstance(path, str | os.PathLike):
         return False
     text = os.fsdecode(path).replace("/", "\\")
@@ -209,7 +205,7 @@ def test_each_path_the_app_sends_is_refused_on_another_computer_untouched(
     refused = client.request(method, url.format(id=meeting_id), headers=AUTH, **sent)
 
     assert refused.status_code == 400
-    assert refused.json()["detail"] == REFUSED.format(what)
+    assert refused.json()["detail"] == NETWORK.format(what)
     assert looked_at == []
     settings = client.get("/api/settings", headers=AUTH).json()
     assert (settings["export_folder"], settings["watch_folder"]) == ("", "")
@@ -217,15 +213,25 @@ def test_each_path_the_app_sends_is_refused_on_another_computer_untouched(
     assert client.get(f"/api/meetings/{meeting_id}", headers=AUTH).json()["notes"] == []
 
 
-def test_a_mapped_network_drive_is_refused_through_the_api(client, looked_at, drives):
-    refused = client.put("/api/settings", headers=AUTH, json={"export_folder": r"Z:\Vault"})
+@pytest.mark.parametrize("path", [r"\\.\pipe\zachcap", r"C:\Calls\NUL", r"C:\Calls\a.mp4:hidden"])
+def test_device_paths_and_streams_are_refused_through_the_api(client, looked_at, path):
+    refused = client.post("/api/import", headers=AUTH, json={"path": path})
 
-    assert refused.status_code == 400
-    assert refused.json()["detail"] == "Z: is a network drive; choose a folder on this PC"
+    assert refused.status_code == 400 and refused.json()["detail"] == REFUSED.format("file")
     assert looked_at == []
 
 
-def test_a_network_folder_saved_before_these_checks_is_never_used(client, looked_at, tmp_path):
+def test_a_mapped_network_drive_is_used_like_any_other_drive(client, looked_at):
+    # Z: is offline here, so the folder isn't found; but it was looked for, not refused.
+    files = client.get("/api/watch-folder/files", headers=AUTH, params={"path": r"Z:\Exports"})
+
+    assert files.status_code == 400 and files.json()["detail"] == "That folder doesn't exist"
+    assert looked_at == [r"Z:\Exports"]
+
+
+def test_a_network_folder_saved_before_these_checks_is_off_and_says_why(
+    client, looked_at, tmp_path
+):
     store = Store()
     meeting_id = store.create_meeting("Weekly sync", "2026-11-20T09:00:00", tmp_path / "audio")
     store.set_setting("export_folder", SHARE + r"\vault")
@@ -238,6 +244,14 @@ def test_a_network_folder_saved_before_these_checks_is_never_used(client, looked
     assert looked_at == []
     settings = client.get("/api/settings", headers=AUTH).json()
     assert (settings["export_folder"], settings["watch_folder"]) == ("", "")  # shown as off
+    assert settings["export_folder_refused"] == {
+        "folder": SHARE + r"\vault",
+        "reason": NETWORK.format("folder"),
+    }
+    assert settings["watch_folder_refused"]["folder"] == SHARE + r"\recordings"
+    forgotten = {"export_folder": "", "watch_folder": ""}  # the notice's Forget it
+    after = client.put("/api/settings", headers=AUTH, json=forgotten).json()
+    assert (after["export_folder_refused"], after["watch_folder_refused"]) == (None, None)
 
 
 def test_files_and_folders_on_this_pc_work_as_before(client, tmp_path, monkeypatch):
@@ -268,3 +282,4 @@ def test_files_and_folders_on_this_pc_work_as_before(client, tmp_path, monkeypat
     both = {"export_folder": str(folder), "watch_folder": str(folder)}
     settings = client.put("/api/settings", headers=AUTH, json=both).json()
     assert (settings["export_folder"], settings["watch_folder"]) == (str(folder), str(folder))
+    assert (settings["export_folder_refused"], settings["watch_folder_refused"]) == (None, None)

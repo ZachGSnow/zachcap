@@ -608,17 +608,17 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=404, detail="No such meeting")
         return meeting
 
-    def on_this_pc(path: str, what: str = "file") -> Path:
-        """A path the app sent, checked before anything looks at it (paths.on_this_pc): a 400
-        with the reason when it's on another computer, a device, or not a plain path."""
+    def on_a_drive(path: str, what: str = "file") -> Path:
+        """A path the app sent, checked before anything looks at it (paths.on_a_drive): a 400
+        with the reason when it's a network path, a device, or not a plain path."""
         try:
-            return paths.on_this_pc(path, what)
+            return paths.on_a_drive(path, what)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def existing_folder(path: str) -> Path:
-        """A folder the app sent: on this PC, and there now."""
-        folder = on_this_pc(path, "folder")
+        """A folder the app sent: on a drive letter, and there now."""
+        folder = on_a_drive(path, "folder")
         if not folder.is_dir():
             raise HTTPException(status_code=400, detail="That folder doesn't exist")
         return folder
@@ -958,7 +958,7 @@ def create_app(token: str) -> FastAPI:
         """Write the meeting to the path the user picked in the save dialog."""
         meeting_or_404(store, meeting_id)
         check_format(body.format)
-        target = on_this_pc(body.path)
+        target = on_a_drive(body.path)
         if target.suffix.lower() != f".{body.format}" or not target.parent.is_dir():
             raise HTTPException(status_code=400, detail="Pick a file name in an existing folder")
         try:
@@ -1006,7 +1006,7 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(
                 status_code=400, detail=f"A meeting has at most {attachments.MAX_FILES} files"
             )
-        source = on_this_pc(body.path)
+        source = on_a_drive(body.path)
         try:
             name, text = attachments.read(source)
         except attachments.NotText as exc:
@@ -1187,7 +1187,7 @@ def create_app(token: str) -> FastAPI:
 
     @app.post("/api/import", dependencies=auth)
     def import_recording(body: ImportBody, store: Store = Depends(db)):
-        source = on_this_pc(body.path)
+        source = on_a_drive(body.path)
         if not source.is_file():
             raise HTTPException(status_code=400, detail="That file doesn't exist")
         try:
@@ -1588,10 +1588,21 @@ def create_app(token: str) -> FastAPI:
             return []
         return list(app.state.folder_watch.failures)
 
+    def folder_setting(store: Store, key: str) -> tuple[str, dict | None]:
+        """A saved folder as Settings shows it. One saved before Settings checked paths that
+        isn't used now (a network path) shows as off, and comes with which and why."""
+        saved = store.setting(key, "")
+        try:
+            return (str(paths.on_a_drive(saved, "folder")) if saved else ""), None
+        except ValueError as exc:
+            return "", {"folder": saved, "reason": str(exc)}
+
     @app.get("/api/settings", dependencies=auth)
     def get_settings(store: Store = Depends(db)):
         from .summarize import MODELS, PRICES, meeting_template, summary_model
 
+        export_folder, export_refused = folder_setting(store, "export_folder")
+        watch_folder, watch_refused = folder_setting(store, watchfolder.SETTING)
         # Not cached by the page: it holds your snippets and words.
         return JSONResponse(
             headers=NO_STORE,
@@ -1608,10 +1619,12 @@ def create_app(token: str) -> FastAPI:
                 ],
                 # The usual kind, as a summary would use it (a deleted one reads as general).
                 "summary_template": meeting_template(store, {"template": None}),
-                # A folder on another computer, saved before Settings checked them, is never
-                # used, so it shows as off.
-                "export_folder": str(paths.saved_folder(store.setting("export_folder")) or ""),
-                "watch_folder": str(paths.saved_folder(store.setting(watchfolder.SETTING)) or ""),
+                "export_folder": export_folder,
+                "watch_folder": watch_folder,
+                # A folder saved before Settings checked paths that isn't used (a network
+                # path): {"folder", "reason"}, for a notice in its row, else None.
+                "export_folder_refused": export_refused,
+                "watch_folder_refused": watch_refused,
                 # Files there that couldn't be imported, newest first, with the reason.
                 "watch_folder_failed": watch_failures(store),
                 "also_answer_to": store.setting(mentions.ALSO_ANSWER_TO, ""),

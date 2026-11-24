@@ -161,7 +161,8 @@ def _own_copies(folder: Path, meeting_id: int) -> list[Path]:
 
 
 def _export_folder(store: Store) -> Path | None:
-    """The export folder, if one is set and there now (never one on another computer)."""
+    """The export folder, if one is set and there now (not a mapped network drive that's
+    offline, and never a network path saved before Settings checked them)."""
     folder = paths.saved_folder(store.setting("export_folder"))
     return folder if folder is not None and folder.is_dir() else None
 
