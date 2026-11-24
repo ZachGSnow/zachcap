@@ -58,6 +58,14 @@ def test_patterns_that_cant_be_used_are_refused(written: str, reason: str):
         tickets.patterns(written)
 
 
+def test_a_typed_ticket_keeps_its_words_apart():
+    assert tickets.checked(" inc\u00a01234 ") == "INC 1234"  # a non-breaking space
+    assert tickets.checked("INC\t1234\u2003A\n") == "INC 1234 A"
+    assert tickets.checked("INC-12\u200b34\x07") == "INC-1234"  # characters that don't print
+    with pytest.raises(ValueError):
+        tickets.checked("x" * 41)
+
+
 def test_tickets_in_your_notes_fill_in_and_ones_only_heard_are_offered(store: Store, tmp_path):
     meeting_id = store.create_meeting("Printer down", "2026-11-23T09:00:00", tmp_path / "a")
     lines(store, meeting_id, "It's on ticket 19 24 086, I think.", "My cell is 5551234.")

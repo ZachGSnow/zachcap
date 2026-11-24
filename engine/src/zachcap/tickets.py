@@ -167,8 +167,13 @@ def fill(store, meeting_id: int) -> str | None:
 
 
 def checked(ticket: str) -> str:
-    """A ticket typed on a meeting's page, tidied. Raises ValueError if it can't be one."""
-    ticket = " ".join("".join(char for char in ticket if char.isprintable()).split())
+    """A ticket typed on a meeting's page, tidied: any run of spaces, tabs or other blanks
+    is one space, and characters that don't print are dropped. Raises ValueError if it
+    can't be one."""
+    shown = "".join(
+        " " if char.isspace() else char for char in ticket if char.isprintable() or char.isspace()
+    )
+    ticket = " ".join(shown.split())
     if len(ticket) > MAX_TICKET:
         raise ValueError(f"A ticket is at most {MAX_TICKET} characters")
     if "[" in ticket or "]" in ticket:
