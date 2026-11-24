@@ -19,5 +19,8 @@
   ${If} $UpdateMode <> 1
     Sleep 3000
     RMDir /r "$INSTDIR\engine\.venv"
+    ; The uninstaller tried these while the venv was still in them; only removed when empty.
+    RMDir "$INSTDIR\engine"
+    RMDir "$INSTDIR"
   ${EndIf}
 !macroend
