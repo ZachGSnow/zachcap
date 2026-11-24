@@ -8,7 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import type { LibraryAsk } from "@/hooks/useLibraryAsk";
 import { usePoll } from "@/hooks/usePoll";
 import { api, type Person } from "@/lib/engine";
-import { modelLabel } from "@/components/SummaryPanel";
+import { modelLabel } from "@/lib/writer";
 
 /** Questions about every meeting. Claude searches the transcripts, summaries and action
  * items with read-only tools and cites the moments, which open the meeting. */

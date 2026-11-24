@@ -64,10 +64,11 @@ import {
   type Settings,
   type Speaker,
 } from "@/lib/engine";
-import { attempt, copyText, reason } from "@/lib/feedback";
+import { announce, attempt, copyText, reason } from "@/lib/feedback";
 import { clock, colorMap, day, minutes, when } from "@/lib/format";
 import { kindShown, pickAfterSummary } from "@/lib/kinds";
 import { relatedKey } from "@/lib/related";
+import { modelLabel, writerFor, type Writer } from "@/lib/writer";
 import { StatusBadge } from "@/views/MeetingsView";
 
 type Track = "mix" | "mic" | "system";
@@ -130,6 +131,10 @@ export function MeetingView({
   // The kind of meeting picked for the summary; null leaves it to the engine (this meeting's
   // kind, or the usual kind from Settings).
   const [kind, setKind] = useState<string | null>(null);
+  // Who writes, when picked here: Claude or the model on this PC (null: the usual one).
+  const [writerPicked, setWriterPicked] = useState<Writer | null>(null);
+  // Asked of the model on this PC from here, and not done yet.
+  const [writingHere, setWritingHere] = useState(0);
   const [editingTitle, setEditingTitle] = useState(false);
   const [title, setTitle] = useState("");
   const [renaming, setRenaming] = useState<Speaker | null>(null);
@@ -158,7 +163,11 @@ export function MeetingView({
   // nothing reported means it was cut off (ZachCap closed mid-job) and can be run again.
   const processing = progress === "queued" || (meeting?.status === "processing" && progress != null && !failedNow);
   const stalled = !processing && (meeting?.status === "processing" || meeting?.status === "recorded");
-  useEffect(() => setBusy(processing), [processing]);
+  const writing = data?.writing ?? null;
+  const followed = processing || writing !== null || writingHere > 0;
+  useEffect(() => setBusy(followed), [followed]);
+  // Written on this PC for this meeting before its page was opened again: shown once done.
+  const summarizingHere = summarizing || writing?.what === "summary";
   // Other meetings about the same thing: asked for once this one is loaded, and again after each
   // change made on the page (its client, a name, a line).
   const relatedOf = relatedKey(data, processing);
@@ -305,20 +314,33 @@ export function MeetingView({
     summarizingNow.current = true;
     setTab("summary");
     setSummarizing(true);
-    const toastId = toast.loading("Summarizing with Claude...");
+    const by = writerFor(writerPicked, meeting?.private ?? false, settings);
+    const here = by === "local";
+    const toastId = here
+      ? toast("Writing the summary on this PC", { description: "It takes a few minutes. You can go on using ZachCap." })
+      : toast.loading("Summarizing with Claude...");
+    if (here) setWritingHere((count) => count + 1);
     const sent = kind;
     try {
-      await api(`/api/meetings/${id}/summary`, { method: "POST", json: { template: sent } });
-      toast.success("Summary ready", { id: toastId });
+      await api(`/api/meetings/${id}/summary`, { method: "POST", json: { template: sent, by } });
+      // Minutes later, the window may be behind others: said where it's seen.
+      if (here) void announce("Summary ready", meeting?.title, "success");
+      else toast.success("Summary ready", { id: toastId });
       await refresh();
       setKind((now) => pickAfterSummary(now, sent));
     } catch (error) {
-      toast.error("Couldn't create the summary", { id: toastId, description: reason(error) });
+      const why = reason(error);
+      if (here && why === "Stopped.") toast("Stopped", { description: "The summary wasn't changed." });
+      else toast.error("Couldn't create the summary", { id: here ? undefined : toastId, description: why });
     } finally {
       summarizingNow.current = false;
       setSummarizing(false);
+      if (here) setWritingHere((count) => count - 1);
     }
   };
+
+  const stopWriting = () =>
+    attempt("Couldn't stop it", () => api(`/api/meetings/${id}/writing/stop`, { method: "POST" }));
 
   const saveTitle = async () => {
     setEditingTitle(false);
@@ -409,7 +431,9 @@ export function MeetingView({
             ? "The summary was written before: regenerate it if it mentions this."
             : "",
       ];
-      const again = (done.summary_removed || done.has_summary) && !meeting?.private;
+      const again =
+        (done.summary_removed || done.has_summary) &&
+        writerFor(writerPicked, meeting?.private ?? false, settings) !== null;
       toast.success(`Redacted ${clock(start)} to ${clock(end)}`, {
         description: changed.filter(Boolean).join(" "),
         duration: 12_000,
@@ -507,6 +531,7 @@ export function MeetingView({
   const participants = named.filter((name) => !/^Speaker \d+|Call audio|Unknown/.test(name));
   const duration = meeting.duration ?? data.segments.at(-1)?.end ?? 0;
   const shownKind = kindShown(kind, meeting, settings?.summary_template);
+  const writer = writerFor(writerPicked, meeting.private ?? false, settings);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -591,9 +616,9 @@ export function MeetingView({
           </Badge>
         )}
         <StatusBadge meeting={meeting} />
-        {!data.summary && data.segments.length > 0 && !processing && !meeting.private && (
-          <Button size="sm" disabled={summarizing} onClick={() => void summarize()}>
-            {summarizing ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+        {!data.summary && data.segments.length > 0 && !processing && writer !== null && (
+          <Button size="sm" disabled={summarizingHere} onClick={() => void summarize()}>
+            {summarizingHere ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
             Summarize
           </Button>
         )}
@@ -745,7 +770,16 @@ export function MeetingView({
                 isPrivate={meeting.private ?? false}
                 onAllow={() => void savePrivate(false)}
                 onKindChange={setKind}
-                summarizing={summarizing}
+                writer={writer}
+                writerNames={{
+                  claude: modelLabel(settings?.summary_model ?? "") || "Claude",
+                  local: `${settings?.local_model ?? ""} on this PC`,
+                }}
+                onWriterChange={settings?.local_model && !meeting.private ? setWriterPicked : null}
+                writing={writing}
+                onWritingHere={(on) => setWritingHere((count) => count + (on ? 1 : -1))}
+                onStop={() => void stopWriting()}
+                summarizing={summarizingHere}
                 onSummarize={() => void summarize()}
                 onSeek={seek}
                 onChanged={() => void refresh()}

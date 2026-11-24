@@ -48,6 +48,7 @@ import {
   isTauri,
   type Devices,
   type KeyStatus,
+  type LocalModels,
   type PromptLibrary,
   type RecentDictation,
   type RefusedFolder,
@@ -63,6 +64,7 @@ import {
   type ShortcutStatus,
 } from "@/lib/shortcuts";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
+import { gigabytes, type Writer } from "@/lib/writer";
 
 const KEYS = [
   {
@@ -79,6 +81,8 @@ const KEYS = [
 
 type SettingsChange = Partial<{
   summary_model: string;
+  writer: Writer;
+  local_model: string;
   language: string;
   faster_speakers: boolean;
   mic_device: string;
@@ -467,6 +471,53 @@ function Select({
         </option>
       ))}
     </select>
+  );
+}
+
+/** The model on this PC that can write summaries: one of Ollama's, once it runs here. */
+function LocalModel({ chosen, onChoose }: { chosen: string; onChoose: (name: string) => void }) {
+  const { data: local, refresh } = usePoll(() => api<LocalModels>("/api/local-models"), 0);
+  const names = (local?.models ?? []).map((model) => model.name);
+  const get = `ollama pull ${local?.suggested ?? ""}`;
+  return (
+    <Row
+      label="Model on this PC"
+      help="Writes summaries and documents without sending anything: for private meetings, or for all of them. It needs Ollama (ollama.com), which runs models on this PC. A small model misses more than Claude, and without an NVIDIA GPU a ten-minute call takes it a few minutes."
+    >
+      {!local ? (
+        <span className="text-xs text-muted-foreground">Looking for Ollama...</span>
+      ) : local.models.length ? (
+        <Select
+          label="Model on this PC"
+          value={chosen}
+          onChange={onChoose}
+          options={[
+            { value: "", label: "None" },
+            // One that isn't there any more stays shown, so it's clear why it fails.
+            ...(chosen && !names.includes(chosen) ? [{ value: chosen, label: `${chosen} (not on this PC)` }] : []),
+            ...local.models.map((model) => ({ value: model.name, label: `${model.name} (${gigabytes(model.size)})` })),
+          ]}
+        />
+      ) : (
+        <div className="w-full space-y-2">
+          <p className="text-xs text-muted-foreground">
+            {local.running
+              ? `Ollama runs, but has no model yet. ${local.suggested} did best of the small ones tried (3.3 GB).`
+              : "Ollama isn't running on this PC. Install it from ollama.com, then get a model:"}
+          </p>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={() => void copyText(get, `Copied: ${get}`)}>
+              <Copy className="size-3.5" />
+              Copy command
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => void refresh()}>
+              <RefreshCw className="size-3.5" />
+              Look again
+            </Button>
+          </div>
+        </div>
+      )}
+    </Row>
   );
 }
 
@@ -918,6 +969,23 @@ export function SettingsView() {
               }))}
             />
           </Row>
+          <LocalModel chosen={settings?.local_model ?? ""} onChoose={(name) => void save({ local_model: name })} />
+          {settings?.local_model && (
+            <Row
+              label="Written by"
+              help="Who writes summaries and documents unless you pick the other on a meeting's page. Private meetings are always left to the model on this PC."
+            >
+              <Select
+                label="Written by"
+                value={settings.writer}
+                onChange={(value) => void save({ writer: value as Writer })}
+                options={[
+                  { value: "claude", label: "Claude" },
+                  { value: "local", label: `${settings.local_model} on this PC` },
+                ]}
+              />
+            </Row>
+          )}
           <Row
             label="Usual kind of meeting"
             help="What summaries focus on unless you pick another kind for a meeting: action items, a customer's asks, an incident's timeline... Automatic picks one for each meeting: from its title, its client or who was in it when they make it clear, else Claude Haiku reads the start of the transcript and picks (under a tenth of a cent, added to the summary's cost)."
