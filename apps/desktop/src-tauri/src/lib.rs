@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,6 +58,28 @@ struct Launch {
 
 /// Set while ZachCap exits, so the engine going away then isn't reported as a crash.
 static EXITING: AtomicBool = AtomicBool::new(false);
+
+/// The engine's log in the data folder (a debug build's engine prints to the terminal).
+const LOG: &str = "engine.log";
+/// The engine's log is emptied once it passes this; it's checked once a minute.
+const LOG_LIMIT: u64 = 20 * 1024 * 1024;
+
+/// Empties the engine's log once it passes `limit`, leaving a line that says so. The engine
+/// appends to it (see start_engine), so it carries on from the top, not past the old end.
+fn trim_log(log: &Path, limit: u64) {
+    if !std::fs::metadata(log).is_ok_and(|meta| meta.len() > limit) {
+        return;
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(log)
+        && file.set_len(0).is_ok()
+    {
+        let _ = writeln!(
+            file,
+            "[ZachCap] {LOG} passed {} MB and was emptied.",
+            limit / (1024 * 1024)
+        );
+    }
+}
 
 #[tauri::command]
 fn engine_info(engine: tauri::State<Engine>) -> Result<EngineInfo, String> {
@@ -688,13 +710,19 @@ fn start_engine(launch: &Launch, port: u16, token: &str) -> std::io::Result<Chil
         .env("ZACHCAP_PARENT_PID", std::process::id().to_string())
         .env("PYTHONUNBUFFERED", "1")
         .stdin(Stdio::null());
-    // A release build has no console, so the engine's output goes to a log instead.
+    // A release build has no console, so the engine's output goes to a log instead. The last
+    // run's log is kept as engine.previous.log, so why an engine stopped survives a restart;
+    // the new one is opened to append, so trim_log can empty it while the engine writes.
     #[cfg(not(debug_assertions))]
     {
         let folder = data_dir();
-        if let Ok(log) = std::fs::create_dir_all(&folder)
-            .and_then(|_| std::fs::File::create(folder.join("engine.log")))
-            && let Ok(copy) = log.try_clone()
+        let _ = std::fs::rename(folder.join(LOG), folder.join("engine.previous.log"));
+        if let Ok(log) = std::fs::create_dir_all(&folder).and_then(|_| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(folder.join(LOG))
+        }) && let Ok(copy) = log.try_clone()
         {
             command.stdout(copy).stderr(log);
         }
@@ -802,16 +830,22 @@ pub fn run() {
             });
             begin(app.handle().clone());
 
-            // Notice when the engine stops later (a crash), so the window can offer a restart.
+            // Notice when the engine stops later (a crash), so the window can offer a restart;
+            // and keep its log from growing without end (ZachCap runs for weeks in the tray).
             let handle = app.handle().clone();
             std::thread::spawn(move || {
+                let mut seconds: u64 = 0;
                 while !EXITING.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_secs(1));
+                    seconds += 1;
                     if let Some(engine) = handle.try_state::<Engine>()
                         && let Some(message) = check_engine(&engine)
                         && !EXITING.load(Ordering::Relaxed)
                     {
                         let _ = handle.emit("engine-exited", message);
+                    }
+                    if seconds % 60 == 0 {
+                        trim_log(&data_dir().join(LOG), LOG_LIMIT);
                     }
                 }
             });
@@ -948,6 +982,35 @@ pub fn run() {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_engine_log_is_emptied_past_its_limit_and_carries_on_from_the_top() {
+        let dir = std::env::temp_dir().join(format!("zachcap-log-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join(LOG);
+        // The engine's end of it, opened to append the way start_engine opens it.
+        let mut engine = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .unwrap();
+        engine.write_all(&[b'x'; 2048]).unwrap();
+        trim_log(&log, 4096);
+        assert_eq!(
+            std::fs::metadata(&log).unwrap().len(),
+            2048,
+            "under the limit"
+        );
+        engine.write_all(&[b'x'; 4096]).unwrap();
+        trim_log(&log, 4096);
+        engine.write_all(b"after\n").unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.starts_with("[ZachCap] engine.log passed"), "{text}");
+        // Appended after the note, not past the old end with a hole of zeros before it.
+        assert!(text.ends_with("was emptied.\nafter\n"), "{text:?}");
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn keys_the_engine_saves_parse_in_both_shell_parsers() {
