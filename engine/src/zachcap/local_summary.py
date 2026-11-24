@@ -1,4 +1,4 @@
-"""Summaries and documents written by a model on this PC (ollama.py): nothing of the meeting
+"""Summaries, documents and answers by a model on this PC (ollama.py): nothing of the meeting
 leaves it, so nothing is masked, and a private meeting can have them too.
 
 A model small enough for a laptop loses things in a long text, so a long transcript goes to it
@@ -34,6 +34,9 @@ ANSWER = 3000
 NOTES_CHARS = 12_000  # of the parts' notes, in the call that writes the overview from them
 BEFORE_MAX = 24  # decisions and open questions a part is read with, the latest
 DOCUMENT = 1500  # tokens of a document
+REPLY = 600  # tokens of an answer to a question
+HITS = 24  # lines looked up for a question about a meeting too long to read whole, and
+AROUND = 3  # the lines before and after each that come with it
 PICK_WORDS = 700  # from the start of the transcript, to tell the kind of meeting
 WORDS_CHARS = 600  # of the words to know
 SAME_TASK = 0.7  # of the words of the longer of two action items, when the shorter has no others
@@ -710,3 +713,95 @@ def document(
     if not text:
         raise ollama.Failed(f"{on.name} didn't write that.")
     return {"title": wanted["label"], "text": text, "model": PREFIX + on.name, "cost_usd": 0.0}
+
+
+# Questions ------------------------------------------------------------------------------------
+
+ASK_REMINDER = """
+
+Question: {question}
+
+Answer it from the meeting above only, in a few plain sentences, with the time of the line each \
+fact is from in square brackets, like [12:34]. If the meeting doesn't say, answer that it \
+doesn't."""
+
+
+def lines_about(store: Store, meeting_id: int, lines: list[Line], question: str) -> list[Line]:
+    """The lines to answer a question from: all of them when they fit, else the ones that say its
+    words, the best matches first, each with the lines around it, as many as fit; in order."""
+    if sum(len(line.said()) + 1 for line in lines) <= PART_CHARS * 1.25:
+        return lines
+    from .assistant import fts_query
+
+    at = {line.start: i for i, line in enumerate(lines)}
+    match = fts_query(question, any_word=True)
+    found = store.search_lines(match, HITS, meeting_id) if match else []
+    chosen: set[int] = set()
+    size = 0
+    for row in found:
+        middle = at.get(row["start"])
+        if middle is None:
+            continue
+        for i in range(max(0, middle - AROUND), min(len(lines), middle + AROUND + 1)):
+            if i not in chosen and size + len(lines[i].said()) <= PART_CHARS:
+                chosen.add(i)
+                size += len(lines[i].said()) + 1
+    return [lines[i] for i in sorted(chosen)]
+
+
+def answer(
+    store: Store,
+    meeting_id: int,
+    question: str,
+    model: str,
+    cancel: ollama.Cancel | None = None,
+) -> dict:
+    """Answers a question about one meeting with a model on this PC, as summarize.ask does."""
+    meeting = store.meeting(meeting_id)
+    lines = lines_of(store, meeting_id)
+    if not lines:
+        raise RuntimeError("This meeting has no transcript yet.")
+    about = lines_about(store, meeting_id, lines, question)
+    saved = store.summary(meeting_id)
+    if not about and saved is None:
+        raise RuntimeError(
+            "Nothing said in this meeting matches that, and it is too long for a model on this PC "
+            "to read whole. Ask with words that were said, or write the summary first."
+        )
+    me = store.me()["name"]
+    context = summarize.heading(meeting)
+    if saved is not None:
+        context += summarize.summary_block(saved["content"]) + "\n\n"
+    if about:
+        which = "Transcript" if len(about) == len(lines) else "Lines of the transcript"
+        context += transcript_block("\n".join(line.said() for line in about), which)
+    if len(about) == len(lines):
+        context += own_notes(store, meeting_id, me, 0.0, math.inf)
+    on = ollama.model(model)
+    writer = Writer(on, cancel or ollama.Cancel())
+    try:
+        text = writer.text(
+            summarize.ASK_SYSTEM.format(me=me) + spellings(store),
+            context + ASK_REMINDER.format(question=question),
+            None,
+            REPLY,
+        )
+    finally:
+        ollama.unload(on.name)
+    if not text:
+        raise ollama.Failed(f"{on.name} didn't answer that.")
+    return {"answer": cited(text, lines), "model": PREFIX + on.name, "cost_usd": 0.0}
+
+
+def cited(text: str, lines: list[Line]) -> str:
+    """An answer with the times of lines only: one a few seconds off is put right, and one that
+    no line is near to is left out."""
+
+    def checked(stamp: re.Match[str]) -> str:
+        at = to_seconds(stamp[1]) or 0.0
+        nearest = min(lines, key=lambda line: abs(int(line.start) - at))
+        near = abs(int(nearest.start) - at) <= 5
+        return f"[{summarize._clock(nearest.start)}]" if near else ""
+
+    text = re.sub(r"\[(\d{1,2}:\d{2}(?::\d{2})?)\]", checked, text)
+    return re.sub(r" +([.,;])", r"\1", text).strip()

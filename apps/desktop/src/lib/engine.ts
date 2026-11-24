@@ -147,9 +147,9 @@ export type TopicOverview = {
   meetings: { id: number; title: string; started_at: string; client: string | null; count: number }[];
 };
 
-/** A summary or document being written by the model on this PC (``by``): the part it's on, of
+/** A summary, document or answer being written by the model on this PC (``by``): the part it's on, of
  * how many (0: it waits for its turn; one past them: it puts them together). */
-export type Writing = { what: "summary" | "document"; by: string; part: number; of: number };
+export type Writing = { what: "summary" | "document" | "answer"; by: string; part: number; of: number };
 
 /** The models on this PC that could write (Ollama's), or why there are none. */
 export type LocalModels = {

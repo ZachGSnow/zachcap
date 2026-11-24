@@ -16,8 +16,8 @@ export function modelLabel(id: string): string {
 }
 
 /** What that took: nothing but time on this PC. */
-export function costLabel(model: string, usd: number): string {
-  return model.startsWith(LOCAL) ? "nothing sent" : `$${usd.toFixed(3)}`;
+export function costLabel(model: string, usd: number, digits = 3): string {
+  return model.startsWith(LOCAL) ? "nothing sent" : `$${usd.toFixed(digits)}`;
 }
 
 /** Who writes for a meeting: as picked on its page, else the usual one; for a private meeting
