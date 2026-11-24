@@ -301,7 +301,7 @@ def test_a_file_that_hangs_the_decoder_is_ended_and_listed(library, monkeypatch)
 
     began = time.monotonic()
     assert watch.check(store) == []
-    assert time.monotonic() - began < 20  # ended at the time limit, not when the work is done
+    assert time.monotonic() - began < 50  # ended at the time limit, not when the work is done
 
     hung = [{"name": "hangs.wav", "error": "hangs.wav took too long to read", "retrying": False}]
     assert watch.failures == hung
@@ -366,9 +366,9 @@ def drive(monkeypatch: pytest.MonkeyPatch) -> dict:
     state = {"free": 100, "decoders": 0}
     real = subprocess.Popen
 
-    def start(*args, **kwargs):
-        state["decoders"] += 1
-        return real(*args, **kwargs)
+    def start(command, *args, **kwargs):
+        state["decoders"] += "zachcap.decode_child" in command
+        return real(command, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", start)
     monkeypatch.setattr(

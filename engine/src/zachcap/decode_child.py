@@ -3,21 +3,24 @@ audio.IMPORTS) is decoded here, in a child process: a file that crashes or hangs
 only that process, and the engine reports it as the file's reason and carries on.
 
 The child is the engine's own Python running this module, isolated (``-I``: no current
-folder, PYTHONPATH or user site-packages on its path), with its folder and the file's path on
-its command line. It decodes as audio.decode_media does, with the same checks, caps and
-messages, and writes the audio to its folder as it goes (16 kHz mono int16), then a short
-JSON result: ok, refused (with the message for the user), no room (the file says it holds
-more audio than there's free space for), unwritten (the audio couldn't be written to the
-folder), unreadable (the file can't be read right now) or failed. Nothing comes back through
-a pipe, so nothing the child writes can fill the engine's memory, and the engine checks what
-it reads: the child may be running code from a crafted file. The folder is private to the
-user and removed whatever happens.
+folder, PYTHONPATH or user site-packages on its path), with the file's path on its command
+line. It decodes as audio.decode_media does, with the same checks, caps and messages, and
+writes the audio to its standard output as it goes (16 kHz mono int16). The last line of its
+errors is a short JSON result: ok, refused (with the message for the user), no room (the file
+says it holds more audio than there's free space for), unwritten (the audio couldn't be
+written), unreadable (the file can't be read right now) or failed. Both are files, not pipes,
+so nothing the child writes can fill the engine's memory, and the engine checks what it
+reads: the child may be running code from a crafted file.
 
-Decoding never fills the folder's drive, which a recording may be going to: audio.SPARE
-stays free on it. The child is told how much room there is besides, and turns away a file
-that says it holds more before decoding any of it; a file that says nothing, or something
-else than it holds, ends when the drive gets down to SPARE. Both are audio.NoRoom, which the
-watch folder tries again once there's room, not on every look.
+The two files are private to the user, and Windows deletes each with its last handle, the
+engine's or the child's, so no audio stays behind however the engine stops, short of the PC
+going off (which is what tidy is for).
+
+Decoding never fills their drive, which a recording may be going to: audio.SPARE stays free
+on it. The child is told how much room there is besides, and turns away a file that says it
+holds more before decoding any of it; a file that says nothing, or something else than it
+holds, ends when the drive gets down to SPARE. Both are audio.NoRoom, which the watch folder
+tries again once there's room, not on every look.
 
 The child runs in a Windows Job Object that ends it when the engine goes (kill on close, so
 none is left behind), lets it start no other process, caps its memory (MEMORY), and ends it
@@ -50,9 +53,9 @@ import numpy as np
 from . import audio
 
 MODULE = "zachcap.decode_child"  # what the child runs: this module
-AUDIO, RESULT, ERRORS = "audio.s16", "result.json", "errors.txt"  # in the child's folder
 SAMPLE = 2  # bytes: int16, which a FLAC holds as it is (float32 took twice the space)
 GO = b"go"  # on the child's stdin once it is in its job
+RESULT = "decoded: "  # what the line with its result starts with, in its errors
 # The time limits (_Patience): a minute of CPU time, and five minutes of waiting, without
 # getting anywhere. The first ends a file that hangs FFmpeg. The second allows for a network
 # drive that's slow to answer (Windows itself gives up on one after a minute or so) and for a
@@ -81,9 +84,11 @@ POLL = 0.25  # seconds between looks at how far the child has got
 # the file: the PC slept (the clock runs on meanwhile), or was too busy to look.
 LATE = 1.0
 GONE = 30.0  # the most to wait for an ended child to be gone (a network drive can hold it)
-# Folders a decode left when the engine stopped part-way (the job ended the child then) are
-# removed a day on.
-STALE = 24 * 3600.0
+# ZachCap 0.3.0 had a folder for each decode, with a file open in it nearly all the time. One
+# it left behind is removed, but not within ten minutes of a file coming or going in it, when
+# its decode may just be starting or ending.
+SETTLED = 600.0
+LEFT = "-left"  # what its name then ends with
 # Tests make the child misbehave part-way through a file with this ("crash", "hang", "stall"
 # or "unwritable"), to check that the engine copes.
 TEST_HOOK = "ZACHCAP_DECODE_TEST"
@@ -96,24 +101,23 @@ def decode(source: Path) -> np.ndarray:
     audio.NoRoom when there isn't the free space), OSError for a file that can't be read
     right now (in use, or on a drive that's offline; audio.Stalled if it stopped answering),
     and RuntimeError when the decoder couldn't start or failed some other way."""
+    tidy()
     try:
         root = _root()
-        _tidy(root)
         audio.check_room(source.name, root)
         room = shutil.disk_usage(root).free - audio.SPARE
-        folder = Path(tempfile.mkdtemp(dir=root))  # for this user (and administrators) only
+        out, said = tempfile.TemporaryFile(dir=root), tempfile.TemporaryFile(dir=root)
     except OSError as exc:  # not the file's doing: noted once, not tried on every look
         raise RuntimeError(f"the decoder couldn't start: {exc}") from exc
-    try:
-        return _collect(source, folder, room, _run(source, folder, room))
-    finally:
-        _remove(folder)
+    with out, said:
+        return _collect(source, out, said, room, _run(source, out, said, room))
 
 
-def _run(source: Path, folder: Path, room: int) -> int:
-    """Runs the child on ``source`` in a job of its own, with ``room`` bytes for the audio.
-    Returns its exit code, or raises what it ran out of (_wait), with the child ended. Raises
-    RuntimeError if it couldn't be started."""
+def _run(source: Path, out: BinaryIO, said: BinaryIO, room: int) -> int:
+    """Runs the child on ``source`` in a job of its own, with its output and its errors going
+    to ``out`` and ``said``, and ``room`` bytes for the first. Returns its exit code, or raises
+    what it ran out of (_wait), with the child ended. Raises RuntimeError if it couldn't be
+    started."""
     python, env = _interpreter()
     try:
         job = _Job()
@@ -121,16 +125,15 @@ def _run(source: Path, folder: Path, room: int) -> int:
         raise RuntimeError(f"the decoder couldn't start: {exc}") from exc
     try:
         try:
-            with open(folder / ERRORS, "wb") as errors:
-                child = subprocess.Popen(
-                    [python, "-I", "-X", "utf8", "-m", MODULE, str(folder), str(room), str(source)],
-                    bufsize=0,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=errors,
-                    env=env,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
+            child = subprocess.Popen(
+                [python, "-I", "-X", "utf8", "-m", MODULE, str(room), str(source)],
+                bufsize=0,
+                stdin=subprocess.PIPE,
+                stdout=out,
+                stderr=said,
+                env=env,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
         except OSError as exc:
             raise RuntimeError(f"the decoder couldn't start: {exc}") from exc
         try:
@@ -144,7 +147,7 @@ def _run(source: Path, folder: Path, room: int) -> int:
             except OSError:
                 pass  # it has stopped already: its exit code and errors say why
             child.stdin.close()
-            return _wait(child, job, source, folder)
+            return _wait(child, job, source, out)
         finally:
             child.stdin.close()
             if child.poll() is None:  # out of time or room, or the engine is stopping
@@ -152,12 +155,12 @@ def _run(source: Path, folder: Path, room: int) -> int:
             try:
                 child.wait(GONE)
             except subprocess.TimeoutExpired:
-                pass  # still letting go of a network drive: its folder is tidied later
+                pass  # still letting go of a network drive: its files go when it does
     finally:
         job.close()  # kills anything still in the job
 
 
-def _wait(child: subprocess.Popen, job: _Job, source: Path, folder: Path) -> int:
+def _wait(child: subprocess.Popen, job: _Job, source: Path, out: BinaryIO) -> int:
     """The child's exit code. Raises audio.Refused when it has used up its CPU time,
     audio.Stalled when it has waited for the file long enough, and audio.NoRoom once the
     drive is down to what's kept free on it."""
@@ -167,11 +170,11 @@ def _wait(child: subprocess.Popen, job: _Job, source: Path, folder: Path) -> int
             return child.wait(POLL)
         except subprocess.TimeoutExpired:
             pass
-        if _full(folder):
-            raise _no_room(source, folder)
+        if _full(out):
+            raise _no_room(source, out)
         now = time.monotonic()
         passed, last = min(now - last, LATE), now
-        patience.look(passed, *job.used(), _written(folder))
+        patience.look(passed, *job.used(), _written(out))
         if patience.busy <= 0:
             raise audio.Refused(f"{source.name} took too long to read")
         if patience.idle <= 0:
@@ -205,26 +208,23 @@ class _Patience:
         self.idle = min(self.idle - max(passed - used, 0.0) + got + came, IDLE)
 
 
-def _written(folder: Path) -> int:
+def _written(out: BinaryIO) -> int:
     """The bytes of audio the child has written so far."""
-    try:
-        return (folder / AUDIO).stat().st_size
-    except OSError:  # it hasn't got as far as the audio yet
-        return 0
+    return os.fstat(out.fileno()).st_size
 
 
-def _full(folder: Path) -> bool:
-    """Whether the folder's drive is down to what's kept free on it."""
+def _full(out: BinaryIO) -> bool:
+    """Whether the drive the audio goes to is down to what's kept free on it."""
     try:
-        return shutil.disk_usage(folder).free < audio.SPARE
+        return shutil.disk_usage(Path(out.name).parent).free < audio.SPARE
     except OSError:
         return False
 
 
-def _no_room(source: Path, folder: Path) -> audio.NoRoom:
+def _no_room(source: Path, out: BinaryIO) -> audio.NoRoom:
     """For a file that got the drive that full. It doesn't say how long it is (or not the
     truth), so the next try waits for twice the room it took this time."""
-    return audio.NoRoom(source.name, folder.parent, 2 * _written(folder))
+    return audio.NoRoom(source.name, Path(out.name).parent, 2 * _written(out))
 
 
 def _longest() -> int:
@@ -233,26 +233,26 @@ def _longest() -> int:
     return (audio.MAX_SECONDS + 1) * audio.RATE * SAMPLE
 
 
-def _collect(source: Path, folder: Path, room: int, code: int) -> np.ndarray:
+def _collect(source: Path, out: BinaryIO, said: BinaryIO, room: int, code: int) -> np.ndarray:
     """The audio the child wrote, or the reason it has none, as the exception to raise."""
-    result = _result(folder / RESULT)
-    if _full(folder) and (result is None or result.get("result") == "unwritten"):
-        raise _no_room(source, folder)  # for the audio, or even for the result
+    lines = _lines(said)
+    result = _result(lines)
+    if _full(out) and (result is None or result.get("result") == "unwritten"):
+        raise _no_room(source, out)  # for the audio, or even for the result
     if result is None:  # it ended without a word: a crash, or a Python that couldn't run it
-        why = _last_line(folder / ERRORS)
-        if why:
-            raise RuntimeError(f"the decoder stopped reading {source.name}: {why}")
+        if lines:
+            raise RuntimeError(f"the decoder stopped reading {source.name}: {_text(lines[-1])}")
         ended = f"0x{code:08X}" if code >= 0x80000000 else f"exit code {code}"
         raise audio.Refused(f"{source.name} crashed the decoder ({ended})")
     kind = result.get("result")
     if kind == "ok":
-        return _audio(source, folder / AUDIO)
+        return _audio(source, out)
     if kind == "refused":
         raise audio.Refused(_text(result.get("message")) or f"{source.name} couldn't be read")
     if kind == "no room":
         size = result.get("size")
         if isinstance(size, int) and room < size <= _longest():
-            raise audio.NoRoom(source.name, folder.parent, size)
+            raise audio.NoRoom(source.name, Path(out.name).parent, size)
         raise RuntimeError(f"the decoder couldn't tell how long {source.name} is")
     if kind == "unwritten":
         why = _text(result.get("message"))
@@ -262,24 +262,35 @@ def _collect(source: Path, folder: Path, room: int, code: int) -> np.ndarray:
     raise RuntimeError(_text(result.get("message")) or f"the decoder couldn't read {source.name}")
 
 
-def _result(path: Path) -> dict | None:
-    """The child's result, or None if it left none (or not a JSON object)."""
+def _lines(said: BinaryIO) -> list[str]:
+    """The last lines of the child's errors (a Python error, say, or its result)."""
     try:
-        with open(path, "rb") as file:
-            result = json.loads(file.read(64 * 1024))
-    except (OSError, ValueError, RecursionError):
+        said.seek(max(0, said.seek(0, os.SEEK_END) - 64 * 1024))
+        lines = said.read().decode("utf-8", "replace").splitlines()
+    except OSError:  # this file's, not the user's
+        return []
+    return [line.strip() for line in lines if line.strip()]
+
+
+def _result(lines: list[str]) -> dict | None:
+    """The child's result, or None if it left none (or not a JSON object)."""
+    line = next((line for line in reversed(lines) if line.startswith(RESULT)), RESULT)
+    try:
+        result = json.loads(line.removeprefix(RESULT))
+    except (ValueError, RecursionError):
         return None
     return result if isinstance(result, dict) else None
 
 
-def _audio(source: Path, path: Path) -> np.ndarray:
+def _audio(source: Path, out: BinaryIO) -> np.ndarray:
     """The audio the child wrote, once it's checked to be whole samples and no more than a
     file may hold."""
     try:
-        size = path.stat().st_size
+        size = _written(out)
         if size % SAMPLE == 0 and size <= _longest():
-            return np.fromfile(path, dtype="<i2").astype(np.int16, copy=False)
-    except OSError:
+            out.seek(0)
+            return np.fromfile(out, dtype="<i2").astype(np.int16, copy=False)
+    except OSError:  # this file's, not the user's
         pass
     raise RuntimeError(f"the decoder gave back audio for {source.name} that can't be used")
 
@@ -300,18 +311,6 @@ def _os_error(result: dict) -> OSError:
 def _text(value: object) -> str:
     """A message from the child, as text of a sensible length."""
     return value[:1000] if isinstance(value, str) else ""
-
-
-def _last_line(path: Path) -> str:
-    """The last line the child wrote to its errors (a Python error, say), or ''."""
-    try:
-        with open(path, "rb") as file:
-            file.seek(max(0, file.seek(0, os.SEEK_END) - 4096))
-            tail = file.read().decode("utf-8", "replace")
-    except OSError:
-        return ""
-    lines = [line.strip() for line in tail.splitlines() if line.strip()]
-    return _text(lines[-1]) if lines else ""
 
 
 def _interpreter() -> tuple[str, dict[str, str]]:
@@ -336,33 +335,45 @@ def _interpreter() -> tuple[str, dict[str, str]]:
 
 
 def _root() -> Path:
-    """Where the children's folders go: a folder of ZachCap's own in the temp folder."""
+    """Where the children's files go: a folder of ZachCap's own in the temp folder, for this
+    user (and administrators) only."""
     root = Path(tempfile.gettempdir()) / "zachcap-decoding"
     root.mkdir(mode=0o700, exist_ok=True)
     return root
 
 
-def _tidy(root: Path) -> None:
-    """Removes folders left by decodes the engine never finished, once they are STALE."""
-    for folder in root.iterdir():
+def tidy() -> None:
+    """Removes what decodes left behind: the PC went off during one, or ZachCap 0.3.0 was
+    stopped during one. At the engine's start, and before each decode. The files of a decode
+    under way, in this process or another, are open from the moment they're made until the
+    last process using them is gone, and what's open is left alone."""
+    try:
+        left = list(_root().iterdir())
+    except OSError:
+        return
+    for path in left:
         try:
-            if time.time() - folder.stat().st_mtime > STALE:
-                shutil.rmtree(folder)
+            if not path.is_dir():
+                _delete_unused(path)
+            elif path.name.endswith(LEFT):
+                shutil.rmtree(path)
+            elif time.time() - path.stat().st_mtime > SETTLED:
+                # Windows refuses to rename a folder with a file open in it.
+                shutil.rmtree(path.rename(path.with_name(path.name + LEFT)))
         except OSError:
             continue
 
 
-def _remove(folder: Path) -> None:
-    """Removes a child's folder, waiting a moment if a virus scanner is still looking at the
-    audio just written. One that stays (its child still ending) is tidied later."""
-    for _ in range(10):
-        try:
-            shutil.rmtree(folder)
-            return
-        except FileNotFoundError:
-            return
-        except OSError:
-            time.sleep(0.2)
+def _delete_unused(path: Path) -> None:
+    """Deletes a file that no process has open, or raises OSError: it's opened to be deleted
+    when closed, and shared with no one. (Plain deleting would take the name off a child's
+    file too, which is open to be deleted.)"""
+    kernel32 = _kernel32()
+    flags = FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT
+    handle = kernel32.CreateFileW(str(path), DELETE, 0, None, OPEN_EXISTING, flags, None)
+    if handle == INVALID_HANDLE_VALUE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    kernel32.CloseHandle(handle)
 
 
 # The Job Object ---------------------------------------------------------------------------
@@ -375,6 +386,11 @@ JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 JOB_OBJECT_ACCOUNTING, JOB_OBJECT_EXTENDED_LIMITS = 8, 9
 PROCESS_TERMINATE = 0x0001
 PROCESS_SET_QUOTA = 0x0100
+DELETE = 0x00010000
+OPEN_EXISTING = 3
+FILE_FLAG_DELETE_ON_CLOSE = 0x04000000
+FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000  # a link itself, never what it points to
+INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
 
 
 class IO_COUNTERS(ctypes.Structure):
@@ -447,6 +463,11 @@ def _kernel32() -> ctypes.WinDLL:
         (kernel32.OpenProcess, [DWORD, BOOL, DWORD], HANDLE),
         (kernel32.AssignProcessToJobObject, [HANDLE, HANDLE], BOOL),
         (kernel32.TerminateJobObject, [HANDLE, wintypes.UINT], BOOL),
+        (
+            kernel32.CreateFileW,
+            [wintypes.LPCWSTR, DWORD, DWORD, ctypes.c_void_p, DWORD, DWORD, HANDLE],
+            HANDLE,
+        ),
         (kernel32.CloseHandle, [HANDLE], BOOL),
     ):
         function.argtypes, function.restype = argtypes, restype
@@ -512,17 +533,13 @@ class _Job:
 
 
 def main() -> None:
-    """The child (started by _run): decodes the file named last on its command line into the
-    folder named first, where there's room for the bytes of audio named between them."""
-    folder, room, source = Path(sys.argv[1]), int(sys.argv[2]), Path(sys.argv[3])
+    """The child (started by _run): decodes the file named last on its command line to its
+    output, where there's room for the bytes of audio named first."""
+    room, source = int(sys.argv[1]), Path(sys.argv[2])
     if sys.stdin.buffer.read() != GO:
         return  # the engine went away before this process was in its job
-    try:
-        with open(folder / AUDIO, "wb") as out:
-            result = _decode(source, out, room)
-    except OSError as exc:  # opening or closing it: _decode says how the rest went
-        result = _unwritten(exc)
-    (folder / RESULT).write_text(json.dumps(result), encoding="utf-8")
+    result = _decode(source, sys.stdout.buffer, room)
+    print(RESULT + json.dumps(result), file=sys.stderr)
 
 
 class _TooBig(Exception):
@@ -584,7 +601,7 @@ def _decode(source: Path, out: BinaryIO, room: int) -> dict:
 
 
 def _unwritten(exc: OSError) -> dict:
-    """The audio couldn't be written out: why, without the path, a temporary file's."""
+    """The result when the audio couldn't be written."""
     return {"result": "unwritten", "message": exc.strerror or type(exc).__name__}
 
 

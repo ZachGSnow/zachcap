@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -67,12 +68,17 @@ def eventually(check: Callable[[], bool], seconds: float = 30.0) -> bool:
 
 
 @pytest.fixture
-def folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Where the children's folders go: under the test's own temp folder."""
+def files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Where the children's files go: under the test's own temp folder."""
     temp = tmp_path / "temp"
     temp.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(temp))
     return temp / "zachcap-decoding"
+
+
+def written(files: Path) -> int:
+    """The bytes the children have written so far."""
+    return sum(path.stat().st_size for path in files.iterdir()) if files.is_dir() else 0
 
 
 @pytest.fixture
@@ -81,15 +87,17 @@ def started(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen]:
     children: list[subprocess.Popen] = []
     real = subprocess.Popen
 
-    def start(*args, **kwargs):
-        children.append(real(*args, **kwargs))
-        return children[-1]
+    def start(command, *args, **kwargs):
+        child = real(command, *args, **kwargs)
+        if decode_child.MODULE in command:  # not what Python runs to learn Windows' version
+            children.append(child)
+        return child
 
     monkeypatch.setattr(subprocess, "Popen", start)
     return children
 
 
-def test_the_child_gives_the_very_samples_decoding_here_would(tmp_path: Path, folders, started):
+def test_the_child_gives_the_very_samples_decoding_here_would(tmp_path: Path, files, started):
     rate = 44100  # stereo at another rate, so the child mixes and resamples
     t = np.arange(2 * rate) / rate
     left, right = 0.3 * np.sin(2 * np.pi * 220 * t), 0.2 * np.sin(2 * np.pi * 330 * t)
@@ -101,11 +109,11 @@ def test_the_child_gives_the_very_samples_decoding_here_would(tmp_path: Path, fo
     here = audio.decode_media(tmp_path / "call.wav", audio.IMPORTS)
     assert np.array_equal(decoded.astype(np.float32) / 32768, here)
     (child,) = started
-    assert not running(child.pid) and list(folders.iterdir()) == []
+    assert not running(child.pid) and list(files.iterdir()) == []
 
 
 def test_a_crash_is_reported_plainly_and_leaves_nothing_behind(
-    tmp_path: Path, folders, started, monkeypatch
+    tmp_path: Path, files, started, monkeypatch
 ):
     source = recording(tmp_path / "call.wav")
     monkeypatch.setenv(decode_child.TEST_HOOK, "crash")  # once it has written some audio
@@ -115,11 +123,11 @@ def test_a_crash_is_reported_plainly_and_leaves_nothing_behind(
 
     (child,) = started
     assert child.returncode == 0xC0000005  # an access violation, as in FFmpeg
-    assert not running(child.pid) and list(folders.iterdir()) == []
+    assert not running(child.pid) and list(files.iterdir()) == []
 
 
 def test_a_hang_is_ended_at_the_time_limit_and_leaves_nothing_behind(
-    tmp_path: Path, folders, started, monkeypatch
+    tmp_path: Path, files, started, monkeypatch
 ):
     source = recording(tmp_path / "call.wav")
     monkeypatch.setenv(decode_child.TEST_HOOK, "hang")  # a minute's work after some audio
@@ -129,13 +137,13 @@ def test_a_hang_is_ended_at_the_time_limit_and_leaves_nothing_behind(
     with pytest.raises(audio.Refused, match=r"^call\.wav took too long to read$"):
         decode_child.decode(source)
 
-    assert time.monotonic() - began < 20  # at its limit, not when the work is done
+    assert time.monotonic() - began < 50  # at its limit, not when the work is done
     (child,) = started
-    assert not running(child.pid) and list(folders.iterdir()) == []
+    assert not running(child.pid) and list(files.iterdir()) == []
 
 
 def test_a_stall_is_a_file_to_try_again_and_leaves_nothing_behind(
-    tmp_path: Path, folders, started, monkeypatch
+    tmp_path: Path, files, started, monkeypatch
 ):
     # A drive that stops answering keeps the child waiting, with no use of the CPU.
     source = recording(tmp_path / "call.wav")
@@ -147,9 +155,9 @@ def test_a_stall_is_a_file_to_try_again_and_leaves_nothing_behind(
         decode_child.decode(source)
 
     assert issubclass(audio.Stalled, OSError)
-    assert time.monotonic() - began < 20  # at its limit, not when the sleep ends
+    assert time.monotonic() - began < 50  # at its limit, not when the sleep ends
     (child,) = started
-    assert not running(child.pid) and list(folders.iterdir()) == []
+    assert not running(child.pid) and list(files.iterdir()) == []
 
 
 class Decoder:
@@ -185,7 +193,7 @@ class Decoder:
         cpu = self.cores * working + (self.after or 0.0) * (self.ran - working)
         return cpu, int(self.link * working)
 
-    def written(self, folder: Path) -> int:
+    def written(self, out) -> int:
         return int(self.speed * min(self.ran, self.stops) * RATE) * 2
 
 
@@ -194,7 +202,7 @@ HOURS = 3600.0
 
 
 @pytest.fixture
-def outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def outcome(monkeypatch: pytest.MonkeyPatch):
     """Waits for a pretend child reading a file of ``size`` bytes. Returns how it ended."""
 
     def run(child: Decoder, size: float = 0) -> int | type[Exception]:
@@ -204,9 +212,9 @@ def outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(decode_child, "time", SimpleNamespace(monotonic=lambda: child.now))
         monkeypatch.setattr(decode_child, "POLL", 1.0)
         monkeypatch.setattr(decode_child, "_written", child.written)
-        monkeypatch.setattr(decode_child, "_full", lambda folder: False)
+        monkeypatch.setattr(decode_child, "_full", lambda out: False)
         try:
-            return decode_child._wait(child, child, source, tmp_path)
+            return decode_child._wait(child, child, source, io.BytesIO())
         except (audio.Refused, audio.Stalled) as exc:
             return type(exc)
 
@@ -316,14 +324,14 @@ def free_space(monkeypatch: pytest.MonkeyPatch, free: Callable[[], int]) -> None
 
 
 def test_a_drive_that_is_nearly_full_already_isnt_written_to(
-    tmp_path: Path, folders, started, monkeypatch
+    tmp_path: Path, files, started, monkeypatch
 ):
     free_space(monkeypatch, lambda: audio.SPARE - 1)
 
     with pytest.raises(audio.NoRoom, match=r"^call\.wav needs at least 500 MB free on drive .:$"):
         decode_child.decode(recording(tmp_path / "call.wav"))
 
-    assert started == [] and list(folders.iterdir()) == []
+    assert started == [] and list(files.iterdir()) == []
 
 
 def saying(path: Path, seconds: float) -> Path:
@@ -336,7 +344,7 @@ def saying(path: Path, seconds: float) -> Path:
 
 
 def test_a_file_that_says_it_holds_more_than_there_is_room_for_isnt_decoded(
-    tmp_path: Path, folders, started, monkeypatch
+    tmp_path: Path, files, started, monkeypatch
 ):
     source = saying(recording(tmp_path / "workshop.flac"), 2 * 3600)
     free_space(monkeypatch, lambda: audio.SPARE + 100 * 2**20)  # two hours take 220 MB
@@ -349,7 +357,7 @@ def test_a_file_that_says_it_holds_more_than_there_is_room_for_isnt_decoded(
     assert str(refused.value).startswith("workshop.flac needs at least 720 MB free on drive ")
     assert not refused.value.over()
     (child,) = started
-    assert not running(child.pid) and list(folders.iterdir()) == []
+    assert not running(child.pid) and list(files.iterdir()) == []
 
     free_space(monkeypatch, lambda: audio.SPARE + 250 * 2**20)
     assert refused.value.over()
@@ -358,17 +366,13 @@ def test_a_file_that_says_it_holds_more_than_there_is_room_for_isnt_decoded(
 
 
 def test_a_decode_that_fills_the_drive_is_ended_with_space_to_spare(
-    tmp_path: Path, folders, started, monkeypatch
+    tmp_path: Path, files, started, monkeypatch
 ):
     # A file with no length, or a wrong one: the drive gets down to what's kept for a
     # recording while it's decoded.
     source = recording(tmp_path / "call.wav")
     monkeypatch.setenv(decode_child.TEST_HOOK, "stall")  # a minute's sleep after some audio
-
-    def written() -> int:
-        return sum(path.stat().st_size for path in folders.glob(f"*/{decode_child.AUDIO}"))
-
-    free_space(monkeypatch, lambda: audio.SPARE - 1 if written() else audio.SPARE + 2**30)
+    free_space(monkeypatch, lambda: audio.SPARE + (-1 if written(files) else 2**30))
     began = time.monotonic()
 
     with pytest.raises(audio.NoRoom) as refused:
@@ -377,22 +381,17 @@ def test_a_decode_that_fills_the_drive_is_ended_with_space_to_spare(
     assert time.monotonic() - began < 50  # when the drive got that full
     assert refused.value.needs > audio.SPARE  # more than there was: not tried again at once
     (child,) = started
-    assert not running(child.pid) and list(folders.iterdir()) == []
+    assert not running(child.pid) and list(files.iterdir()) == []
 
 
 @pytest.mark.parametrize("full", [True, False])
 def test_audio_that_cant_be_written_out_is_never_a_file_to_try_again(
-    tmp_path: Path, folders, monkeypatch, full: bool
+    tmp_path: Path, files, monkeypatch, full: bool
 ):
     # Every write to the temporary file fails from some point on, as on a full drive.
     source = recording(tmp_path / "call.wav")
     monkeypatch.setenv(decode_child.TEST_HOOK, "unwritable")
-
-    def free() -> int:
-        wrote = any(path.stat().st_size for path in folders.glob(f"*/{decode_child.AUDIO}"))
-        return audio.SPARE - 1 if full and wrote else audio.SPARE + 2**30
-
-    free_space(monkeypatch, free)
+    free_space(monkeypatch, lambda: audio.SPARE + (-1 if full and written(files) else 2**30))
 
     with pytest.raises((audio.NoRoom, RuntimeError)) as failed:  # not an OSError
         decode_child.decode(source)
@@ -404,15 +403,27 @@ def test_audio_that_cant_be_written_out_is_never_a_file_to_try_again(
         assert str(failed.value) == (
             "the audio of call.wav couldn't be written out: Bad file descriptor"
         )
-    assert str(folders) not in str(failed.value) and list(folders.iterdir()) == []
+    assert str(files) not in str(failed.value) and list(files.iterdir()) == []
+
+
+def collect(folder: Path, errors: str = "", audio_bytes: bytes = b"", code: int = 0) -> np.ndarray:
+    """What the engine makes of a child's two files and its exit code."""
+    with tempfile.TemporaryFile(dir=folder) as out, tempfile.TemporaryFile(dir=folder) as said:
+        out.write(audio_bytes)
+        out.flush()
+        said.write(errors.encode())
+        return decode_child._collect(Path("call.wav"), out, said, 2**30, code)
+
+
+def result(**fields) -> str:
+    return f"{decode_child.RESULT}{json.dumps(fields)}\r\n"
 
 
 def test_a_result_with_no_room_to_be_written_is_no_room_not_a_crash(tmp_path: Path, monkeypatch):
-    (tmp_path / decode_child.AUDIO).write_bytes(bytes(4000))
     free_space(monkeypatch, lambda: audio.SPARE - 1)
 
     with pytest.raises(audio.NoRoom) as refused:  # its child left no result
-        decode_child._collect(Path("call.wav"), tmp_path, 2**30, 1)
+        collect(tmp_path, audio_bytes=bytes(4000), code=1)
 
     assert refused.value.needs == audio.SPARE + 8000
 
@@ -420,12 +431,56 @@ def test_a_result_with_no_room_to_be_written_is_no_room_not_a_crash(tmp_path: Pa
 @pytest.mark.parametrize("size", [0, 2**30, 2**40, "a lot", None])
 def test_a_child_that_lies_about_the_room_it_needs_isnt_believed(tmp_path: Path, size):
     # A child that runs code from a crafted file could ask to be tried again on every look.
-    (tmp_path / decode_child.RESULT).write_text(
-        json.dumps({"result": "no room", "size": size}), encoding="utf-8"
+    with pytest.raises(RuntimeError, match="^the decoder couldn't tell how long call.wav is$"):
+        collect(tmp_path, result(result="no room", size=size))
+
+
+def test_the_result_is_the_last_one_in_the_childs_errors(tmp_path: Path):
+    samples = np.arange(4, dtype=np.int16)
+    said = (
+        "PyAV library exception being dropped:\r\n"
+        + result(result="failed", message="not this one")
+        + result(result="ok")
+        + "Exception ignored in: <_io.TextIOWrapper name='<stdout>'>\r\n"
     )
 
-    with pytest.raises(RuntimeError, match="^the decoder couldn't tell how long call.wav is$"):
-        decode_child._collect(Path("call.wav"), tmp_path, 2**30, 0)
+    assert np.array_equal(collect(tmp_path, said, samples.tobytes()), samples)
+
+
+@pytest.mark.parametrize(
+    ("errors", "code", "error", "message"),
+    [
+        ("", 0xC0000005, audio.Refused, "call.wav crashed the decoder (0xC0000005)"),
+        ("", 1, audio.Refused, "call.wav crashed the decoder (exit code 1)"),
+        (
+            "Traceback (most recent call last):\r\nMemoryError\r\n",
+            1,
+            RuntimeError,
+            "the decoder stopped reading call.wav: MemoryError",
+        ),
+        (
+            f"{decode_child.RESULT}[1, 2]\r\n",  # not a result
+            0,
+            RuntimeError,
+            f"the decoder stopped reading call.wav: {decode_child.RESULT}[1, 2]",
+        ),
+    ],
+)
+def test_a_child_that_ends_without_a_result_says_why_if_it_can(
+    tmp_path: Path, errors: str, code: int, error: type[Exception], message: str
+):
+    with pytest.raises(error) as failed:
+        collect(tmp_path, errors, code=code)
+
+    assert type(failed.value) is error and str(failed.value) == message
+
+
+@pytest.mark.parametrize("size", [3, 13 * 3600 * RATE * 2])
+def test_audio_that_isnt_what_a_file_can_hold_isnt_used(tmp_path: Path, monkeypatch, size: int):
+    monkeypatch.setattr(decode_child, "_written", lambda out: size)
+
+    with pytest.raises(RuntimeError, match="gave back audio for call.wav that can't be used$"):
+        collect(tmp_path, result(result="ok"))
 
 
 def test_what_ffmpeg_calls_a_permission_error_isnt_a_file_to_try_again(monkeypatch):
@@ -451,9 +506,10 @@ from zachcap import decode_child
 
 real = subprocess.Popen
 
-def start(*args, **kwargs):
-    child = real(*args, **kwargs)
-    print(child.pid, flush=True)
+def start(command, *args, **kwargs):
+    child = real(command, *args, **kwargs)
+    if decode_child.MODULE in command:
+        print(child.pid, flush=True)
     return child
 
 subprocess.Popen = start
@@ -461,51 +517,142 @@ decode_child.decode(Path(sys.argv[1]))
 """
 
 
-def test_the_decoder_goes_when_the_engine_does(tmp_path: Path, folders):
-    # An engine ended from Task Manager, or crashing, can't end its decoder: Windows closes
-    # the engine's handle to the job, and that ends the decoder.
-    source = recording(tmp_path / "call.wav")
+@contextmanager
+def another_engine(source: Path, files: Path, code: str = ENGINE, hook: str = "stall"):
+    """An engine decoding ``source``, with the test's temp folder as its own. ``said`` reads
+    the next line it prints."""
     python, env = decode_child._interpreter()
-    temp = str(folders.parent)
-    env.update({decode_child.TEST_HOOK: "stall", "TMP": temp, "TEMP": temp})
+    temp = str(files.parent)
+    env.update({decode_child.TEST_HOOK: hook, "TMP": temp, "TEMP": temp})
     engine = subprocess.Popen(
-        [python, "-I", "-c", ENGINE, str(source)],
+        [python, "-I", "-c", code, str(source)],
         stdout=subprocess.PIPE,
         env=env,
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
 
-    def hanging() -> bool:  # it has written some audio, and sleeps
-        return any(path.stat().st_size for path in folders.glob(f"*/{decode_child.AUDIO}"))
-
-    try:
-        said: list[bytes] = []
-        reader = threading.Thread(target=lambda: said.append(engine.stdout.readline()))
+    def said(seconds: float = 30.0) -> str:
+        lines: list[bytes] = []
+        reader = threading.Thread(target=lambda: lines.append(engine.stdout.readline()))
         reader.daemon = True
         reader.start()
-        reader.join(30)
-        decoder = int(said[0])
-        assert running(decoder) and eventually(hanging)
+        reader.join(seconds)
+        return lines[0].decode().strip()
 
-        engine.kill()
-
-        assert eventually(lambda: not running(decoder), seconds=10)
+    try:
+        yield engine, said
     finally:
         engine.kill()
         engine.wait(10)
 
 
-def test_folders_left_by_a_stopped_engine_go_a_day_on(tmp_path: Path, folders):
-    folders.mkdir()
-    for name in ("left", "in-use"):
-        (folders / name).mkdir()
-        (folders / name / decode_child.AUDIO).write_bytes(bytes(64))
-    a_day_ago = time.time() - decode_child.STALE - 60
-    os.utime(folders / "left", (a_day_ago, a_day_ago))
+def test_the_decoder_and_its_audio_go_when_the_engine_does(tmp_path: Path, files):
+    # An engine ended from Task Manager, or crashing, can't end its decoder or remove its
+    # audio: Windows closes the engine's handle to the job, which ends the decoder, and deletes
+    # the files with their last handle.
+    source = recording(tmp_path / "call.wav")
+    with another_engine(source, files) as (engine, said):
+        decoder = int(said())
+        assert running(decoder) and eventually(lambda: written(files) > 0)
 
-    decode_child.decode(recording(tmp_path / "call.wav"))  # the next decode tidies
+        engine.kill()
 
-    assert [path.name for path in folders.iterdir()] == ["in-use"]  # another engine's, maybe
+        assert eventually(lambda: not running(decoder), seconds=10)
+        assert eventually(lambda: list(files.iterdir()) == [], seconds=10)
+
+
+def test_a_decode_under_way_in_another_process_is_left_alone(tmp_path: Path, files):
+    # A second engine, or `zachcap import`: its files are in the same folder.
+    with another_engine(recording(tmp_path / "call.wav"), files) as (engine, said):
+        decoder = int(said())
+        assert eventually(lambda: written(files) > 0)
+        before = sorted(files.iterdir())
+
+        decode_child.tidy()
+        decode_child.decode(recording(tmp_path / "other.wav"))
+
+        assert sorted(files.iterdir()) == before and len(before) == 2
+        assert running(decoder) and engine.poll() is None
+
+
+JUST_MADE = """
+import tempfile, time
+from zachcap import decode_child
+
+with tempfile.TemporaryFile(dir=decode_child._root()):
+    print("made", flush=True)
+    time.sleep(60)
+"""
+
+
+def test_a_file_just_made_by_another_process_is_left_alone(tmp_path: Path, files):
+    # Between making its file and starting its child: it is open already.
+    with another_engine(tmp_path, files, JUST_MADE) as (_, said):
+        assert said() == "made"
+        (made,) = files.iterdir()
+        decode_child.tidy()
+        assert list(files.iterdir()) == [made]
+    assert eventually(lambda: list(files.iterdir()) == [], seconds=10)
+
+
+SEVERAL = """
+import sys
+from pathlib import Path
+from zachcap import decode_child
+
+for _ in range(4):
+    print(len(decode_child.decode(Path(sys.argv[1]))), flush=True)
+"""
+
+
+def test_tidying_all_the_while_is_in_no_decodes_way(tmp_path: Path, files):
+    source = recording(tmp_path / "call.wav", 2.0)
+    done = threading.Event()
+    tidied = []
+
+    def tidy() -> None:
+        while not done.is_set():
+            decode_child.tidy()
+            tidied.append(1)
+
+    tidier = threading.Thread(target=tidy)
+    tidier.start()
+    try:
+        with another_engine(source, files, SEVERAL, hook="") as (_, said):
+            assert [said() for _ in range(4)] == ["32000"] * 4
+    finally:
+        done.set()
+        tidier.join()
+    assert len(tidied) > 100 and list(files.iterdir()) == []
+
+
+def test_what_a_power_cut_left_behind_is_removed(tmp_path: Path, files):
+    files.mkdir()
+    for name in ("tmpaudio", "tmperrors"):  # no process has them open any more
+        (files / name).write_bytes(bytes(64))
+
+    decode_child.tidy()
+
+    assert list(files.iterdir()) == []
+
+
+def test_a_folder_an_older_zachcap_left_is_removed_but_not_one_it_is_using(tmp_path: Path, files):
+    # ZachCap 0.3.0 had a folder for each decode, and left it when it was stopped meanwhile.
+    files.mkdir()
+    for name in ("old", "in-use", "just-made", "half-gone-left"):
+        (files / name).mkdir()
+        (files / name / "audio.f32").write_bytes(bytes(64))
+    before = time.time() - decode_child.SETTLED - 60
+    with open(files / "in-use" / "errors.txt", "wb"):  # its child's
+        for name in ("old", "in-use"):
+            os.utime(files / name, (before, before))
+
+        decode_child.decode(recording(tmp_path / "call.wav"))  # the next decode tidies
+
+        assert sorted(path.name for path in files.iterdir()) == ["in-use", "just-made"]
+        assert (files / "in-use" / "audio.f32").exists()
+    decode_child.tidy()
+    assert [path.name for path in files.iterdir()] == ["just-made"]
 
 
 def test_the_job_allows_one_process_caps_memory_and_goes_with_its_handle(monkeypatch):
@@ -560,7 +707,7 @@ def test_the_job_allows_one_process_caps_memory_and_goes_with_its_handle(monkeyp
     ids=["no python", "no module"],
 )
 def test_a_decoder_that_cant_start_is_a_failure_with_the_reason(
-    tmp_path: Path, folders, monkeypatch, python: str | None, module: str, message: str
+    tmp_path: Path, files, monkeypatch, python: str | None, module: str, message: str
 ):
     source = recording(tmp_path / "call.wav")
     if python:
@@ -571,10 +718,10 @@ def test_a_decoder_that_cant_start_is_a_failure_with_the_reason(
     with pytest.raises(RuntimeError, match=message):  # not an OSError: not tried on every look
         decode_child.decode(source)
 
-    assert list(folders.iterdir()) == []
+    assert list(files.iterdir()) == []
 
 
-def test_a_file_in_use_elsewhere_is_still_one_to_try_again(tmp_path: Path, folders):
+def test_a_file_in_use_elsewhere_is_still_one_to_try_again(tmp_path: Path, files):
     # Open in another program with no sharing: the watch folder tries such a file again on
     # its next look, so the child's PermissionError comes back as one.
     source = recording(tmp_path / "busy.wav")

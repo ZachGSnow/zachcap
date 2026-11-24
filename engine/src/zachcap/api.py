@@ -39,6 +39,7 @@ from . import (
     audio,
     autorecord,
     clients,
+    decode_child,
     diarize,
     dictation,
     digest,
@@ -2228,6 +2229,8 @@ def serve(port: int, token: str) -> None:
         target=app.state.call_watch.run_forever, name="zachcap-call-watch", daemon=True
     ).start()
     threading.Thread(target=app.state.look_for_gpu, name="zachcap-gpu-check", daemon=True).start()
+    # Audio a decode left in the temp folder when the PC went off, or an older ZachCap stopped.
+    threading.Thread(target=decode_child.tidy, name="zachcap-tidy", daemon=True).start()
     sock = listen_on(port)
     report_port(sock, os.environ.get("ZACHCAP_PORT_FILE"))
     uvicorn.Server(uvicorn.Config(app, log_level="warning")).run(sockets=[sock])
