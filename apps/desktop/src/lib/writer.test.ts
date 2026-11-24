@@ -31,6 +31,7 @@ describe("what is said of who wrote", () => {
     expect(modelLabel("ollama/qwen3.5:4b")).toBe("qwen3.5:4b on this PC");
     expect(modelLabel("claude-next")).toBe("claude-next");
     expect(costLabel("claude-opus-5-5", 0.0312)).toBe("$0.031");
+    expect(costLabel("claude-opus-5-5", 0.00123, 4)).toBe("$0.0012");
     expect(costLabel("ollama/qwen3.5:4b", 0)).toBe("nothing sent");
     expect(gigabytes(3_300_000_000)).toBe("3.3 GB");
   });

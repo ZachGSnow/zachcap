@@ -357,10 +357,10 @@ class Worker:
 
 
 class Writing:
-    """A summary or a document being written by the model on this PC: how far it is, and how
-    to stop it."""
+    """A summary, a document or an answer being written by the model on this PC: how far it
+    is, and how to stop it."""
 
-    def __init__(self, what: Literal["summary", "document"], by: str) -> None:
+    def __init__(self, what: Literal["summary", "document", "answer"], by: str) -> None:
         self.what = what
         self.by = by
         self.part = self.of = 0  # 0: waiting for its turn
@@ -866,6 +866,14 @@ def create_app(token: str) -> FastAPI:
         with only_job(meeting_id, "writing a document"):
             return write_here(store, meeting_id, "document", write)
 
+    def answer_here(store: Store, meeting_id: int, question: str) -> dict:
+        def write(run: Writing) -> dict:
+            run.at(1, 1)
+            return local_summary.answer(store, meeting_id, question, run.by, run.cancel)
+
+        with only_job(meeting_id, "answering a question"):
+            return write_here(store, meeting_id, "answer", write)
+
     def refuse_if_busy(meeting) -> None:
         """Changing a transcript while it is being recorded or (re)processed would be lost
         or would mix with the new results."""
@@ -1102,17 +1110,28 @@ def create_app(token: str) -> FastAPI:
 
     @app.post("/api/meetings/{meeting_id}/ask", dependencies=auth)
     def ask(meeting_id: int, body: QuestionBody, store: Store = Depends(db)):
+        """A question about one meeting: Claude answers, for a private one the model on this
+        PC."""
         from .summarize import ask as ask_claude
 
-        meeting_or_404(store, meeting_id)
-        if not body.question.strip():
+        meeting = meeting_or_404(store, meeting_id)
+        question = body.question.strip()
+        if not question:
             raise HTTPException(status_code=400, detail="Ask a question first")
+        here = privacy.is_private(store, meeting) and store.setting(local_summary.MODEL)
         try:
-            return ask_claude(store, meeting_id, body.question.strip())
+            if here:
+                return answer_here(store, meeting_id, question)
+            return ask_claude(store, meeting_id, question)
+        except ollama.Cancelled as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Claude request failed: {exc}") from exc
+            by = "local" if here else "claude"
+            raise HTTPException(status_code=502, detail=f"{failed(by)}: {exc}") from exc
 
     @app.post("/api/ask", dependencies=auth)
     def ask_library(body: LibraryQuestionBody, store: Store = Depends(db)):

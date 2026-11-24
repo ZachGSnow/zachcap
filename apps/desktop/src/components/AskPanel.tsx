@@ -6,13 +6,25 @@ import { Answer } from "@/components/Answer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/engine";
+import { reason } from "@/lib/feedback";
+import { costLabel } from "@/lib/writer";
 
-type Exchange = { id: number; question: string; answer?: string; cost?: number; failed?: boolean };
+type Exchange = { id: number; question: string; answer?: string; model?: string; cost?: number; failed?: boolean };
 
 const STARTERS = ["What did I commit to?", "What was decided?", "Were there any risks or blockers?", "Who owns the next steps?"];
 
 // Memoized: the panel stays mounted on the meeting page, which re-renders as audio plays.
-export const AskPanel = memo(function AskPanel({ meetingId, onSeek }: { meetingId: number; onSeek: (seconds: number) => void }) {
+/** Questions about one meeting. ``here`` is the model on this PC that answers for a private one
+ * (Claude answers for the others). */
+export const AskPanel = memo(function AskPanel({
+  meetingId,
+  here,
+  onSeek,
+}: {
+  meetingId: number;
+  here: string | null;
+  onSeek: (seconds: number) => void;
+}) {
   const [question, setQuestion] = useState("");
   const [history, setHistory] = useState<Exchange[]>([]);
   const [busy, setBusy] = useState(false);
@@ -28,13 +40,14 @@ export const AskPanel = memo(function AskPanel({ meetingId, onSeek }: { meetingI
     setBusy(true);
     setHistory((h) => [...h, { id, question: text.trim() }]);
     try {
-      const result = await api<{ answer: string; cost_usd: number }>(`/api/meetings/${meetingId}/ask`, {
+      const result = await api<{ answer: string; model: string; cost_usd: number }>(`/api/meetings/${meetingId}/ask`, {
         method: "POST",
         json: { question: text.trim() },
       });
-      update({ answer: result.answer, cost: result.cost_usd });
+      update({ answer: result.answer, model: result.model, cost: result.cost_usd });
     } catch (error) {
-      toast.error("Couldn't get an answer", { description: String(error) });
+      if (reason(error) === "Stopped.") toast("Stopped");
+      else toast.error("Couldn't get an answer", { description: reason(error) });
       update({ failed: true });
     } finally {
       inFlight.current = false;
@@ -51,7 +64,9 @@ export const AskPanel = memo(function AskPanel({ meetingId, onSeek }: { meetingI
           </div>
           <p className="mt-4 font-medium">Ask about this meeting</p>
           <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-            Claude answers from the transcript and cites the moments, so you can jump straight to them.
+            {here
+              ? `This meeting is private, so ${here} on this PC answers: nothing is sent, and it takes a minute or so. It cites the moments, so you can jump straight to them.`
+              : "Claude answers from the transcript and cites the moments, so you can jump straight to them."}
           </p>
           <div className="mt-4 flex flex-wrap justify-center gap-2">
             {STARTERS.map((starter) => (
@@ -77,7 +92,9 @@ export const AskPanel = memo(function AskPanel({ meetingId, onSeek }: { meetingI
                     onCite={(other, at) => (other == null || other === meetingId) && at != null && onSeek(at)}
                   />
                   {exchange.cost != null && (
-                    <div className="mt-1.5 text-[10px] text-muted-foreground">${exchange.cost.toFixed(4)}</div>
+                    <div className="mt-1.5 text-[10px] text-muted-foreground">
+                      {exchange.model ? costLabel(exchange.model, exchange.cost, 4) : null}
+                    </div>
                   )}
                 </>
               ) : exchange.failed ? (
@@ -86,6 +103,18 @@ export const AskPanel = memo(function AskPanel({ meetingId, onSeek }: { meetingI
                 <span className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="size-3.5 animate-spin" />
                   Reading the transcript...
+                  {here && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7"
+                      onClick={() =>
+                        void api(`/api/meetings/${meetingId}/writing/stop`, { method: "POST" }).catch(() => undefined)
+                      }
+                    >
+                      Stop
+                    </Button>
+                  )}
                 </span>
               )}
             </div>
