@@ -2,8 +2,9 @@ import { Ticket } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { Input } from "@/components/ui/input";
-import { api, type TicketFound } from "@/lib/engine";
-import { attempt } from "@/lib/feedback";
+import type { TicketFound } from "@/lib/engine";
+import { closing, saveShowing, type Closing } from "@/lib/inplace";
+import { ticketShown } from "@/lib/tickets";
 
 function found(suggestion: TicketFound): string {
   const where = suggestion.where.map(
@@ -19,35 +20,43 @@ function found(suggestion: TicketFound): string {
 /** The service ticket a meeting was about: shown and changed in its header. Ticket numbers
  * found in the meeting (Settings > Tickets says how they look) are offered to pick. */
 export function TicketControl({
-  meetingId,
   ticket,
   suggestions,
-  onChanged,
+  onSave,
 }: {
-  meetingId: number;
   ticket: string | null;
   suggestions: TicketFound[];
-  onChanged: () => void;
+  /** Saves it ("" takes it off); done once the engine has answered and the page has caught up. */
+  onSave: (ticket: string) => Promise<unknown>;
 }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
+  // What the box opened with (left as it was, nothing is saved), and a ticket being saved,
+  // shown until the save is over.
+  const [start, setStart] = useState("");
+  const [pending, setPending] = useState<string | null>(null);
+  // Closed once only: Enter, then the box's blur as it goes away, is one close.
+  const open = useRef(false);
   const button = useRef<HTMLButtonElement>(null);
-  // Back to the button after the box closes from the keyboard, not lost to the page.
-  const close = () => {
-    setEditing(false);
-    requestAnimationFrame(() => button.current?.focus());
-  };
+  const shown = ticketShown(ticket, pending, suggestions);
+  const refocus = () => requestAnimationFrame(() => button.current?.focus());
 
-  const save = async (next: string) => {
-    close();
-    if (next.trim() === (ticket ?? "")) return;
-    const saved = await attempt("Couldn't save the ticket", () =>
-      api(`/api/meetings/${meetingId}`, { method: "PATCH", json: { ticket: next.trim() } }),
-    );
-    if (saved) onChanged();
+  const finish = (how: Closing) => {
+    if (!open.current) return;
+    open.current = false;
+    setEditing(false);
+    const { save, refocus: back } = closing(how, start, value);
+    if (back) refocus();
+    if (save !== null) void saveShowing(save, onSave, setPending);
+  };
+  const pick = (suggested: string) => {
+    refocus(); // onto the ticket it becomes
+    void saveShowing(suggested, onSave, setPending);
   };
   const edit = () => {
-    setValue(ticket ?? "");
+    setValue(shown.start);
+    setStart(shown.start);
+    open.current = true;
     setEditing(true);
   };
 
@@ -60,16 +69,16 @@ export function TicketControl({
         aria-label="Ticket number"
         maxLength={40}
         onChange={(event) => setValue(event.target.value)}
-        onBlur={() => void save(value)}
+        onBlur={() => finish("blur")}
         onKeyDown={(event) => {
-          if (event.key === "Enter") void save(value);
-          if (event.key === "Escape") close();
+          if (event.key === "Enter") finish("Enter");
+          if (event.key === "Escape") finish("Escape");
         }}
         className="h-6 w-36 font-mono text-xs"
       />
     );
   }
-  if (ticket) {
+  if (shown.ticket) {
     return (
       <button
         ref={button}
@@ -78,16 +87,16 @@ export function TicketControl({
         className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-xs text-foreground transition-colors hover:bg-muted"
       >
         <Ticket className="size-3" />
-        {ticket}
+        {shown.ticket}
       </button>
     );
   }
   return (
     <span className="inline-flex items-center gap-1.5">
-      {suggestions.slice(0, 3).map((suggestion) => (
+      {shown.offered.map((suggestion) => (
         <button
           key={suggestion.ticket}
-          onClick={() => void save(suggestion.ticket)}
+          onClick={() => pick(suggestion.ticket)}
           title={`Use ticket ${suggestion.ticket}: ${found(suggestion)}`}
           className="inline-flex items-center gap-1 rounded-md border border-dashed px-1.5 py-0.5 font-mono text-xs transition-colors hover:bg-muted hover:text-foreground"
         >

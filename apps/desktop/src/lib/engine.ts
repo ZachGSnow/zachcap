@@ -26,6 +26,8 @@ export type Meeting = {
   /** Its client: set on it, or (inferred) the one its people all work for. */
   client?: string | null;
   client_inferred?: boolean;
+  /** Kept as it was when one of its people moved to another client, was merged or removed. */
+  client_kept?: boolean;
   /** Set on it by you: with no client, that's "no client". */
   client_set?: boolean;
 };

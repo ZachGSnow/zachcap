@@ -47,6 +47,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { usePoll } from "@/hooks/usePoll";
+import { clientHint, followsOffered } from "@/lib/clients";
 import {
   api,
   isTauri,
@@ -301,6 +302,24 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
     await refresh();
   };
 
+  /** The meeting's client ("" for none, null to take its people's again); done once the page
+   * shows what the engine stored. */
+  const saveClient = async (client: string | null) => {
+    const saved = await attempt("Couldn't save the client", () =>
+      api(`/api/meetings/${id}`, { method: "PATCH", json: { client } }),
+    );
+    if (saved) await refresh();
+  };
+
+  /** The service ticket it was about ("" takes it off); done once the page shows what the
+   * engine stored. */
+  const saveTicket = async (ticket: string) => {
+    const saved = await attempt("Couldn't save the ticket", () =>
+      api(`/api/meetings/${id}`, { method: "PATCH", json: { ticket } }),
+    );
+    if (saved) await refresh();
+  };
+
   // A file the user picks in the save dialog (or a download, outside the desktop app).
   const exportAs = (format: "md" | "txt" | "srt") =>
     attempt("Couldn't export the meeting", async () => {
@@ -488,22 +507,21 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
             {participants.length > 0 && <AvatarStack names={participants} colorOf={colorOf} max={5} />}
             <ClientField
               value={meeting.client ?? null}
-              inferred={meeting.client_inferred}
+              inferred={meeting.client_inferred || meeting.client_kept}
               known={data.clients_known ?? []}
               empty={meeting.client_set ? "No client" : "Add a client"}
-              hint={
-                meeting.client_inferred
-                  ? "The client the people in this meeting work for: click to set another"
-                  : meeting.client_set && !meeting.client
-                    ? "Set as not for a client: click to set one"
-                    : "The client this meeting was for: click to change it (empty: no client)"
-              }
-              onSave={(client) =>
-                void attempt("Couldn't save the client", () =>
-                  api(`/api/meetings/${meeting.id}`, { method: "PATCH", json: { client } }),
-                ).then((saved) => saved && void refresh())
-              }
+              hint={clientHint(meeting)}
+              onSave={saveClient}
             />
+            {followsOffered(meeting) && (
+              <button
+                onClick={() => void saveClient(null)}
+                title="Take the client the people in this meeting work for now"
+                className="text-xs transition-colors hover:text-foreground"
+              >
+                From its people
+              </button>
+            )}
             {!meeting.client &&
               !meeting.client_set &&
               (data.clients_heard ?? []).length > 1 &&
@@ -511,21 +529,16 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 <button
                   key={name}
                   title={`Its people work for more than one client: is it ${name}'s?`}
-                  onClick={() =>
-                    void attempt("Couldn't save the client", () =>
-                      api(`/api/meetings/${meeting.id}`, { method: "PATCH", json: { client: name } }),
-                    ).then((saved) => saved && void refresh())
-                  }
+                  onClick={() => void saveClient(name)}
                   className="rounded-md border border-dashed px-1.5 py-0.5 text-xs transition-colors hover:bg-muted hover:text-foreground"
                 >
                   {name}?
                 </button>
               ))}
             <TicketControl
-              meetingId={meeting.id}
               ticket={meeting.ticket ?? null}
               suggestions={data.ticket_suggestions ?? []}
-              onChanged={() => void refresh()}
+              onSave={saveTicket}
             />
           </div>
         </div>

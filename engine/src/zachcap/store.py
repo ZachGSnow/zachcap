@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import date, timedelta
 from difflib import SequenceMatcher
@@ -463,9 +463,16 @@ class Store:
         )
 
     def clear_results(self, meeting_id: int) -> None:
-        """Forget a meeting's transcript and speakers before processing it again."""
+        """Forget a meeting's transcript and speakers before processing it again, and a
+        client kept from those speakers: it follows the people found this time. A client
+        you set stays."""
         self.db.execute("DELETE FROM segments WHERE meeting_id = ?", (meeting_id,))
         self.db.execute("DELETE FROM meeting_speakers WHERE meeting_id = ?", (meeting_id,))
+        self.db.execute(
+            "UPDATE meetings SET client = NULL, client_source = NULL "
+            "WHERE id = ? AND client_source = 'auto'",
+            (meeting_id,),
+        )
         self._commit()
 
     def refresh_status(self, meeting_id: int) -> str:
@@ -818,29 +825,43 @@ class Store:
             result.setdefault(row["meeting_id"], []).append(row["name"])
         return result
 
-    def by_lines(self, name: str, compute):
-        """A value worked out from the lines, voices and people (the meeting list's
-        participants and clients), kept until one of them changes."""
+    def by_lines(
+        self,
+        name: str,
+        compute: Callable[[], dict[int, list[str]]],
+        meeting_ids: Iterable[int] | None = None,
+    ) -> dict[int, list[str]]:
+        """A value per meeting worked out from the lines, voices and people (the meeting
+        list's participants and clients), kept until one of them changes: for every meeting,
+        or only the ones asked for. Each caller gets its own copy, so nothing done with it
+        can change what's kept."""
         version = self.lines_version()
-        if version is None:
-            return compute()
         key = (str(self.path), name)
         with _by_lines_lock:
             kept = _by_lines.get(key)
-            if kept is not None and kept[0] == version:
-                return kept[1]
-        value = compute()
-        with _by_lines_lock:
-            _by_lines[key] = (version, value)
-        return value
+        if version is None or kept is None or kept[0] != version:
+            kept = (version, compute())
+            if version is not None:
+                with _by_lines_lock:
+                    _by_lines[key] = kept
+        value = kept[1]
+        wanted = value if meeting_ids is None else [m for m in meeting_ids if m in value]
+        return {meeting_id: list(value[meeting_id]) for meeting_id in wanted}
 
-    def meeting_clients(self) -> dict[int, list[str]]:
-        """The clients of the people named in each meeting (not you), most talkative first,
-        one spelling each; worked out once per change to the lines, voices or people."""
-        return self.by_lines("meeting_clients", self._meeting_clients)
+    def meeting_clients(self, meeting_ids: Iterable[int] | None = None) -> dict[int, list[str]]:
+        """The clients of the people named in each meeting (or in these), not you, most
+        talkative first, one spelling each. Worked out once per change to the lines, voices
+        or people, and kept with their case folded: they're written the way they are now,
+        which a meeting's own client can change."""
+        spelling = {name.casefold(): name for name in self.client_names()}
+        return {
+            meeting_id: [spelling.get(name, name) for name in names]
+            for meeting_id, names in self.by_lines(
+                "meeting_clients", self._meeting_clients, meeting_ids
+            ).items()
+        }
 
     def _meeting_clients(self) -> dict[int, list[str]]:
-        spelling = {name.casefold(): name for name in self.client_names()}
         seconds: dict[int, dict[str, float]] = {}
         for row in self.db.execute(
             "SELECT s.meeting_id, p.org, SUM(s.end - s.start) AS seconds FROM segments s "
@@ -853,23 +874,21 @@ class Store:
             per = seconds.setdefault(row["meeting_id"], {})
             per[name] = per.get(name, 0.0) + (row["seconds"] or 0.0)
         return {
-            meeting_id: [
-                spelling.get(name, name) for name in sorted(per, key=lambda n: (-per[n], n))
-            ]
+            meeting_id: sorted(per, key=lambda n: (-per[n], n))
             for meeting_id, per in seconds.items()
         }
 
     def client_names(self) -> list[str]:
-        """Every client named on a person or a meeting, alphabetically: one spelling each,
-        the one most used (an all-capitals one only when it's the only one)."""
+        """Every client named on a person (not you) or a meeting, alphabetically: one
+        spelling each, the one most used (an all-capitals one only when it's the only one)."""
         try:
             rows = self.db.execute(
-                "SELECT org AS name FROM people WHERE COALESCE(org, '') != '' "
+                "SELECT org AS name FROM people WHERE is_me = 0 AND COALESCE(org, '') != '' "
                 "UNION ALL SELECT client FROM meetings WHERE COALESCE(client, '') != ''"
             ).fetchall()
         except sqlite3.OperationalError:  # a library from before meetings had clients
             rows = self.db.execute(
-                "SELECT org AS name FROM people WHERE COALESCE(org, '') != ''"
+                "SELECT org AS name FROM people WHERE is_me = 0 AND COALESCE(org, '') != ''"
             ).fetchall()
         used = Counter(row["name"] for row in rows)
         best: dict[str, str] = {}
@@ -880,6 +899,44 @@ class Store:
     def set_client(self, person_id: int, client: str | None) -> None:
         self.db.execute("UPDATE people SET org = ? WHERE id = ?", (client or None, person_id))
         self._commit()
+
+    def meetings_counting(self, person_id: int) -> list[sqlite3.Row]:
+        """The meetings someone counts in for their client (named or recognized by voice,
+        not only suggested) that follow their people: no client set or kept on them."""
+        return self.db.execute(
+            "SELECT * FROM meetings WHERE client_source IS NULL AND COALESCE(client, '') = '' "
+            "AND id IN (SELECT meeting_id FROM meeting_speakers WHERE person_id = ? "
+            "AND status IN ('auto', 'confirmed'))",
+            (person_id,),
+        ).fetchall()
+
+    def keep_clients(self, kept: dict[int, str]) -> None:
+        """Meetings that keep the client they have now (meeting id -> client), whatever their
+        people do later; all of them or, if that fails, none. One set meanwhile wins."""
+        with self.transaction():
+            self.db.executemany(
+                "UPDATE meetings SET client = ?, client_source = 'auto' "
+                "WHERE id = ? AND client_source IS NULL",
+                [(client, meeting_id) for meeting_id, client in kept.items()],
+            )
+
+    def rename_client(self, name: str, spelling: str) -> None:
+        """A client's name written another way on every person and meeting that has it
+        (matched ignoring case, in Python: SQLite folds only ASCII)."""
+        wanted = name.casefold()
+        people = [
+            (spelling, row["id"])
+            for row in self.db.execute("SELECT id, org FROM people WHERE org IS NOT NULL")
+            if row["org"].casefold() == wanted
+        ]
+        meetings = [
+            (spelling, row["id"])
+            for row in self.db.execute("SELECT id, client FROM meetings WHERE client IS NOT NULL")
+            if row["client"].casefold() == wanted
+        ]
+        with self.transaction():
+            self.db.executemany("UPDATE people SET org = ? WHERE id = ?", people)
+            self.db.executemany("UPDATE meetings SET client = ? WHERE id = ?", meetings)
 
     def talk_time(self, meeting_id: int) -> list[sqlite3.Row]:
         return self.db.execute(

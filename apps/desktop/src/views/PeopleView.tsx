@@ -88,10 +88,9 @@ export function PeopleView({ onBrief }: { onBrief: (name: string) => void }) {
                           known={known}
                           hint="The client they work for: their meetings are that client's"
                           onSave={(client) =>
-                            void act(client ? `${person.name} works for ${client}` : `${person.name} has no client now`, async () => {
-                              await api(`/api/people/${person.id}/client`, { method: "PUT", json: { client } });
-                              await refreshKnown();
-                            })
+                            act(client ? `${person.name} works for ${client}` : `${person.name} has no client now`, () =>
+                              api(`/api/people/${person.id}/client`, { method: "PUT", json: { client } }),
+                            )
                           }
                         />
                       </div>
