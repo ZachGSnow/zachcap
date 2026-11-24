@@ -134,6 +134,21 @@ def test_the_answer_comes_back_with_the_meetings_it_cites(library, monkeypatch):
     assert calls["max_tokens"] == 16_000 and "final" not in calls
 
 
+def test_questions_are_masked_like_what_the_tools_find(library, monkeypatch):
+    store, cutover, budget = library
+    store.set_setting("mask_before_claude", "1")
+    calls = fake_runner(monkeypatch, [reply("Nobody did.")])
+
+    assistant.ask_everything(
+        store,
+        "Who wrote to dana@example.com?",
+        history=[{"question": "And 555-123-4567?", "answer": "Dana."}],
+    )
+
+    sent = [m["content"] for m in calls["messages"]]
+    assert sent[0] == "And [phone]?" and "Who wrote to [email]?" in sent[2]
+
+
 def test_out_of_lookups_claude_answers_with_what_it_found(library, monkeypatch):
     store, cutover, budget = library
     looking = reply("Let me look at the March meetings too.", stop="tool_use")

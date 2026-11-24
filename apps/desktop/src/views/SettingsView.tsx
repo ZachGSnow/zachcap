@@ -1141,7 +1141,7 @@ export function SettingsView() {
           </Row>
           <Row
             label="Mask contact details for Claude"
-            help="Emails, phone numbers and card numbers are replaced with [email], [phone] and [card number] in everything sent to Claude, including through the MCP server."
+            help="Emails, phone numbers and card numbers are replaced with [email], [phone] and [card number] in what Claude gets from your meetings and in your questions, including through the MCP server. Your own kinds of meeting and documents go as you wrote them."
           >
             <Switch
               className="ml-auto"

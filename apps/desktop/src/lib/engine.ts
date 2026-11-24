@@ -18,7 +18,8 @@ export type Meeting = {
   participants: string[];
   /** Lines by others that say your name. */
   mentions?: number;
-  /** The kind of meeting its summary was written as. */
+  /** The kind of meeting its summary was written as ("auto": no kind could be picked for it, so
+   * it was written as General and the next summary picks one). */
   template?: string | null;
   /** "auto" when ZachCap picked that kind (Automatic); otherwise it was chosen. */
   template_source?: string | null;
