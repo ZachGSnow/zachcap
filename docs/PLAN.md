@@ -1,6 +1,6 @@
 # ZachCap: local meeting recorder that knows who's talking
 
-Status: v0.2.0, installable from a GitHub release (see section 16) | started 2026-11-22 | Repo: `ZachGSnow/zachcap` (MIT)
+Status: v0.2.0 released (section 16); main has more since (section 17) | started 2026-11-22 | Repo: `ZachGSnow/zachcap` (MIT)
 
 ## 1. Goals and non-goals
 
@@ -416,23 +416,23 @@ release build's CSP were fixed in #59. All nine were fixed on 2026-11-24 (the la
 | S8 | Path endpoints take any path, including network (UNC) paths | Paths come from the shell's file dialogs; refuse UNC and device paths otherwise | #71 |
 | S9 | Speech models download by name with no pinned revision (pyannote loads pickles) | Pin `revision=` to the commits in use | #64 |
 
-Still open:
+Found since, and their state:
 
-| # | Risk | Fix |
-|---|---|---|
-| S10 | Exports and work logs no longer load images or HTML, but Obsidian plugins run code written in a note: Dataview inline JS (`` `$= ...` ``) and `dataviewjs` blocks, Templater commands (`<% %>`, `<%* %>`) when it processes new files, and Mermaid diagrams. Anyone on a call can put these in a line, a snapshot or a summary | In the same fields, break a code span that starts with `$=` or `=`, a code fence at the start of a line, and `<%` (as `<\%`); and say in Settings that the export folder shouldn't be a vault whose plugins run JavaScript from notes |
-| S11 | The rest of S2: media is still decoded in the engine's process, so a file that hangs FFmpeg blocks the watch folder (or an import) until a restart; it's only kept from being read again | Decode in a child process under a Job Object with a time limit |
-| S12 | The installer isn't code-signed: SmartScreen warns on download, and on a PC with Smart App Control on, Windows blocks the speech libraries' unsigned DLLs, so the engine can't start | Sign the installer and the exe; document Smart App Control until the libraries can be trusted another way |
+| # | Risk | Fix | Done |
+|---|---|---|---|
+| S10 | Exports and work logs no longer load images or HTML, but Obsidian plugins run code written in a note: Dataview inline JS (`` `$= ...` ``) and `dataviewjs` blocks, Templater commands (`<% %>`, `<%* %>`) when it processes new files, and Mermaid diagrams. Anyone on a call can put these in a line, a snapshot or a summary | In the same fields, break a code span that starts with `$=` or `=`, a code fence at the start of a line, and `<%` (as `<\%`); and say in Settings that the export folder shouldn't be a vault whose plugins run JavaScript from notes | #78 |
+| S11 | The rest of S2: media is still decoded in the engine's process, so a file that hangs FFmpeg blocks the watch folder (or an import) until a restart; it's only kept from being read again | Decode in a child process under a Job Object with a time limit | #79 |
+| S12 | The installer isn't code-signed: SmartScreen warns on download, and on a PC with Smart App Control on, Windows blocks the speech libraries' unsigned DLLs, so the engine can't start | Sign the installer and the exe; document Smart App Control until the libraries can be trusted another way | open |
 
 ### Features still to build
 
-From section 14: picking the kind of meeting automatically, related past calls (local
+From section 14: related past calls (local
 embeddings), summaries on this PC (a local model, for incidents), vocabulary from documents,
 and automatic screen
 snapshots (waiting on a decision about its privacy guardrails: which windows, how often, how
 long the pictures are kept).
 
-Built and held for the next release (tests pass, not yet tried in the running app): a live transcript panel over the call (`feat/live-transcript`; on by default only with a CUDA GPU) and picking the kind of meeting automatically (`feat/auto-meeting-kind`: local clues first, then one small Claude call).
+Built since v0.2.0 and merged (section 17): the live transcript and picking the kind of meeting automatically.
 
 ### Housekeeping
 
@@ -455,3 +455,16 @@ of #54 and #61 and the security review of 2026-11-23 are closed out.
 | Calls that record themselves, reviewed (#70) | The 13 findings of a review of #61: a recording with a note, a bookmark, a snapshot or the other side heard is never deleted on its own; Stop mid-call doesn't start a new recording; recordings the engine started always stop with their call; the end-of-call stop waits for quiet; events survive an engine restart (see the Capture health row in section 12) | Each reproduced first on a fake clock running the real call and recording watches, and through the API |
 | Clients, reviewed (#69) | C1-C10 (see the Clients row in section 12), and the ticket box's look-alikes | A test that failed first for each; 1,500 meetings: 0.54 s to 0.02 s |
 | PCs without an NVIDIA GPU (#66) | Transcription on the CPU uses one thread per physical core (faster-whisper uses 4 unless told) | On the Ryzen AI 5 340 (6 cores), the synthetic two-track meeting: large-v3-turbo 23.8 -> 20.9 min per meeting hour, same words. Speaker separation on that CPU: about 35 min per meeting hour at pyannote's default step (kept for accuracy; a coarser step was 19 or 8 min). A full meeting hour on that PC: about an hour of processing, in the background |
+
+## 17. Added after v0.2.0 (2026-11-24)
+
+On main, not yet in a release. Each through its own pull request with CI's jobs run locally and
+the push gate; the features were tried in a test build installed on the second PC (no NVIDIA GPU).
+
+| Area | What | How it was checked |
+|---|---|---|
+| Live transcript (#77) | A small panel over the call while recording: each person's words a second or two after they stop, You for the mic and Call for the computer's audio, in the order said. The meeting model on a CUDA GPU (meetings being processed get the GPU first), else the small dictation model on half the CPU's cores; never a download during a call. The recorder only queues audio for it (at most 120 s per track). The speakers heard through the mic are left out: a stretch whose loudness follows the call's, or, while the call plays, a line both Whisper and Silero doubt. Always on top, never takes the keyboard, left out of screen shares; on by default only with a CUDA GPU (Settings > Live panel during calls) | In the running app on the second PC with two Windows voices through the speakers: every Call line near word for word, the panel opening and closing with the recording. The first build showed four You lines nobody said (the mic hearing the speakers); after the fix, replays of that recording with both models showed none, kept every Call line, and kept real short answers mixed into the mic even as quiet as the leak; the next live run showed no leak, and its two You lines matched sound in the room (the mic at -44 to -46 dB while the leak sat at -60 dB), which the meeting's own transcript heard too |
+| Kind of meeting, picked automatically (#75) | "Automatic" (the default for a library that never chose a usual kind): clear local clues first (a title naming the kind, a client, two people), else one Haiku 5.5 call on the title and the start of the transcript, marked as data; any failure gives General. The summary panel says "Picked automatically"; a kind chosen on a meeting is never overridden | Unit tests with Claude stubbed; in the running app with the real API, a synthetic weekly sync about a cutover: "Picked automatically: Project status", the summary with the pick $0.031 |
+| Installer, hardened (#76) | The installer carries a wheel of ZachCap built at release time, so setup installs only the locked, hash-checked libraries and that wheel, offline (no build tool fetched on the user's PC); an engine that won't start gets set up again on Try again; quitting during setup stops uv; the startup screen waits as long as the shell; uninstalling leaves no folder behind | On the second PC: uninstall (program, venv, shortcut and entry gone; meetings kept), a fresh install whose first start installed 142 packages from uv's cache in 4.5 s and then the wheel, and an update |
+| Obsidian plugin text (S10, #78) | In exports, work logs and the page's summary copy, other people's words can't run Templater (`<%`), open a code block (no `dataviewjs`, `mermaid`) or start a Dataview inline query (`` `= `` / `` `$= ``); Settings says the export folder shouldn't be in a vault whose plugins run code from notes | Tests in Python and TypeScript with the same inputs; 150,135 random inputs gave identical output in both and nothing markdown-it parses as a trigger |
+| Decoding in a separate process (S11, #79) | Media brought in (Import, `zachcap import`, the watch folder) is decoded by a child Python under a Job Object (killed with the engine, one process, 4 GB) with a time limit (60 s plus half the audio's length); audio comes back through a private temp folder; crashes and hangs are plain messages, and the watch folder doesn't read such a file again until it changes or Retry | Tests with a real access violation and a sleep in the child; in the installed app, a 2.4-minute WAV imported through the Import dialog with no process or temp folder left |
