@@ -23,7 +23,7 @@ import { Label } from "@/components/ui/label";
 import { useLibraryAsk } from "@/hooks/useLibraryAsk";
 import { usePoll } from "@/hooks/usePoll";
 import { api, connect, isTauri, waitForEngine, type Meeting, type Stats } from "@/lib/engine";
-import { notify } from "@/lib/feedback";
+import { notify, reason } from "@/lib/feedback";
 import { ActionsView } from "@/views/ActionsView";
 import { AskView } from "@/views/AskView";
 import { MeetingView } from "@/views/MeetingView";
@@ -133,7 +133,7 @@ function ImportDialog({ path, onClose, onImported }: { path: string | null; onCl
       onImported(meeting_id);
       onClose();
     } catch (error) {
-      toast.error("Couldn't import", { description: String(error) });
+      toast.error("Couldn't import", { description: reason(error) });
     } finally {
       setBusy(false);
     }

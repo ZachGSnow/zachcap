@@ -50,6 +50,7 @@ import {
   type KeyStatus,
   type PromptLibrary,
   type RecentDictation,
+  type RefusedFolder,
   type Settings,
 } from "@/lib/engine";
 import { attempt, copyText, reason } from "@/lib/feedback";
@@ -100,15 +101,33 @@ type SettingsChange = Partial<{
   watch_existing: boolean;
 }>;
 
+/** A folder saved before Settings checked paths that isn't used (a network path): its row
+ * shows it as off, and this says which folder and why, with a way to forget it. */
+function RefusedFolderNotice({ refused, onForget }: { refused: RefusedFolder; onForget: () => void }) {
+  return (
+    <div className="flex items-start gap-2 px-4 py-2.5 text-xs text-amber-700 dark:text-amber-300">
+      <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+      <span className="min-w-0 flex-1">
+        <code className="break-all font-mono">{refused.folder}</code> is off. {refused.reason}.
+      </span>
+      <Button size="sm" variant="outline" className="h-6 shrink-0 px-2 text-xs" onClick={onForget}>
+        Forget it
+      </Button>
+    </div>
+  );
+}
+
 /** A folder whose recordings import themselves. Choosing one asks once about the
  * recordings already there (only new ones, unless you say so). */
 function WatchFolderRow({
   folder,
+  refused,
   failed,
   onSave,
   onRetried,
 }: {
   folder: string;
+  refused: RefusedFolder | null;
   failed: Settings["watch_folder_failed"];
   onSave: (change: SettingsChange) => Promise<void>;
   /** After Retry: Settings reads the list again. */
@@ -116,7 +135,7 @@ function WatchFolderRow({
 }) {
   const [asking, setAsking] = useState<{ path: string; count: number } | null>(null);
   // Files that aren't recordings ZachCap can read wait for a change or Retry; files that
-  // couldn't be opened (in use, a share offline) are tried on every look anyway.
+  // couldn't be opened (in use, a mapped network drive offline) are tried on every look anyway.
   const broken = failed.filter((file) => !file.retrying);
   const busy = failed.filter((file) => file.retrying);
 
@@ -154,7 +173,7 @@ function WatchFolderRow({
     <>
       <Row
         label="Watch folder"
-        help="Recordings saved here (a softphone's or phone system's exports, Teams recordings you download) import themselves within a minute. ZachCap only reads them."
+        help="Recordings saved here (a softphone's or phone system's exports, Teams recordings you download) import themselves within a minute. ZachCap only reads them. For a folder on a server, map the share to a drive letter in File Explorer first."
       >
         <code className="min-w-0 flex-1 truncate font-mono text-xs" title={folder || undefined}>
           {folder || "Off"}
@@ -176,6 +195,7 @@ function WatchFolderRow({
           </Button>
         )}
       </Row>
+      {refused && <RefusedFolderNotice refused={refused} onForget={() => void onSave({ watch_folder: "" })} />}
       {broken.length > 0 && (
         <div className="flex items-start gap-2 px-4 py-2.5 text-xs text-amber-700 dark:text-amber-300">
           <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
@@ -1058,6 +1078,12 @@ export function SettingsView() {
               </Button>
             )}
           </Row>
+          {settings?.export_folder_refused && (
+            <RefusedFolderNotice
+              refused={settings.export_folder_refused}
+              onForget={() => void save({ export_folder: "" })}
+            />
+          )}
           {settings?.export_folder && (
             <Row
               label="Work logs there too"
@@ -1073,6 +1099,7 @@ export function SettingsView() {
           )}
           <WatchFolderRow
             folder={settings?.watch_folder ?? ""}
+            refused={settings?.watch_folder_refused ?? null}
             failed={settings?.watch_folder_failed ?? []}
             onSave={save}
             onRetried={refresh}

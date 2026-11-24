@@ -84,9 +84,9 @@ def test_attached_files_go_to_claude_labelled_and_offer_tickets(
     assert note.status_code == 200 and note.json()["kind"] == "file"
     assert note.json()["text"].startswith("spooler.log\nTicket 1924086")
     refused = client.post(
-        f"/api/meetings/{meeting_id}/attach", headers=AUTH, json={"path": "x.png"}
+        f"/api/meetings/{meeting_id}/attach", headers=AUTH, json={"path": str(tmp_path / "x.png")}
     )
-    assert refused.status_code == 400
+    assert refused.status_code == 400 and "isn't a text file" in refused.json()["detail"]
 
     text = summarize.notes_text(store, meeting_id)
     assert "Files You attached to the meeting" in text

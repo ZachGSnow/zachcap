@@ -253,6 +253,9 @@ export type Insights = {
 
 export type KeyStatus = Record<"anthropic" | "huggingface", string>;
 
+/** A saved folder that isn't used, as it was saved, and why (the engine's words). */
+export type RefusedFolder = { folder: string; reason: string };
+
 export type Settings = {
   summary_model: string;
   summary_models: { id: string; label: string; input_usd: number; output_usd: number }[];
@@ -265,8 +268,12 @@ export type Settings = {
   export_folder: string;
   /** Recordings saved here import themselves; "" when off. */
   watch_folder: string;
+  /** A folder saved before Settings checked paths that isn't used (a network path): it
+   * shows as off, and this says which and why. */
+  export_folder_refused: RefusedFolder | null;
+  watch_folder_refused: RefusedFolder | null;
   /** Files there that couldn't be imported, newest first. `retrying`: it couldn't be read
-   * (in use, or the network share was away), and is tried again on its own. */
+   * (in use, or a mapped network drive was offline), and is tried again on its own. */
   watch_folder_failed: { name: string; error: string; retrying: boolean }[];
   /** Other names you answer to, comma-separated (for "said your name"). */
   also_answer_to: string;
