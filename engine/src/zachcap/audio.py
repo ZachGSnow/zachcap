@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import soundfile as sf
-from scipy.signal import resample_poly
 
 if TYPE_CHECKING:
     from av.container import InputContainer
@@ -48,7 +47,9 @@ IMPORTS = Allowed(
         "pcm_mulaw,pcm_alaw,gsm_ms,adpcm_ima_wav,adpcm_ms,g722,g726,g729"
     ),
 )
-# ZachCap's own tracks: FLAC chunks, or a single FLAC or WAV file.
+# ZachCap's own tracks: FLAC chunks, or a single FLAC or WAV file. These are decoded in the
+# engine's own process (load_track, the playback cache, redaction): ZachCap wrote them
+# itself. Media the user brings in (IMPORTS) is decoded in a child process (decode_child).
 TRACKS = Allowed(formats="flac,wav", decoders="flac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le")
 # Well past any meeting recording: Teams ends one at 4 hours or 1.5 GB and starts another,
 # and 8 GB is 12 hours of video at about 1.5 Mbps. Twelve hours of audio is 2.8 GB once
@@ -59,7 +60,8 @@ MAX_SECONDS = 12 * 3600
 
 class Refused(ValueError):
     """A file ZachCap won't import: of a kind it doesn't read, with no audio or audio it
-    doesn't read, or too big or too long. The message says which, for the user."""
+    doesn't read, too big or too long, or one that crashed the decoder or took it too long
+    to read (decode_child). The message says which, for the user."""
 
 
 def load_mono_16k(path: Path) -> np.ndarray:
@@ -73,6 +75,10 @@ def load_mono_16k(path: Path) -> np.ndarray:
         return decode_media(path)
     mono = audio.mean(axis=1)
     if rate != RATE:
+        # Imported here: scipy takes most of a second to load, which the decoder's child
+        # process (decode_child), started for every import, never needs.
+        from scipy.signal import resample_poly
+
         g = gcd(rate, RATE)
         mono = resample_poly(mono, RATE // g, rate // g).astype(np.float32)
     return mono
@@ -164,15 +170,15 @@ def open_media(path: Path, allowed: Allowed) -> Iterator[InputContainer]:
             yield container
 
 
-def decode_media(source: Path, allowed: Allowed = TRACKS) -> np.ndarray:
-    """The first audio stream of a media file as 16 kHz mono float32, from ZachCap's own
-    tracks unless ``allowed`` says otherwise. Raises Refused for a file open_media won't
-    open, one with no audio or with audio that isn't allowed, and one that holds over
-    MAX_SECONDS of audio."""
+def decode_pieces(source: Path, allowed: Allowed) -> Iterator[np.ndarray]:
+    """The first audio stream of a media file as 16 kHz mono int16, a piece at a time as
+    FFmpeg decodes it. Raises Refused for a file open_media won't open, one with no audio or
+    with audio that isn't allowed, and one that holds over MAX_SECONDS of audio (once that
+    much has come out, if the file doesn't say so first)."""
     import av
 
     too_long = f"{source.name} is over {MAX_SECONDS // 3600} hours, too long to import"
-    chunks = []
+    pieces = 0
     with open_media(source, allowed) as container:
         stream = next((s for s in container.streams if s.type == "audio"), None)
         if stream is None:
@@ -189,14 +195,22 @@ def decode_media(source: Path, allowed: Allowed = TRACKS) -> np.ndarray:
         kept = 0
         for frame in container.decode(stream):
             for out in resampler.resample(frame):
-                chunks.append(out.to_ndarray().reshape(-1))
+                pieces += 1
                 kept += out.samples
+                yield out.to_ndarray().reshape(-1)
             if kept > MAX_SECONDS * RATE:
                 raise Refused(too_long)
-        chunks += [out.to_ndarray().reshape(-1) for out in resampler.resample(None)]
-    if not chunks:
+        for out in resampler.resample(None):
+            pieces += 1
+            yield out.to_ndarray().reshape(-1)
+    if not pieces:
         raise Refused(f"{source.name} has no audio")
-    audio = np.concatenate(chunks).astype(np.float32)
+
+
+def decode_media(source: Path, allowed: Allowed = TRACKS) -> np.ndarray:
+    """The first audio stream of a media file as 16 kHz mono float32, from ZachCap's own
+    tracks unless ``allowed`` says otherwise. Raises Refused as decode_pieces does."""
+    audio = np.concatenate(list(decode_pieces(source, allowed))).astype(np.float32)
     audio /= 32768.0  # in place, so hours of audio aren't held twice
     return audio
 
@@ -208,9 +222,13 @@ def import_media(
     wav...) to a 16 kHz mono FLAC, optionally keeping only start..end. Returns the kept
     length in seconds. Raises Refused, with the reason, for a file it won't read.
 
-    Decoding uses PyAV (FFmpeg built in), so no separate FFmpeg install is needed.
+    Decoding uses PyAV (FFmpeg built in), so no separate FFmpeg install is needed. It runs
+    in a child process (decode_child), so a file that crashes or hangs FFmpeg ends only that
+    process, never the engine.
     """
-    audio = decode_media(source, IMPORTS)
+    from .decode_child import decode  # imported here: it imports this module
+
+    audio = decode(source)
     first = int((parse_time(start) or 0) * RATE)
     last = parse_time(end)
     audio = audio[first : int(last * RATE) if last is not None else None]

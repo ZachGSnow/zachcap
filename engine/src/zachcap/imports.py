@@ -13,7 +13,7 @@ from .store import Store
 
 # The kinds of file the Import dialog offers (audio, or video with an audio track). FFmpeg
 # reads a file only as one of these, whatever it is named, and decodes only the audio in it
-# (audio.IMPORTS).
+# (audio.IMPORTS), in a child process with a time limit (decode_child).
 MEDIA = {".mp4", ".m4a", ".mp3", ".wav", ".flac", ".ogg", ".webm", ".mkv", ".aac", ".wma", ".mov"}
 
 # Teams names its recordings "<title>-20261027_090709-Meeting Recording.mp4".

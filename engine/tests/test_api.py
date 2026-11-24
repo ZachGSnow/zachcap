@@ -98,6 +98,22 @@ def test_an_import_that_is_refused_says_why(client: TestClient, tmp_path: Path):
     assert client.get("/api/stats", headers=AUTH).json()["meetings"] == 0
 
 
+def test_an_import_that_crashes_the_decoder_says_so(
+    client: TestClient, tmp_path: Path, monkeypatch
+):
+    import numpy as np
+    import soundfile as sf
+
+    sf.write(tmp_path / "call.wav", np.zeros(16000, np.float32), 16000)
+    monkeypatch.setenv("ZACHCAP_DECODE_TEST", "crash")  # its decoder crashes part-way
+
+    crashed = client.post("/api/import", headers=AUTH, json={"path": str(tmp_path / "call.wav")})
+
+    assert crashed.status_code == 400
+    assert crashed.json()["detail"] == "call.wav crashed the decoder (0xC0000005)"
+    assert client.get("/api/stats", headers=AUTH).json()["meetings"] == 0  # and the engine is up
+
+
 def test_there_are_no_open_docs_pages(client: TestClient):
     for path in ("/docs", "/redoc", "/openapi.json"):
         assert client.get(path).status_code == 401  # the gate: no token, no answer
