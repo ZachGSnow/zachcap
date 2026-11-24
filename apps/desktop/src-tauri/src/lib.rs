@@ -1338,6 +1338,178 @@ fn follow_engine(app: AppHandle) {
     });
 }
 
+/// How long after it stopped by itself the engine is started again, each time within
+/// REVIVE_WITHIN; after the last it's left to the Restart button.
+const REVIVE_AFTER: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+];
+const REVIVE_WITHIN: Duration = Duration::from_secs(3600);
+
+/// Starts the engine again when it stops by itself (a crash) after having run. The engine
+/// keeps the recording that was cut off, and records the rest of a call app's call. One that
+/// doesn't start isn't tried again, and neither is one that keeps stopping.
+#[derive(Default)]
+struct Revival {
+    /// It ran at the last look.
+    running: bool,
+    /// It has said its port since it was started.
+    ran: bool,
+    /// It was recording when last seen running.
+    recording: bool,
+    /// When to start it again.
+    due: Option<std::time::Instant>,
+    /// Started again by itself, and hasn't said its port yet; whether it had been recording.
+    reviving: Option<bool>,
+    /// When it was started again by itself.
+    tries: Vec<std::time::Instant>,
+}
+
+/// What a look at the engine finds to do (Revival::look).
+#[derive(Debug, PartialEq)]
+enum Found {
+    Nothing,
+    /// It stopped, and will be started again by itself or not.
+    Stopped {
+        restarting: bool,
+    },
+    /// It's time to start it again.
+    Start,
+    /// It was started again by itself, and runs.
+    Back {
+        recording: bool,
+    },
+}
+
+impl Revival {
+    /// Once a second: `running` (its process is there), `ready` (it has said its port),
+    /// `starting` (a start is under way, by itself or with a button), `recording` (as last
+    /// seen).
+    fn look(
+        &mut self,
+        running: bool,
+        ready: bool,
+        starting: bool,
+        recording: bool,
+        now: std::time::Instant,
+    ) -> Found {
+        let stopped = self.running && !running;
+        self.running = running;
+        if running || starting {
+            self.due = None; // whoever started it
+            if !(running && ready) {
+                return Found::Nothing;
+            }
+            self.ran = true;
+            self.recording = recording;
+            return match self.reviving.take() {
+                Some(recording) => Found::Back { recording },
+                None => Found::Nothing,
+            };
+        }
+        if std::mem::take(&mut self.ran) {
+            self.tries
+                .retain(|&tried| now.duration_since(tried) < REVIVE_WITHIN);
+            self.due = REVIVE_AFTER.get(self.tries.len()).map(|&wait| now + wait);
+            return Found::Stopped {
+                restarting: self.due.is_some(),
+            };
+        }
+        if stopped || self.reviving.take().is_some() {
+            self.reviving = None; // it never got as far as saying its port
+            return Found::Stopped { restarting: false };
+        }
+        if self.due.is_some_and(|due| now >= due) {
+            self.due = None;
+            self.tries.push(now);
+            self.reviving = Some(self.recording);
+            return Found::Start;
+        }
+        Found::Nothing
+    }
+}
+
+/// What the window is told when the engine stopped by itself.
+#[derive(Clone, Serialize)]
+struct EngineExit {
+    /// Why, and where its log is.
+    message: String,
+    /// It's being started again by itself.
+    restarting: bool,
+    /// It was recording.
+    recording: bool,
+}
+
+/// Once a second: notices that the engine stopped by itself (a crash), says so in the window
+/// (or a Windows notification when that isn't in front), and starts it again.
+fn watch_engine(app: &AppHandle, revival: &mut Revival) {
+    let (Some(engine), Some(follow)) = (app.try_state::<Engine>(), app.try_state::<Follow>())
+    else {
+        return;
+    };
+    check_engine(&engine);
+    let running = engine.child.lock().unwrap().is_some();
+    let ready = engine.info.lock().unwrap().is_some();
+    let starting = engine.starting.load(Ordering::SeqCst);
+    let recording = follow.0.lock().unwrap().meeting.is_some();
+    let found = revival.look(
+        running,
+        ready,
+        starting,
+        recording,
+        std::time::Instant::now(),
+    );
+    if EXITING.load(Ordering::Relaxed) {
+        return;
+    }
+    match found {
+        Found::Nothing => {}
+        Found::Stopped { restarting } => {
+            let message = engine.stopped.lock().unwrap().clone().unwrap_or_default();
+            let recording = revival.recording;
+            let _ = app.emit(
+                "engine-exited",
+                EngineExit {
+                    message,
+                    restarting,
+                    recording,
+                },
+            );
+            if !restarting {
+                tell_about_engine(
+                    app,
+                    "ZachCap's engine stopped",
+                    "Nothing is recorded until it runs again: open ZachCap to restart it.",
+                );
+            }
+        }
+        Found::Start => begin(app.clone()),
+        Found::Back { recording } => {
+            let _ = app.emit("engine-restarted", recording);
+            tell_about_engine(
+                app,
+                "ZachCap's engine stopped and was started again",
+                if recording {
+                    "What it had recorded is kept, and a call in Teams or another call app goes on \
+                     in a new recording. Check that it's recording."
+                } else {
+                    "It wasn't recording."
+                },
+            );
+        }
+    }
+}
+
+/// A Windows notification about the engine, when the main window isn't in front to show it.
+fn tell_about_engine(app: &AppHandle, title: &str, body: &str) {
+    if main_in_front(app) {
+        return;
+    }
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
 fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -1413,20 +1585,16 @@ pub fn run() {
             app.manage(Follow(Mutex::new(Following::default())));
             follow_engine(app.handle().clone());
 
-            // Notice when the engine stops later (a crash), so the window can offer a restart;
-            // and keep its log from growing without end (ZachCap runs for weeks in the tray).
+            // Notice when the engine stops later (a crash), and start it again; and keep its
+            // log from growing without end (ZachCap runs for weeks in the tray).
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let mut seconds: u64 = 0;
+                let mut revival = Revival::default();
                 while !EXITING.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_secs(1));
                     seconds += 1;
-                    if let Some(engine) = handle.try_state::<Engine>()
-                        && let Some(message) = check_engine(&engine)
-                        && !EXITING.load(Ordering::Relaxed)
-                    {
-                        let _ = handle.emit("engine-exited", message);
-                    }
+                    watch_engine(&handle, &mut revival);
                     if seconds % 60 == 0 {
                         trim_log(&data_dir().join(LOG), LOG_LIMIT);
                     }
@@ -1725,6 +1893,110 @@ mod tests {
         assert_eq!(panel_after(&mut seen, true, Some(9), false), Some(false));
         assert_eq!(panel_after(&mut seen, false, None, false), None);
         assert_eq!(panel_after(&mut seen, true, Some(10), false), None);
+    }
+
+    /// Looks at an engine once a second, as watch_engine does.
+    struct Watched {
+        revival: Revival,
+        start: std::time::Instant,
+        seconds: u64,
+    }
+
+    impl Watched {
+        fn new() -> Self {
+            let start = std::time::Instant::now();
+            Watched {
+                revival: Revival::default(),
+                start,
+                seconds: 0,
+            }
+        }
+
+        fn look(&mut self, running: bool, ready: bool, starting: bool, recording: bool) -> Found {
+            self.seconds += 1;
+            let now = self.start + Duration::from_secs(self.seconds);
+            self.revival.look(running, ready, starting, recording, now)
+        }
+
+        /// Runs and then crashes: whether it's started again by itself, and after how long.
+        fn crash(&mut self, recording: bool) -> Option<u64> {
+            assert_eq!(self.look(true, true, false, recording), Found::Nothing);
+            let found = self.look(false, true, false, recording); // its port is still known
+            if found == (Found::Stopped { restarting: false }) {
+                assert_eq!(self.look(false, true, false, recording), Found::Nothing);
+                return None;
+            }
+            assert_eq!(found, Found::Stopped { restarting: true });
+            let stopped = self.seconds;
+            loop {
+                match self.look(false, true, false, recording) {
+                    Found::Nothing => assert!(self.seconds < stopped + 100),
+                    Found::Start => return Some(self.seconds - stopped),
+                    other => panic!("{other:?}"),
+                }
+            }
+        }
+
+        fn comes_back(&mut self, recording: bool) {
+            assert_eq!(self.look(false, false, true, recording), Found::Nothing);
+            assert_eq!(self.look(true, false, true, recording), Found::Nothing);
+            let back = Found::Back { recording };
+            // What it was doing when it stopped, whatever it does now.
+            assert_eq!(self.look(true, true, false, !recording), back);
+            assert_eq!(self.look(true, true, false, recording), Found::Nothing);
+        }
+    }
+
+    #[test]
+    fn an_engine_that_crashes_is_started_again_a_few_times_with_longer_waits() {
+        let mut watched = Watched::new();
+        for (recording, wait) in [(true, 1), (false, 5), (true, 30)] {
+            assert_eq!(watched.crash(recording), Some(wait));
+            watched.comes_back(recording);
+        }
+        assert_eq!(watched.crash(true), None); // it keeps stopping: the button, then
+        // Restarted with the button, it runs for hours: the next crash is a first one again.
+        assert_eq!(watched.look(true, false, true, false), Found::Nothing);
+        assert_eq!(watched.look(true, true, false, false), Found::Nothing);
+        watched.seconds += 2 * 3600;
+        assert_eq!(watched.crash(false), Some(1));
+    }
+
+    #[test]
+    fn an_engine_that_cant_start_isnt_tried_again_and_again() {
+        // Never said its port: the startup screen has it (Try again), and the setup its chance.
+        let mut watched = Watched::new();
+        assert_eq!(watched.look(false, false, true, false), Found::Nothing);
+        assert_eq!(watched.look(true, false, true, false), Found::Nothing);
+        let stopped = Found::Stopped { restarting: false };
+        assert_eq!(watched.look(false, false, false, false), stopped);
+        assert_eq!(watched.look(false, false, false, false), Found::Nothing);
+
+        // Started again after a crash, and then it doesn't start.
+        let mut watched = Watched::new();
+        assert_eq!(watched.crash(true), Some(1));
+        assert_eq!(watched.look(true, false, true, true), Found::Nothing);
+        assert_eq!(watched.look(false, false, false, true), stopped);
+        assert_eq!(watched.look(false, false, false, true), Found::Nothing);
+        // Or there isn't even a process (the setup failed).
+        let mut watched = Watched::new();
+        assert_eq!(watched.crash(true), Some(1));
+        assert_eq!(watched.look(false, false, false, true), stopped);
+        assert_eq!(watched.look(false, false, false, true), Found::Nothing);
+    }
+
+    #[test]
+    fn a_restart_with_the_button_comes_first() {
+        let mut watched = Watched::new();
+        assert_eq!(watched.look(true, true, false, true), Found::Nothing);
+        let stopped = Found::Stopped { restarting: true };
+        assert_eq!(watched.look(false, true, false, true), stopped);
+        assert_eq!(watched.look(false, false, true, true), Found::Nothing); // pressed
+        assert_eq!(watched.look(true, false, true, true), Found::Nothing);
+        assert_eq!(watched.look(true, true, false, true), Found::Nothing);
+        for _ in 0..40 {
+            assert_eq!(watched.look(true, true, false, true), Found::Nothing);
+        }
     }
 
     #[test]
