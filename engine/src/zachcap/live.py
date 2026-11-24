@@ -150,7 +150,8 @@ class GpuTurns:
     """The GPU, shared by the meetings being processed (the worker in api.py) and the live
     transcript, with one model on it at a time: a 4 GB GPU can't hold both. Meetings come
     first: while one waits or is processed, the live transcript lets go of its model, and it
-    takes the GPU again once none is left."""
+    takes the GPU again once none is left. With no GPU it's the processor they take turns at:
+    a meeting uses every core, so the live transcript waits then too (it holds no turn)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()  # held by whoever has a model on the GPU now
@@ -238,15 +239,22 @@ class Live:
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
         self._closed = False
-        self.error: str | None = None  # the last thing that went wrong, for the page
-        self.waiting = False  # for the GPU: a meeting is being processed
-        self._dropped = 0.0  # seconds let go before the worker took them (feed)
-        self._behind = 0.0  # seconds skipped to catch up (the worker)
+        self.error: str | None = None  # what goes wrong, for the page: until a line comes out
+        self.waiting = False  # for a meeting being processed
+        # Seconds of each track let go before the worker took them (feed), and skipped to
+        # catch up (the worker).
+        self._dropped: dict[str, float] = {}
+        self._behind: dict[str, float] = {}
 
     @property
     def skipped(self) -> float:
-        """Seconds of audio not transcribed, to keep up with the call."""
-        return self._dropped + self._behind
+        """Seconds of the call not transcribed, to keep up with it: the track's that lost the
+        most, as the two mostly lose the same ones."""
+        tracks = {*self._dropped, *self._behind}
+        return max(
+            (self._dropped.get(name, 0.0) + self._behind.get(name, 0.0) for name in tracks),
+            default=0.0,
+        )
 
     @property
     def on(self) -> bool:
@@ -272,7 +280,8 @@ class Live:
             while arriving.frames > BEHIND * arriving.rate and len(arriving.blocks) > 1:
                 _, gone = arriving.blocks.popleft()
                 arriving.frames -= len(gone)
-                self._dropped += len(gone) / arriving.rate
+                lost = self._dropped.get(track, 0.0)
+                self._dropped[track] = lost + len(gone) / arriving.rate
 
     # The worker -----------------------------------------------------------------------
 
@@ -353,7 +362,7 @@ class Live:
                 # The first audio of the track, or the first after some was let go (feed):
                 # it starts over there, without what was waiting from before the gap.
                 if state.next_frame is not None:
-                    self._behind += sum(len(piece) for piece in pieces) / RATE
+                    self._skip(state, sum(len(piece) for piece in pieces))
                 state.resampler = Resampler(state.resampler.rate)
                 state.offset = at = round(frame * RATE / state.resampler.rate)
                 pieces = []
@@ -374,7 +383,7 @@ class Live:
             # rather than fall further behind; the meeting's own transcript has every word.
             behind = len(state.audio) - int(CAUGHT_UP * RATE)
             self._advance(state, behind)
-            self._behind += behind / RATE
+            self._skip(state, behind)
         while len(state.audio):
             if not self._may_say(final):
                 return  # the audio waits: stopping, or the GPU is a meeting's for now
@@ -474,6 +483,9 @@ class Live:
         state.audio = state.audio[samples:]
         state.offset += samples
 
+    def _skip(self, state: TrackState, samples: int) -> None:
+        self._behind[state.name] = self._behind.get(state.name, 0.0) + samples / RATE
+
     def _say(
         self,
         state: TrackState,
@@ -490,6 +502,7 @@ class Live:
         except Exception as exc:  # this line is lost; the next ones aren't
             self._went_wrong(exc)
             return
+        self.error = None  # it works (again)
         text = str(heard).strip()
         if not text:
             return
@@ -624,10 +637,10 @@ class Speech:
     model on the GPU, one pass without beam search (a second or less a line), or the small
     dictation model on the CPU when there's no GPU. Used by the live worker's thread only.
 
-    On the GPU it takes its turn (``gpu``): while a meeting is being processed it lets go of
-    its model and waits (``ready()`` is False), and loads it again after. It only loads a
-    model already on this PC; one that isn't is downloaded once it stops (close). Each line
-    says whether it's doubtful that it was speech at all (Heard)."""
+    While a meeting is being processed it lets go of its model and waits (``ready()`` is
+    False), and loads it again after; on the GPU it holds its turn while it has one (``gpu``).
+    It only loads a model already on this PC; one that isn't is downloaded once it stops
+    (close). Each line says whether it's doubtful that it was speech at all (Heard)."""
 
     def __init__(
         self, language: str | None, hotwords: str | None, gpu: GpuTurns | None = None
@@ -646,6 +659,9 @@ class Speech:
     def ready(self) -> bool:
         if self._closed:
             return False
+        if self.gpu is not None and self.gpu.wanted():
+            self._let_go()  # a meeting waits for the GPU, or uses every core without one
+            return False
         if self.device is None:
             try:
                 self.device = "cuda" if cuda.prepare() else "cpu"
@@ -654,9 +670,6 @@ class Speech:
                 self.device = "cpu"
         if self.device == "cpu" or self.gpu is None:
             return True
-        if self.gpu.wanted():
-            self._let_go()  # a meeting is waiting for the GPU
-            return False
         if not self._turn:
             self._turn = self.gpu.take()
         return self._turn
@@ -701,6 +714,7 @@ class Speech:
             audio,
             language=self.language,
             beam_size=1,
+            temperature=0.0,  # one pass: faster-whisper tries up to five more when in doubt
             vad_filter=False,  # already cut at the speech
             condition_on_previous_text=False,
             without_timestamps=True,

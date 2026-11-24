@@ -442,6 +442,21 @@ def test_audio_waiting_for_the_worker_is_capped_and_the_oldest_goes():
     assert abs(line["start"] - (BEHIND + 30)) < 0.15  # still on the recording's timeline
 
 
+def test_a_wait_counts_once_though_both_tracks_waited():
+    class Waits:
+        def ready(self):
+            return False
+
+    transcript = Live(Waits(), speech=loud_spans)
+    call, mic = Feeder(transcript, "system", 16000), Feeder(transcript, "mic", 16000)
+    for _ in range(10):  # ten minutes of a call, while a meeting is processed
+        call.play(quiet(60, 16000))
+        mic.play(quiet(60, 16000))
+        transcript.step()
+    waiting = len(transcript._tracks["system"].audio) / RATE
+    assert abs(transcript.skipped + waiting - 600) < 1  # of the call, not of its two tracks
+
+
 def test_nothing_is_kept_once_stopped():
     transcript, heard = make()
     transcript.stop()
@@ -469,6 +484,26 @@ def test_a_failing_transcription_never_stops_the_worker(monkeypatch: pytest.Monk
     transcript.stop()
     assert transcript.join(5)
     assert transcript.error == "CUDA out of memory"
+
+
+def test_an_error_is_said_until_a_line_comes_out_again():
+    fails = {"now": True}
+
+    def transcribe(audio, track):
+        if fails["now"]:
+            raise RuntimeError("CUDA out of memory")
+        return "it works again"
+
+    transcript = Live(transcribe, speech=loud_spans)
+    call = Feeder(transcript, "system")
+    call.play(said())
+    transcript.step()
+    assert transcript.error == "CUDA out of memory"
+    fails["now"] = False
+    call.play(said())
+    transcript.step()
+    assert [line["text"] for line in transcript.lines()] == ["it works again"]
+    assert transcript.error is None
 
 
 def test_stopping_never_waits_and_the_worker_frees_the_model(monkeypatch: pytest.MonkeyPatch):
@@ -570,6 +605,22 @@ def test_the_live_model_is_the_meetings_on_the_gpu(whisper: list):
     assert whisper == [("large-v3-turbo", options)]
 
 
+def test_a_line_takes_one_pass(whisper: list, monkeypatch: pytest.MonkeyPatch):
+    asked: list = []
+    real = FakeModel.transcribe
+
+    def transcribe(self, audio, **options):
+        asked.append(options)
+        return real(self, audio, **options)
+
+    monkeypatch.setattr(FakeModel, "transcribe", transcribe)
+    speech = Speech("en", None, gpu=GpuTurns())
+    assert speech.ready()
+    speech(np.zeros(RATE, np.float32), "system")
+    # Left to itself, faster-whisper tries up to five more temperatures when in doubt.
+    assert asked[0]["temperature"] == 0 and asked[0]["beam_size"] == 1
+
+
 def test_on_the_cpu_half_the_cores_are_left_for_the_call(
     whisper: list, monkeypatch: pytest.MonkeyPatch
 ):
@@ -603,6 +654,23 @@ def test_a_meeting_takes_the_gpu_from_the_live_transcript(whisper: list):
     assert speech.ready()
     speech(np.zeros(RATE, np.float32), "system")
     assert len(whisper) == 2  # loaded again after the meeting
+
+
+def test_on_the_cpu_it_waits_while_a_meeting_is_processed(
+    whisper: list, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(cuda, "prepare", lambda: False)
+    turns = GpuTurns()
+    speech = Speech("en", None, gpu=turns)
+    assert speech.ready()
+    speech(np.zeros(RATE, np.float32), "system")
+    turns.meeting_waiting()  # it will use every core
+    assert not speech.ready() and speech._model is None
+    started = time.monotonic()
+    with turns.for_meeting(wait=5):  # which needn't wait: there's no turn to give back
+        assert time.monotonic() - started < 0.5
+    turns.meetings_done()
+    assert speech.ready()
 
 
 def test_a_meeting_never_waits_long_for_the_live_transcript():

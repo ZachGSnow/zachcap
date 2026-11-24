@@ -66,7 +66,7 @@ export function notices(state: LiveState | null, unreachable: string | null): Li
     said.push({
       key: "waiting",
       tone: "info",
-      text: "Waiting for the GPU: an earlier meeting is being transcribed. Lines carry on once it's done.",
+      text: "Waiting while an earlier meeting is processed. Lines carry on once that's done.",
     });
   }
   if (state.on && state.paused) {
