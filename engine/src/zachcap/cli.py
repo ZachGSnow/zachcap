@@ -222,7 +222,12 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(handler=cmd_search)
 
     p = sub.add_parser("serve", help="run the local API for the desktop app")
-    p.add_argument("--port", type=int, default=8765)
+    p.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="0 lets Windows pick a free one (the app does), written to $ZACHCAP_PORT_FILE",
+    )
     p.add_argument(
         "--token",
         default=os.environ.get("ZACHCAP_TOKEN"),

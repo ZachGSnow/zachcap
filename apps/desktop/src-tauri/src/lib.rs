@@ -2,7 +2,7 @@
 //! token, and lives in the tray like Tailscale (closing the window keeps it running).
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -33,7 +33,9 @@ struct EngineInfo {
 }
 
 struct Engine {
-    info: EngineInfo,
+    /// The running engine's port and token; None until it has said which port it got. Each
+    /// start has a port and a token of its own.
+    info: Mutex<Option<EngineInfo>>,
     launch: Launch,
     child: Mutex<Option<Child>>,
     /// Why the engine stopped, once it has; cleared by a restart.
@@ -81,9 +83,10 @@ fn trim_log(log: &Path, limit: u64) {
     }
 }
 
+/// Where the page reaches the engine; None while it starts (the page asks again).
 #[tauri::command]
-fn engine_info(engine: tauri::State<Engine>) -> Result<EngineInfo, String> {
-    Ok(engine.info.clone())
+fn engine_info(engine: tauri::State<Engine>) -> Option<EngineInfo> {
+    engine.info.lock().unwrap().clone()
 }
 
 /// What the engine's setup is doing, while it runs (the first launch of an installed copy
@@ -116,8 +119,9 @@ fn check_engine(engine: &Engine) -> Option<String> {
     Some(message)
 }
 
-/// Starts the engine again after it stopped, on the same port and token, so the window
-/// reconnects without reloading. Does nothing while it is still running or starting.
+/// Starts the engine again after it stopped, on a new port with a new token; the window
+/// picks both up through engine_info without reloading. Does nothing while it is still
+/// running or starting.
 #[tauri::command]
 fn restart_engine(app: AppHandle) {
     begin(app);
@@ -559,16 +563,14 @@ fn find_uv() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("uv"))
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .unwrap_or(8765)
-}
+/// How long a started engine has to say which port it got before it counts as failed (the
+/// first start after setup compiles the Python files, which takes a while on a slow PC).
+const PORT_WAIT: Duration = Duration::from_secs(300);
 
 /// Starts the engine on its own thread, setting an installed copy's engine up first when this
-/// build hasn't been yet. Does nothing while the engine runs or is already starting. A failure
-/// is kept as the reason it stopped, which the startup screen and the restart banner show.
+/// build hasn't been yet, with a new token, on a port it picks itself. Does nothing while the
+/// engine runs or is already starting. A failure is kept as the reason it stopped, which the
+/// startup screen and the restart banner show.
 fn begin(app: AppHandle) {
     let Some(engine) = app.try_state::<Engine>() else {
         return;
@@ -577,10 +579,13 @@ fn begin(app: AppHandle) {
         return;
     }
     *engine.stopped.lock().unwrap() = None;
+    *engine.info.lock().unwrap() = None;
     std::thread::spawn(move || {
         let engine = app.state::<Engine>();
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let port_file = data_dir().join(format!("engine-{}.port", uuid::Uuid::new_v4().simple()));
         let started = set_up(&engine).and_then(|()| {
-            start_engine(&engine.launch, engine.info.port, &engine.info.token).map_err(|error| {
+            start_engine(&engine.launch, &token, &port_file).map_err(|error| {
                 if engine.launch.installed {
                     format!("Couldn't start the engine ({error}).")
                 } else {
@@ -590,13 +595,49 @@ fn begin(app: AppHandle) {
                 }
             })
         });
+        *engine.setup.lock().unwrap() = None;
         match started {
-            Ok(child) => *engine.child.lock().unwrap() = Some(child),
+            Ok(child) => {
+                *engine.child.lock().unwrap() = Some(child);
+                match wait_for_port(&engine, &port_file) {
+                    Some(port) => *engine.info.lock().unwrap() = Some(EngineInfo { port, token }),
+                    None if engine.stopped.lock().unwrap().is_none() => {
+                        if let Some(mut child) = engine.child.lock().unwrap().take() {
+                            let _ = child.kill();
+                        }
+                        *engine.stopped.lock().unwrap() =
+                            Some("The engine started but never said which port it's on.".into());
+                    }
+                    None => {} // it stopped; check_engine said why
+                }
+            }
             Err(message) => *engine.stopped.lock().unwrap() = Some(message),
         }
-        *engine.setup.lock().unwrap() = None;
+        let _ = std::fs::remove_file(&port_file);
         engine.starting.store(false, Ordering::SeqCst);
     });
+}
+
+/// Waits for the engine to write the port it got (see report_port in api.py). None when it
+/// stops first or takes longer than PORT_WAIT.
+fn wait_for_port(engine: &Engine, port_file: &Path) -> Option<u16> {
+    let deadline = std::time::Instant::now() + PORT_WAIT;
+    while std::time::Instant::now() < deadline {
+        if let Some(port) = read_port(port_file) {
+            return Some(port);
+        }
+        if engine.child.lock().unwrap().is_none() || EXITING.load(Ordering::Relaxed) {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+/// The port in a port file, once it's there and whole.
+fn read_port(port_file: &Path) -> Option<u16> {
+    let text = std::fs::read_to_string(port_file).ok()?;
+    text.trim().parse::<u16>().ok().filter(|&port| port != 0)
 }
 
 /// Brings an installed copy's engine venv up to date with the bundled uv: Python and the
@@ -681,7 +722,7 @@ fn no_window(command: &mut Command) {
     let _ = command;
 }
 
-fn start_engine(launch: &Launch, port: u16, token: &str) -> std::io::Result<Child> {
+fn start_engine(launch: &Launch, token: &str, port_file: &Path) -> std::io::Result<Child> {
     let mut command = if launch.installed {
         // Set up already (set_up), so its Python runs the engine directly.
         let mut command = Command::new(
@@ -703,7 +744,9 @@ fn start_engine(launch: &Launch, port: u16, token: &str) -> std::io::Result<Chil
         command
     };
     command
-        .args(["serve", "--port", &port.to_string()])
+        // The engine binds a port Windows picks and writes it to the port file (wait_for_port).
+        .args(["serve", "--port", "0"])
+        .env("ZACHCAP_PORT_FILE", port_file)
         // Passed through the environment so the token never shows in process listings.
         .env("ZACHCAP_TOKEN", token)
         // The engine exits by itself if this app goes away without stopping it.
@@ -788,9 +831,6 @@ fn tell_about_tray(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let port = free_port();
-    let token = uuid::Uuid::new_v4().simple().to_string();
-
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
     {
@@ -818,10 +858,7 @@ pub fn run() {
             // Started on its own thread (an installed copy's first launch sets the engine up
             // for minutes); the startup screen shows how that goes, or what went wrong.
             app.manage(Engine {
-                info: EngineInfo {
-                    port,
-                    token: token.clone(),
-                },
+                info: Mutex::new(None),
                 launch: launch_for(app.handle()),
                 child: Mutex::new(None),
                 stopped: Mutex::new(None),
@@ -971,7 +1008,9 @@ pub fn run() {
                 && let Some(engine) = app.try_state::<Engine>()
             {
                 EXITING.store(true, Ordering::Relaxed);
-                stop_recording(&engine.info);
+                if let Some(info) = engine.info.lock().unwrap().clone() {
+                    stop_recording(&info);
+                }
                 if let Some(mut child) = engine.child.lock().unwrap().take() {
                     let _ = child.kill();
                 }
@@ -982,6 +1021,29 @@ pub fn run() {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_port_is_read_only_once_the_engine_has_written_it_whole() {
+        let dir = std::env::temp_dir().join(format!("zachcap-port-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("engine.port");
+        assert_eq!(read_port(&file), None, "not written yet");
+        for (text, port) in [
+            ("", None),
+            ("0", None),
+            ("70000", None),
+            ("5432x", None),
+            (
+                "54321
+",
+                Some(54321),
+            ),
+        ] {
+            std::fs::write(&file, text).unwrap();
+            assert_eq!(read_port(&file), port, "{text:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_engine_log_is_emptied_past_its_limit_and_carries_on_from_the_top() {

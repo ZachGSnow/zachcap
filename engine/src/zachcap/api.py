@@ -15,6 +15,7 @@ import queue
 import re
 import secrets as pysecrets
 import shutil
+import socket
 import threading
 import time
 import traceback
@@ -1753,4 +1754,29 @@ def serve(port: int, token: str) -> None:
     threading.Thread(
         target=app.state.call_watch.run_forever, name="zachcap-call-watch", daemon=True
     ).start()
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    sock = listen_on(port)
+    report_port(sock, os.environ.get("ZACHCAP_PORT_FILE"))
+    uvicorn.Server(uvicorn.Config(app, log_level="warning")).run(sockets=[sock])
+
+
+def listen_on(port: int) -> socket.socket:
+    """A socket on 127.0.0.1 at ``port``, or at one Windows picks for 0 (the app asks for
+    that). The engine binds it itself, so no other program can take the port between the
+    shell choosing it and the engine starting; and exclusively, since Windows otherwise lets
+    a second socket bind the same port and take its connections."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    sock.bind(("127.0.0.1", port))
+    return sock
+
+
+def report_port(sock: socket.socket, path: str | None) -> None:
+    """Tells the shell the port the engine got, in the file it named (ZACHCAP_PORT_FILE).
+    Written whole and then renamed, so the shell never reads half a number."""
+    if not path:
+        return
+    target = Path(path)
+    partial = target.with_name(target.name + ".partial")
+    partial.write_text(str(sock.getsockname()[1]), encoding="ascii")
+    partial.replace(target)
