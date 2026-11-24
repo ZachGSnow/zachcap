@@ -9,10 +9,12 @@ and queued for processing.
 What was seen is remembered by path, size and modified time: a file exported again with new
 content imports again, and a meeting deleted in ZachCap doesn't come back. A file that isn't
 a recording ZachCap can read is noted with the reason (shown in Settings, with a Retry) and
-not tried again until it changes. One that can't be opened right now (open in another
-program, a network share or cloud file offline) is simply tried again on the next look.
-Turning the folder off, or choosing another, stops a run between files. The user's files
-are only ever read: never moved, renamed or deleted.
+not tried again until it changes. So is one whose reading never finished: each file is
+noted before it is read, so one that crashes or hangs FFmpeg isn't read again on every look
+or every start. One that can't be opened right now (open in another program, a network
+share or cloud file offline) is simply tried again on the next look. Turning the folder
+off, or choosing another, stops a run between files. The user's files are only ever read:
+never moved, renamed or deleted.
 """
 
 from __future__ import annotations
@@ -30,6 +32,9 @@ from .store import Store
 SETTING = "watch_folder"
 CHECK_EVERY = 30.0
 SETTLED_AFTER = 30.0  # seconds since the file last changed
+# The reason a file is noted with before it is read. What happens next replaces it, so it
+# stays only when ZachCap stopped part-way: FFmpeg crashed or hung, or ZachCap was quit.
+UNFINISHED = "ZachCap stopped while reading it"
 
 
 def media_files(folder: Path) -> dict[str, tuple[int, int]]:
@@ -115,9 +120,13 @@ class FolderWatch:
             if not settled or now - mtime_ns / 1e9 < SETTLED_AFTER:
                 continue  # still being written or copied (or seen for the first time)
             version = (path, size, mtime_ns)
+            # Noted before it is read: a file that crashes or hangs FFmpeg is then listed
+            # (with Retry), not read again on every look and every start.
+            store.record_watched_file(path, size, mtime_ns, "failed", error=UNFINISHED)
             try:
                 meeting_id, _ = import_recording(store, Path(path))
             except OSError as exc:  # open elsewhere, offline: just try again next look
+                store.forget_watched_files([path], ("failed",))  # the note is taken back
                 looks, _ = self._troubled.get(version, (0, ""))
                 self._troubled[version] = (looks + 1, reason(exc, path))
                 continue

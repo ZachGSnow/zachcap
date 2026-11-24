@@ -82,6 +82,21 @@ def test_import_rejects_missing_files_and_actions_validate(client: TestClient, t
     assert client.get("/api/stats", headers=AUTH).json()["meetings"] == 0
 
 
+def test_an_import_that_is_refused_says_why(client: TestClient, tmp_path: Path):
+    import numpy as np
+    import soundfile as sf
+
+    sf.write(tmp_path / "other-call.wav", np.zeros(16000, np.float32), 16000)
+    playlist = tmp_path / "voicemail.mp3"  # an FFmpeg concat list that names other-call.wav
+    playlist.write_text("ffconcat version 1.0\nfile 'other-call.wav'\n", encoding="ascii")
+
+    refused = client.post("/api/import", headers=AUTH, json={"path": str(playlist)})
+
+    assert refused.status_code == 400
+    assert refused.json()["detail"] == "voicemail.mp3 isn't in a format ZachCap imports"
+    assert client.get("/api/stats", headers=AUTH).json()["meetings"] == 0
+
+
 def test_there_are_no_open_docs_pages(client: TestClient):
     for path in ("/docs", "/redoc", "/openapi.json"):
         assert client.get(path).status_code == 401  # the gate: no token, no answer

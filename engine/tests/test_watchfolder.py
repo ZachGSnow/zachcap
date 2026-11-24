@@ -1,6 +1,7 @@
 """The watch folder: recordings saved there import themselves, once each."""
 
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -225,6 +226,96 @@ def test_turning_it_off_stops_a_run_between_files(library, monkeypatch):
     watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
     watch.check(store)
     assert len(watch.check(store)) == 1  # the one under way finished; the rest waited
+
+
+def test_a_playlist_saved_as_mp3_is_listed_with_the_reason_not_followed(library):
+    # An FFmpeg concat list named .mp3: read as a list, it makes FFmpeg open the file it names.
+    store, folder = library
+    (folder / "private").mkdir()
+    recording(folder / "private" / "other-call.wav")  # a subfolder: not watched
+    (folder / "voicemail.mp3").write_text(
+        "ffconcat version 1.0\nfile 'private/other-call.wav'\n", encoding="ascii"
+    )
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    watch.check(store)
+
+    assert watch.check(store) == []
+    assert watch.failures == [
+        {
+            "name": "voicemail.mp3",
+            "error": "voicemail.mp3 isn't in a format ZachCap imports",
+            "retrying": False,
+        }
+    ]
+
+
+class Crash(BaseException):
+    """ZachCap dying inside FFmpeg: nothing after the read runs."""
+
+
+def test_a_file_that_crashes_ffmpeg_isnt_read_again_after_a_restart(library, monkeypatch):
+    store, folder = library
+    recording(folder / "crash.wav")
+    real, reads = watchfolder.import_recording, []
+
+    def crashes(store_, path):
+        reads.append(path.name)
+        raise Crash
+
+    monkeypatch.setattr(watchfolder, "import_recording", crashes)
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    watch.check(store)
+    with pytest.raises(Crash):
+        watch.check(store)
+
+    restarted = watchfolder.FolderWatch(lambda _: None, clock=Clock())  # ZachCap started again
+    for _ in range(3):
+        restarted.check(store)
+    assert reads == ["crash.wav"]
+    assert restarted.failures == [
+        {"name": "crash.wav", "error": "ZachCap stopped while reading it", "retrying": False}
+    ]
+
+    monkeypatch.setattr(watchfolder, "import_recording", real)
+    assert restarted.retry_failed(store) == 1  # Settings' Retry still gives it a go
+    assert len(restarted.check(store)) == 1
+
+
+def test_a_file_that_hangs_ffmpeg_isnt_read_again_after_a_restart(library, monkeypatch):
+    store, folder = library
+    recording(folder / "hangs.wav")
+    reading, let_go, reads = threading.Event(), threading.Event(), []
+
+    def never_returns(store_, path):
+        reads.append(path.name)
+        if len(reads) == 1:  # the look that hangs; the test lets it go at the end
+            reading.set()
+            let_go.wait(10)
+        raise ValueError("let go by the test")
+
+    monkeypatch.setattr(watchfolder, "import_recording", never_returns)
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    watch.check(store)
+
+    def look() -> None:
+        own = Store()  # the watch's own thread and connection, as in the engine
+        try:
+            watch.check(own)
+        finally:
+            own.close()
+
+    stuck = threading.Thread(target=look, daemon=True)
+    stuck.start()
+    assert reading.wait(10)
+    restarted = watchfolder.FolderWatch(lambda _: None, clock=Clock())  # ZachCap started again
+    for _ in range(3):
+        restarted.check(store)
+    let_go.set()
+    stuck.join(10)
+    assert reads == ["hangs.wav"]
+    assert restarted.failures == [
+        {"name": "hangs.wav", "error": "ZachCap stopped while reading it", "retrying": False}
+    ]
 
 
 def test_retry_gives_failed_files_another_go(library):
