@@ -35,8 +35,12 @@ export function setTheme(theme: Theme) {
   applyTheme();
 }
 
-/** Applies the saved theme now and follows Windows while it's set to "system". */
+/** Applies the saved theme now and follows Windows while it's set to "system", and a choice
+ * made in another of ZachCap's windows (the live panel follows Settings). */
 export function followTheme() {
   applyTheme();
   windowsDark.addEventListener("change", applyTheme);
+  window.addEventListener("storage", (event) => {
+    if (event.key === KEY || event.key === null) applyTheme();
+  });
 }

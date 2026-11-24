@@ -206,10 +206,22 @@ export type LiveLine = { id: number; track: "mic" | "system"; start: number; end
 /** The live transcript of the recording running now (or the last one), from /api/live. */
 export type LiveState = {
   recording: boolean;
+  /** Names this live transcript: the panel's cursor counts only for it (see live.ts). */
+  run: string | null;
   meeting_id: number | null;
-  /** Whether a live transcript runs (off in Settings: no). */
+  /** A live transcript runs for the recording now (off in Settings, or stopped: no). */
   on: boolean;
+  /** Seconds since the recording started (null once it's over). */
+  elapsed: number | null;
+  paused: boolean;
+  /** Your name, for the lines from your mic. */
+  me: string | null;
+  /** The lines after the panel's cursor. */
   lines: LiveLine[];
+  /** Lines up to the cursor left out as echo since: the panel takes them away. */
+  dropped: number[];
+  /** Waiting for the GPU while an earlier meeting is transcribed. */
+  waiting: boolean;
   error: string | null;
   /** Seconds not transcribed live to keep up (a slow GPU on battery). */
   skipped: number;

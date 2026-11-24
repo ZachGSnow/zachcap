@@ -1,13 +1,12 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import React from "react";
 import ReactDOM from "react-dom/client";
-
-import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import App from "./App";
 import { LivePanel } from "@/components/LivePanel";
 import { Toaster } from "@/components/ui/sonner";
-import { isTauri } from "@/lib/engine";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { isTauri } from "@/lib/engine";
 import { followTheme } from "@/lib/theme";
 import "./index.css";
 
@@ -21,7 +20,8 @@ document.addEventListener("contextmenu", (event) => {
 // Light or dark as chosen in Settings, or following Windows (the default).
 followTheme();
 
-// The shell opens a second window over the call while recording: the live panel.
+// The shell opens a second window over the call while recording: the live panel. It has no
+// toasts of its own; the main window and the shell's notifications say what happens.
 const livePanel = isTauri() && getCurrentWindow().label === "live";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
