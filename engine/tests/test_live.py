@@ -427,6 +427,20 @@ def test_speech_after_a_long_wait_is_still_found():
     assert abs(line["start"] - 40.0) < 0.15
 
 
+def test_a_redacted_moment_takes_its_lines_away():
+    said_then = iter(["the old password", "zebra fortytwo", "thanks"])
+    transcript = Live(lambda audio, track: next(said_then), speech=loud_spans)
+    call = Feeder(transcript, "system")
+    for _ in range(3):  # at 0 to 2 s, 6 to 8 s and 12 to 14 s
+        call.play(np.concatenate([tone(2), quiet(4)]))
+    transcript.step()
+    assert [line["id"] for line in transcript.lines()] == [1, 2, 3]
+    transcript.forget(8.5, 9.0)  # just after the line's end: a line's times aren't exact
+    assert [line["text"] for line in transcript.lines()] == ["the old password", "thanks"]
+    assert transcript.dropped(upto=3) == [2]  # the panel takes it away
+    assert "zebra" not in transcript.text() and "zebra" not in str(transcript._lines)
+
+
 # Never a risk to the recording ---------------------------------------------------------
 
 
@@ -803,6 +817,7 @@ class FakeLive:
     def __init__(self, speech) -> None:
         self.speech, self.started, self.on, self.fed = speech, False, True, []
         self.error, self.skipped, self.waiting = None, 0.0, False
+        self.forgotten: list = []
         FakeLive.made.append(self)
 
     def feed(self, track, block, rate, frame) -> None:
@@ -820,6 +835,9 @@ class FakeLive:
 
     def dropped(self, upto: int) -> list[int]:
         return []
+
+    def forget(self, start: float, end: float) -> None:
+        self.forgotten.append((start, end))
 
 
 class ListeningRecorder:
@@ -937,6 +955,32 @@ def test_a_recording_that_isnt_kept_takes_its_live_lines_with_it(
         "error": None,
         "skipped": 0,
     }
+
+
+def test_a_deleted_meeting_takes_its_live_lines_with_it(client: TestClient):
+    meeting_id = client.post("/api/record/start", headers=AUTH, json={}).json()["meeting_id"]
+    client.post("/api/record/stop", headers=AUTH)
+    assert client.get("/api/live", headers=AUTH).json()["lines"]  # still readable after it
+    client.delete("/api/meetings/999", headers=AUTH)
+    assert client.get("/api/live", headers=AUTH).json()["lines"]  # another meeting's: kept
+    assert client.delete(f"/api/meetings/{meeting_id}", headers=AUTH).status_code == 200
+    body = client.get("/api/live", headers=AUTH).json()
+    assert body["lines"] == [] and body["run"] is None
+
+
+def test_a_redacted_moment_leaves_the_live_lines_too(client: TestClient):
+    meeting_id = client.post("/api/record/start", headers=AUTH, json={}).json()["meeting_id"]
+    client.post("/api/record/stop", headers=AUTH)
+    redacted = {}
+
+    def redact() -> bool:  # refused while the worker has the meeting
+        redacted["answer"] = client.post(
+            f"/api/meetings/{meeting_id}/redact", headers=AUTH, json={"start": 1, "end": 2.5}
+        )
+        return redacted["answer"].status_code != 409
+
+    assert wait_for(redact) and redacted["answer"].status_code == 200
+    assert FakeLive.made[-1].forgotten == [(1.0, 2.5)]
 
 
 def test_turning_it_off_stops_the_one_running_and_the_next_has_none(client: TestClient):

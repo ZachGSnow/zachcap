@@ -53,6 +53,7 @@ BEHIND = 120.0  # more audio than this waiting: the GPU can't keep up, skip ahea
 CAUGHT_UP = 20.0  # ... to this much
 PAD = 3200  # 0.2 s of audio either side of the speech, as Whisper likes it
 LINES_KEPT = 2000
+REDACT_PAD = 1.0  # seconds either side of a redacted moment whose lines go as well
 GPU_WAIT = 30.0  # a meeting waits this long at most for the live transcript to let go
 HISTORY = BEHIND + SEARCH  # seconds of the call's loudness kept to compare the mic with
 OWN_VOICE = 10.0  # dB: a piece quieter than your voice beside it by this isn't your voice
@@ -65,7 +66,7 @@ class Line:
     start: float  # seconds into the recording
     end: float
     text: str
-    echo: bool = False  # the mic hearing the speakers: left out
+    gone: bool = False  # left out: the mic hearing the speakers, or redacted
 
 
 class Resampler:
@@ -538,7 +539,7 @@ class Live:
                 continue
             if mine.start >= min(other.start for other in theirs) - transcript.ECHO_EARLY:
                 said = " ".join(other.text for other in theirs)
-                mine.echo = mine.echo or transcript.repeats(mine.text, said)
+                mine.gone = mine.gone or transcript.repeats(mine.text, said)
 
     def _call_played(self, line: Line) -> bool:
         """Whether the call played during most of a line."""
@@ -551,7 +552,7 @@ class Live:
         """The lines after ``after`` (an id), in the order they were said: a line comes when
         its speaker stops, so one that started earlier can come later."""
         with self._lock:
-            found = [line for line in self._lines if line.id > after and not line.echo]
+            found = [line for line in self._lines if line.id > after and not line.gone]
         return [
             {
                 "id": line.id,
@@ -564,10 +565,18 @@ class Live:
         ]
 
     def dropped(self, upto: int) -> list[int]:
-        """The lines up to ``upto`` left out as echo. One can be found to be echo after the
-        panel read it (the call's line came after the mic's): the panel takes it away."""
+        """The lines up to ``upto`` left out. One can be found to be echo after the panel read
+        it (the call's line came after the mic's), or be redacted: the panel takes it away."""
         with self._lock:
-            return [line.id for line in self._lines if line.echo and line.id <= upto]
+            return [line.id for line in self._lines if line.gone and line.id <= upto]
+
+    def forget(self, start: float, end: float) -> None:
+        """Lets go of what was said from ``start`` to ``end`` (seconds), redacted from the
+        meeting, and a little either side: a line's times aren't exact."""
+        with self._lock:
+            for line in self._lines:
+                if line.start < end + REDACT_PAD and line.end > start - REDACT_PAD:
+                    line.gone, line.text = True, ""
 
     def text(self, me: str = "You", them: str = "Call") -> str:
         """The live transcript so far as plain lines ("[mm:ss] You: ..."), for the notes."""

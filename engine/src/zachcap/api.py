@@ -536,11 +536,17 @@ def create_app(token: str) -> FastAPI:
             now.live.stop()
 
     def forget_live(meeting_id: int) -> None:
-        """A recording that isn't kept takes its live lines with it."""
+        """A recording that isn't kept, or is deleted, takes its live lines with it."""
         now = live_state["now"]
         if now is not None and now.meeting_id == meeting_id:
             now.live.stop()
             live_state["now"] = None
+
+    def redact_live(meeting_id: int, start: float, end: float) -> None:
+        """A redacted moment leaves that meeting's live lines too."""
+        now = live_state["now"]
+        if now is not None and now.meeting_id == meeting_id:
+            now.live.forget(start, end)
 
     def finish_recording(meeting_id: int | None = None) -> int | None:
         """Stop the recorder, if one is running, and save its meeting. Returns the meeting id.
@@ -1148,6 +1154,7 @@ def create_app(token: str) -> FastAPI:
         store.delete_meeting(meeting_id)
         forget_written(meeting_id)
         store.scrub_deleted_text()  # its words leave the search index and the log as well
+        forget_live(meeting_id)
         # Its copy leaves the export folder too, and it leaves that day's work log.
         export.forget(store, meeting_id, date.fromisoformat(meeting["started_at"][:10]))
         # Only remove audio ZachCap recorded or imported itself, never a folder elsewhere.
@@ -1583,6 +1590,7 @@ def create_app(token: str) -> FastAPI:
                 lock.release()
         privacy.redacted(meeting_id)  # what Ask found in it before isn't sent again
         forget_written(meeting_id)
+        redact_live(meeting_id, start, end)
         tickets.fill(store, meeting_id)  # a ticket found in what was redacted goes too
         export.auto_export(store, meeting_id)
         return {
@@ -1813,9 +1821,9 @@ def create_app(token: str) -> FastAPI:
     def live_lines(run: str | None = None, after: int = 0):
         """The live transcript of the recording running now (or of the one that just
         ended): the lines after the panel's cursor (``after``, a line id of the transcript
-        ``run``; all of them for another), and those up to it left out as echo since, for the
-        panel to take away. With the recording's clock, so the panel needs nothing else. Kept
-        in memory only, never cached by the page."""
+        ``run``; all of them for another), and those up to it left out since (echo, or
+        redacted), for the panel to take away. With the recording's clock, so the panel needs
+        nothing else. Kept in memory only, never cached by the page."""
         meeting_id = recording.get("meeting_id")  # read first: Stop takes the recorder first
         recorder = recording.get("recorder")
         now = live_state["now"]
