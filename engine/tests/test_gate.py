@@ -8,7 +8,7 @@ from zachcap import cli, gate
 from zachcap.api import create_app
 
 LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
-TOKEN = "test-token-for-the-gate"
+RIGHT = "test-token-for-the-gate"  # what the engine was started with
 
 
 def call(headers: list[tuple[bytes, bytes]], query: bytes = b"", body: bytes = b"") -> dict:
@@ -38,12 +38,12 @@ def call(headers: list[tuple[bytes, bytes]], query: bytes = b"", body: bytes = b
         "headers": headers,
         "query_string": query,
     }
-    asyncio.run(gate.Gate(app, TOKEN)(scope, receive, send))
+    asyncio.run(gate.Gate(app, RIGHT)(scope, receive, send))
     return {**seen, "status": sent[0]["status"], "body": sent[-1]["body"]}
 
 
 HOST = (b"host", b"127.0.0.1:8765")
-BEARER = (b"authorization", b"Bearer " + TOKEN.encode())
+BEARER = (b"authorization", b"Bearer " + RIGHT.encode())
 
 
 def test_the_token_is_checked_before_the_app_is_reached():
@@ -57,14 +57,14 @@ def test_the_token_is_checked_before_the_app_is_reached():
 
 def test_a_token_with_odd_bytes_is_simply_wrong():
     # A non-ASCII token used to raise in compare_digest: a 500 and a traceback in the log.
-    for odd in [b"Bearer \xc3\xbc", b"Bearer " + TOKEN.encode() + b"\xff", b"\x00"]:
+    for odd in [b"Bearer \xc3\xbc", b"Bearer " + RIGHT.encode() + b"\xff", b"\x00"]:
         assert call([HOST, (b"authorization", odd)])["status"] == 401
     assert call([HOST], query=b"token=%C3%BC")["status"] == 401
 
 
 def test_the_token_can_come_as_a_query_parameter():
-    assert call([HOST], query=b"t=1&token=" + TOKEN.encode())["status"] == 200
-    assert call([HOST, (b"authorization", b"")], query=b"token=" + TOKEN.encode())["status"] == 200
+    assert call([HOST], query=b"t=1&token=" + RIGHT.encode())["status"] == 200
+    assert call([HOST, (b"authorization", b"")], query=b"token=" + RIGHT.encode())["status"] == 200
     assert call([HOST], query=b"token=nope")["status"] == 401
 
 
@@ -97,11 +97,11 @@ def test_a_body_too_big_or_of_unknown_length_is_refused_unread():
 @pytest.fixture
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    return TestClient(create_app(TOKEN), base_url=LOCAL)
+    return TestClient(create_app(RIGHT), base_url=LOCAL)
 
 
 def test_the_app_refuses_other_hosts_and_the_page_can_read_a_refusal(client: TestClient):
-    auth = {"Authorization": f"Bearer {TOKEN}"}
+    auth = {"Authorization": f"Bearer {RIGHT}"}
     assert client.get("/api/health", headers=auth).status_code == 200
     rebound = client.get("/api/health", headers={**auth, "Host": "evil.example:8765"})
     assert rebound.status_code == 403
@@ -130,5 +130,5 @@ def test_serve_refuses_a_short_or_spaced_token(monkeypatch: pytest.MonkeyPatch):
         with pytest.raises(SystemExit):
             cli.main(["serve", "--token", bad])
     assert served == []
-    cli.main(["serve", "--token", TOKEN])
-    assert served == [TOKEN]
+    cli.main(["serve", "--token", RIGHT])
+    assert served == [RIGHT]
