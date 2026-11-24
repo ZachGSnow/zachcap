@@ -472,12 +472,20 @@ def create_app(token: str) -> FastAPI:
 
     dictator.on_listening = leave_dictation_out
 
+    # What an earlier run left to be processed, when it was cut off mid-recording: the rest of
+    # that call is recorded first (process_left).
+    left: list[int] = []
+
+    def later(meeting_id: int) -> None:
+        left.append(meeting_id)
+        worker.progress[meeting_id] = "queued"
+
     startup = Store()
     try:
         # A recording cut off by a crash or a quit: a call on the mic now is still that call.
         interrupted = startup.meetings_with_status("recording")
         cut_off = interrupted[-1]["id"] if interrupted else None
-        recover(startup, worker.submit)
+        recover(startup, later if cut_off is not None else worker.submit)
         if startup.setting(dictation.SETTING) == "1":  # ready before the keys are first held
             dictator.transcriber.warm_up(language_of(startup))
     finally:
@@ -743,6 +751,20 @@ def create_app(token: str) -> FastAPI:
             store.close()
         return "deleted"
 
+    def process_left(every: float = 10.0) -> None:
+        """Hands over what an earlier run left to be processed, once no recording runs: after
+        a crash mid-call the rest of the call is being recorded again, and loading the models
+        now would hold the recorder up (and one that crashed the engine would do it again)."""
+        while left:
+            time.sleep(every)  # the call watch has had its first look by then
+            with lock:
+                if recording.get("recorder") is not None:
+                    continue
+            while left:
+                meeting_id = left.pop(0)
+                worker.progress.pop(meeting_id, None)
+                worker.submit(meeting_id)
+
     def recording_now() -> dict | None:
         """What the call watch needs to know about the recording running now, if any."""
         with lock:
@@ -824,6 +846,7 @@ def create_app(token: str) -> FastAPI:
 
     app.state.finish_recording = finish_recording
     app.state.call_watch = call_watch
+    app.state.process_left = process_left
     app.state.submit = worker.submit
     app.state.worker_gpu = worker.gpu  # shared with the live transcript (tests look)
     # The watch folder's looks (a thread started by serve()); Settings reads what it found.
@@ -2402,6 +2425,7 @@ def serve(port: int, token: str) -> None:
         target=app.state.call_watch.run_forever, name="zachcap-call-watch", daemon=True
     ).start()
     threading.Thread(target=app.state.look_for_gpu, name="zachcap-gpu-check", daemon=True).start()
+    threading.Thread(target=app.state.process_left, name="zachcap-left", daemon=True).start()
     # Audio a decode left in the temp folder when the PC went off, or an older ZachCap stopped.
     threading.Thread(target=decode_child.tidy, name="zachcap-tidy", daemon=True).start()
     sock = listen_on(port)
