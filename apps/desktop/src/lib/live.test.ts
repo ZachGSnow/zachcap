@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { LiveLine, LiveState } from "./engine";
-import { EMPTY_VIEW, LINES_SHOWN, atEnd, elapsedNow, livePath, mergeLines, notices, speaker } from "./live";
+import { EMPTY_VIEW, LINES_SHOWN, atEnd, dot, elapsedNow, livePath, mergeLines, notices, speaker } from "./live";
 
 function line(id: number, track: LiveLine["track"] = "system"): LiveLine {
   return { id, track, start: id * 5, end: id * 5 + 2, text: `line ${id}` };
@@ -93,11 +93,21 @@ describe("the live panel's lines", () => {
   });
 });
 
-describe("the live panel's clock and scrolling", () => {
+describe("the live panel's title bar and scrolling", () => {
   it("ticks on from what the engine last said", () => {
     expect(elapsedNow(65, 1000, 3500)).toBe(67.5);
     expect(elapsedNow(65, 1000, 900)).toBe(65); // never backwards
     expect(elapsedNow(null, 1000, 3500)).toBeNull();
+  });
+
+  it("doesn't look like it's recording while the engine can't be reached", () => {
+    expect(dot(state(), null)).toBe("recording");
+    expect(dot(state({ paused: true }), null)).toBe("paused");
+    expect(dot(state({ recording: false }), null)).toBe("off");
+    expect(dot(null, null)).toBe("off");
+    expect(dot(state(), "Failed to fetch")).toBe("off");
+    expect(dot(state({ paused: true }), "Failed to fetch")).toBe("off");
+    expect(elapsedNow(65, 1000, 60_000, "Failed to fetch")).toBe(65); // the clock stands still
   });
 
   it("follows new lines only while it's at the end", () => {

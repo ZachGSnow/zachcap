@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { api, connect, type LiveState } from "@/lib/engine";
 import { reason } from "@/lib/feedback";
 import { clock } from "@/lib/format";
-import { EMPTY_VIEW, atEnd, elapsedNow, livePath, mergeLines, notices, speaker, type LiveView } from "@/lib/live";
+import { EMPTY_VIEW, atEnd, dot, elapsedNow, livePath, mergeLines, notices, speaker, type LiveView } from "@/lib/live";
 import { cn } from "@/lib/utils";
 
 /** How often the panel asks for new lines. */
@@ -23,13 +23,13 @@ function drag(event: MouseEvent) {
 }
 
 /** The recording's clock, ticking between the engine's answers. */
-function Clock({ elapsed, saidAt }: { elapsed: number | null; saidAt: number }) {
+function Clock({ elapsed, saidAt, unreachable }: { elapsed: number | null; saidAt: number; unreachable: string | null }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 500);
     return () => window.clearInterval(id);
   }, []);
-  const seconds = elapsedNow(elapsed, saidAt, now);
+  const seconds = elapsedNow(elapsed, saidAt, now, unreachable);
   if (seconds === null) return null;
   return <span className="font-mono text-xs tabular-nums text-muted-foreground">{clock(seconds)}</span>;
 }
@@ -98,19 +98,17 @@ export function LivePanel() {
     setNewer(false);
   };
 
-  const recording = state?.recording ?? false;
-  const paused = state?.paused ?? false;
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
       <div className="flex h-9 shrink-0 cursor-default select-none items-center gap-2 border-b pr-1.5 pl-3" onMouseDown={drag}>
         <span
           className={cn(
             "size-2 shrink-0 rounded-full",
-            !recording ? "bg-muted-foreground/40" : paused ? "bg-amber-500" : "bg-red-500",
+            { recording: "bg-red-500", paused: "bg-amber-500", off: "bg-muted-foreground/40" }[dot(state, unreachable)],
           )}
         />
         <span className="text-sm font-medium">Live transcript</span>
-        <Clock elapsed={state?.elapsed ?? null} saidAt={saidAt} />
+        <Clock elapsed={state?.elapsed ?? null} saidAt={saidAt} unreachable={unreachable} />
         <Button
           size="icon-xs"
           variant="ghost"
