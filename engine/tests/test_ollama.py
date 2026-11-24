@@ -1,7 +1,9 @@
 """The model on this PC is asked through Ollama's server here and nowhere else. A stand-in server
 answers in Ollama's shapes; nothing is downloaded, and no model runs."""
 
+import contextlib
 import json
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -157,14 +159,14 @@ def test_a_model_is_asked_for_by_name(server):
     server.tags.append(entry("mine:latest"))
     assert ollama.model("small:4b") == SMALL
     assert ollama.model("mine").name == "mine:latest"
-    with pytest.raises(ollama.Failed, match="doesn't have gone:7b on this PC"):
+    with pytest.raises(ollama.NotHere, match="doesn't have gone:7b on this PC"):
         ollama.model("gone:7b")
 
 
 @pytest.mark.parametrize("says", [{"remote_host": "https://ollama.com"}, {"remote_model": "x"}])
 def test_a_model_in_ollamas_cloud_is_refused_before_anything_is_sent(server, says):
     server.shown = says
-    with pytest.raises(ollama.Failed, match="runs in Ollama's cloud"):
+    with pytest.raises(ollama.NotHere, match="runs in Ollama's cloud"):
         ollama.model("small:4b")
     assert server.paths() == ["/api/tags", "/api/show"]
 
@@ -213,6 +215,83 @@ def test_what_went_wrong_is_said(server, said, kind, match):
         ask()
 
 
+@pytest.mark.parametrize(
+    ("said", "too_long"),
+    [
+        ("the input length exceeds the context length", True),
+        ("the input length (9418 tokens) exceeds the context length (8192)", True),
+        ("input length (9 tokens) exceeds the model's maximum context length (8 tokens)", True),
+        ("request (9418 tokens) exceeds the available context size (8192 tokens)", True),
+        ("the prompt is longer than the context length currently available", True),
+        ("The prompt is too long: 9418, model maximum context length: 8192", True),
+        ("input (9418 tokens) is larger than the max context size (8192 tokens)", True),
+        ("Context size has been exceeded.", True),
+        ("timed out waiting for the runner to start: context deadline exceeded", False),
+        ("context canceled", False),
+        ("requested context size too large for model", False),
+        ("server busy, please try again.  maximum pending requests exceeded", False),
+        ("model requires more system memory (8 GiB) than is available (5 GiB)", False),
+    ],
+)
+def test_only_a_text_that_is_too_long_is_said_to_be(server, said, too_long):
+    server.status, server.raw = 500, json.dumps({"error": said}).encode()
+    with pytest.raises(ollama.Failed) as failed:
+        ask()
+    assert isinstance(failed.value, ollama.TooLong) is too_long
+    assert str(failed.value) == f"Ollama: {said}"
+    server.status, server.raw = 200, None
+    server.stream = [wrote("One "), {"error": said}]
+    with pytest.raises(ollama.Failed) as failed:
+        ask()
+    assert isinstance(failed.value, ollama.TooLong) is too_long
+
+
+def test_a_model_that_is_gone_is_said(server):
+    server.status, server.raw = 404, b'{"error": "model \'small:4b\' not found"}'
+    with pytest.raises(ollama.NotHere, match="model 'small:4b' not found"):
+        ask()
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        ["Hi."],
+        "Hi.",
+        5,
+        None,
+        {"message": "Hi."},
+        {"message": ["Hi."]},
+        {"message": {"content": 5}},
+        {"message": {"content": ["Hi."]}},
+    ],
+)
+def test_a_line_out_of_shape_is_said(server, line):
+    server.stream = [wrote("One "), line, done()]
+    with pytest.raises(ollama.Failed, match="isn't Ollama"):
+        ask()
+
+
+def test_a_line_that_isnt_json_is_said(server):
+    for raw in (b"Hi.", b"\x1f\x8b\x08\n", b"[" * 3000, b'{"message": {"content": "Hi.'):
+        server.raw = raw
+        with pytest.raises(ollama.Failed, match="isn't Ollama"):
+            ask()
+
+
+def test_counts_out_of_shape_are_none(server):
+    server.stream = [{**wrote("Hi.", done=True), "prompt_eval_count": "many", "eval_count": [1]}]
+    assert ask() == ollama.Reply("Hi.", read=0, written=0, cut_off=False)
+    server.tags = [entry("small:4b", size="4 GB")]
+    assert [(m.name, m.size) for m in ollama.models()] == [("small:4b", 0)]
+
+
+@pytest.mark.parametrize("listed", [{"a": 1}, ["small:4b"], [{"name": "a", "details": "b"}], 5])
+def test_a_list_out_of_shape_is_said(server, listed):
+    server.raw = json.dumps({"models": listed}).encode()
+    with pytest.raises(ollama.Failed, match="isn't Ollama"):
+        ollama.models()
+
+
 def test_an_error_in_the_middle_is_said(server):
     server.stream = [wrote("One "), {"error": "the runner stopped"}]
     with pytest.raises(ollama.Failed, match="the runner stopped"):
@@ -224,7 +303,7 @@ def test_an_error_in_the_middle_is_said(server):
 
 def test_an_answer_from_the_cloud_is_thrown_away(server):
     server.stream = [wrote("One ", remote_host="https://ollama.com"), done()]
-    with pytest.raises(ollama.Failed, match="runs in Ollama's cloud"):
+    with pytest.raises(ollama.NotHere, match="runs in Ollama's cloud"):
         ask()
 
 
@@ -260,6 +339,30 @@ def test_something_else_on_its_port_is_said(server):
     server.raw = b"<html>A router</html>"
     with pytest.raises(ollama.Failed, match="isn't Ollama"):
         ollama.models()
+
+
+@pytest.mark.parametrize("start", [b"", b"HTTP/1.1 200 OK\r\nContent-Length: 600\r\n\r\n"])
+def test_a_server_that_answers_a_byte_at_a_time_is_given_up_on(monkeypatch, start):
+    monkeypatch.setattr(ollama, "QUICK", 0.5)
+    with socket.create_server(("127.0.0.1", 0)) as listening:
+        monkeypatch.setenv("OLLAMA_HOST", f"127.0.0.1:{listening.getsockname()[1]}")
+
+        def drip() -> None:
+            connection, _ = listening.accept()
+            with connection, contextlib.suppress(OSError):
+                connection.sendall(start)
+                for _ in range(60):
+                    time.sleep(0.1)  # well within the time one read may take
+                    connection.sendall(b"H")
+
+        dripping = threading.Thread(target=drip, daemon=True)
+        dripping.start()
+        started = time.monotonic()
+        with pytest.raises(ollama.NotRunning, match="timed out"):
+            ollama.model("small:4b")
+        assert time.monotonic() - started < 3
+        dripping.join(10)  # it was hung up on
+        assert time.monotonic() - started < 5
 
 
 def test_it_is_stopped_while_it_writes(server):
