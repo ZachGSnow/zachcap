@@ -492,7 +492,8 @@ class Speech:
     dictation model on the CPU when there's no GPU. Used by the live worker's thread only.
 
     On the GPU it takes its turn (``gpu``): while a meeting is being processed it lets go of
-    its model and waits (``ready()`` is False), and loads it again after."""
+    its model and waits (``ready()`` is False), and loads it again after. It only loads a
+    model already on this PC; one that isn't is downloaded once it stops (close)."""
 
     def __init__(
         self, language: str | None, hotwords: str | None, gpu: GpuTurns | None = None
@@ -504,7 +505,9 @@ class Speech:
         self._model = None
         self._turn = False  # holds the GPU's turn
         self._failed: str | None = None  # why the model didn't load: not tried again
+        self._missing: str | None = None  # the model, when it isn't on this PC yet
         self._closed = False
+        self.fetching: threading.Thread | None = None  # downloading the missing model
 
     def ready(self) -> bool:
         if self._closed:
@@ -529,23 +532,29 @@ class Speech:
 
         if self._failed is not None:  # one failed load a recording, not one a line
             raise RuntimeError(self._failed)
+        if self.device == "cuda":
+            name = asr.DEFAULT_MODEL
+            options = {"device": "cuda", "compute_type": "int8_float16"}
+        else:
+            # Half the cores: the call app and the recorder run on the rest, and the call
+            # matters more than its live transcript.
+            name = dictation.model_for(self.language)
+            threads = max(1, cpu.physical_cores() // 2)
+            options = {"device": "cpu", "compute_type": "int8", "cpu_threads": threads}
         try:
-            if self.device == "cuda":
-                self._model = models.whisper(
-                    asr.DEFAULT_MODEL, device="cuda", compute_type="int8_float16"
-                )
-            else:
-                # Half the cores: the call app and the recorder run on the rest, and the call
-                # matters more than its live transcript.
-                self._model = models.whisper(
-                    dictation.model_for(self.language),
-                    device="cpu",
-                    compute_type="int8",
-                    cpu_threads=max(1, cpu.physical_cores() // 2),
-                )
+            # Only from this PC: a download now (1.6 GB for the meeting model) would take the
+            # call's bandwidth. One that isn't here yet is downloaded once this one stops.
+            self._model = models.whisper(name, local_files_only=True, **options)
+        except FileNotFoundError as exc:
+            self._missing = name
+            self._failed = (
+                "its speech model isn't on this PC yet; it's downloaded after this call, "
+                "for the next one"
+            )
+            raise RuntimeError(self._failed) from exc
         except Exception as exc:
-            self._failed = f"The live transcript's speech model didn't load: {exc}"
-            raise
+            self._failed = f"its speech model didn't load ({exc})"
+            raise RuntimeError(self._failed) from exc
         return self._model
 
     def __call__(self, audio: np.ndarray, track: str) -> str:
@@ -576,6 +585,21 @@ class Speech:
 
     def close(self) -> None:
         """Frees the GPU for the meeting's own transcript, which starts next. Never loads
-        again after this."""
+        again after this. A model that wasn't on this PC is downloaded now, on its own thread,
+        so the next call has it."""
         self._closed = True
         self._let_go()
+        if self._missing is not None:
+            self.fetching = threading.Thread(
+                target=_download, args=(self._missing,), name="live-model", daemon=True
+            )
+            self.fetching.start()
+
+
+def _download(name: str) -> None:
+    from . import models
+
+    try:
+        models.download_whisper(name)
+    except Exception:  # no network, say: tried again after the next call
+        traceback.print_exc()

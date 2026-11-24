@@ -332,7 +332,8 @@ def test_the_live_model_is_the_meetings_on_the_gpu(whisper: list):
     speech = Speech("en", "Contoso", gpu=GpuTurns())
     assert speech.ready()
     assert speech(np.zeros(RATE, np.float32), "system") == "what was said"
-    assert whisper == [("large-v3-turbo", {"device": "cuda", "compute_type": "int8_float16"})]
+    options = {"device": "cuda", "compute_type": "int8_float16", "local_files_only": True}
+    assert whisper == [("large-v3-turbo", options)]
 
 
 def test_on_the_cpu_half_the_cores_are_left_for_the_call(
@@ -343,7 +344,7 @@ def test_on_the_cpu_half_the_cores_are_left_for_the_call(
     speech = Speech("en", None, gpu=GpuTurns())
     assert speech.ready()
     speech(np.zeros(RATE, np.float32), "mic")
-    options = {"device": "cpu", "compute_type": "int8", "cpu_threads": 3}
+    options = {"device": "cpu", "compute_type": "int8", "cpu_threads": 3, "local_files_only": True}
     assert whisper == [(dictation.model_for("en"), options)]
     monkeypatch.setattr(cpu, "physical_cores", lambda: 1)
     single = Speech(None, None)  # one core, and any language
@@ -428,6 +429,29 @@ def test_a_model_that_doesnt_load_is_tried_once_a_recording(monkeypatch: pytest.
         with pytest.raises(RuntimeError, match="no space left"):
             speech(np.zeros(RATE, np.float32), "mic")
     assert len(tries) == 1
+
+
+def test_a_model_not_on_this_pc_is_downloaded_after_the_call_not_during_it(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    loads, downloads = [], []
+
+    def whisper(name, local_files_only=False, **options):
+        loads.append((name, local_files_only))
+        raise FileNotFoundError("not in the cache, and downloads are off")
+
+    monkeypatch.setattr(models, "whisper", whisper)
+    monkeypatch.setattr(models, "download_whisper", downloads.append)
+    monkeypatch.setattr(cuda, "prepare", lambda: True)
+    speech = Speech("en", None, gpu=GpuTurns())
+    assert speech.ready()
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="isn't on this PC yet"):
+            speech(np.zeros(RATE, np.float32), "system")
+    assert loads == [("large-v3-turbo", True)] and downloads == []  # nothing during the call
+    speech.close()
+    speech.fetching.join(5)
+    assert downloads == ["large-v3-turbo"]  # the call over: for the next one
 
 
 def test_a_closed_speech_model_never_loads_again(whisper: list):

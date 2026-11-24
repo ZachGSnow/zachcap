@@ -38,7 +38,8 @@ SPEAKER_MODEL = Pin(
 
 def whisper(name: str, **options):
     """A faster-whisper model: a name above from its pinned commit, or a model folder as it is.
-    The options go to WhisperModel (device, compute_type, cpu_threads)."""
+    The options go to WhisperModel (device, compute_type, cpu_threads; local_files_only, to
+    load only what's on this PC, else FileNotFoundError)."""
     # Names come first: faster-whisper would load a folder called "small" in the working
     # directory instead of the model.
     if name in WHISPER:
@@ -50,3 +51,12 @@ def whisper(name: str, **options):
     from faster_whisper import WhisperModel
 
     return WhisperModel(source, revision=revision, **options)
+
+
+def download_whisper(name: str) -> None:
+    """Downloads a model above at its pinned commit, without loading it: the next load of it
+    (whisper) finds it on this PC."""
+    pin = WHISPER[name]
+    from faster_whisper.utils import download_model
+
+    download_model(pin.repo, revision=pin.revision)

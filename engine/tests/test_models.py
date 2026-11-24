@@ -79,6 +79,21 @@ def test_a_whisper_model_without_a_pin_is_refused(loaded: list):
     assert loaded == []
 
 
+def test_a_model_downloads_from_its_pinned_commit_without_loading(
+    loaded: list, monkeypatch: pytest.MonkeyPatch
+):
+    fetched = []
+    utils = SimpleNamespace(
+        download_model=lambda repo, revision=None: fetched.append((repo, revision))
+    )
+    monkeypatch.setitem(sys.modules, "faster_whisper.utils", utils)
+    models.download_whisper("small.en")
+    pin = models.WHISPER["small.en"]
+    assert fetched == [(pin.repo, pin.revision)] and loaded == []
+    with pytest.raises(KeyError):
+        models.download_whisper("medium")  # only a pinned one
+
+
 def test_the_speaker_model_loads_the_pinned_commit(monkeypatch: pytest.MonkeyPatch):
     asked = []
 
