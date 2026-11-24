@@ -1418,6 +1418,7 @@ mod tests {
             stopped: Mutex::new(None),
             starting: AtomicBool::new(false),
             setup: Mutex::new(None),
+            uv: Mutex::new(None),
         }
     }
 
