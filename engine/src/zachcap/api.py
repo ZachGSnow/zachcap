@@ -1124,7 +1124,7 @@ def create_app(token: str) -> FastAPI:
             meeting_id, _ = imports.import_recording(
                 store, source, body.title, body.start, body.end
             )
-        except audio.Refused as exc:  # another kind of file, too big or too long: says which
+        except audio.Refused as exc:  # the reason, already in words for the user
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Couldn't read the audio: {exc}") from exc

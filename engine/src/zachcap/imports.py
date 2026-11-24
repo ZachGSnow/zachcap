@@ -12,7 +12,8 @@ from . import audio, paths
 from .store import Store
 
 # The kinds of file the Import dialog offers (audio, or video with an audio track). FFmpeg
-# reads a file only as one of these (audio.IMPORT_FORMATS), whatever it is named.
+# reads a file only as one of these, whatever it is named, and decodes only the audio in it
+# (audio.IMPORTS).
 MEDIA = {".mp4", ".m4a", ".mp3", ".wav", ".flac", ".ogg", ".webm", ".mkv", ".aac", ".wma", ".mov"}
 
 # Teams names its recordings "<title>-20261027_090709-Meeting Recording.mp4".
@@ -46,7 +47,7 @@ def import_recording(
 ) -> tuple[int, float]:
     """Decode the file into a new meeting folder (the user's file is only read) and add the
     meeting, dated from the file. Returns the meeting id and the seconds kept. Raises
-    audio.Refused for a file of another kind, or one too big or too long."""
+    audio.Refused, with the reason, for a file it won't import."""
     folder = new_folder()
     try:
         # A finished recording is one mixed track: everyone, you included, goes on the
