@@ -352,10 +352,10 @@ def ask_everything(store: Store, question: str, history: list[dict] | None = Non
     messages: list[dict] = []
     for turn in (history or [])[-6:]:
         messages += [
-            {"role": "user", "content": turn["question"]},
+            {"role": "user", "content": privacy.outgoing(store, turn["question"])},
             {"role": "assistant", "content": turn["answer"]},
         ]
-    messages.append({"role": "user", "content": question})
+    messages.append({"role": "user", "content": privacy.outgoing(store, question)})
 
     request = {
         "model": model,

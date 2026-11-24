@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS meetings (
     source_app  TEXT,
     notes       TEXT,
     template    TEXT,                               -- the kind of meeting, for summaries
+                                                    -- ('auto': one is to be picked)
     audio_removed_at TEXT,                          -- set when old audio was deleted
     ticket      TEXT,                               -- the service ticket it was about
     client      TEXT,                               -- set on it; else from its people

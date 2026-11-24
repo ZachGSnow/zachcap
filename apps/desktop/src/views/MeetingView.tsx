@@ -687,6 +687,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
                 recipes={settings?.recipes ?? []}
                 kind={shownKind.value}
                 pickedAutomatically={shownKind.automatic}
+                unpicked={shownKind.unpicked}
                 onKindChange={setKind}
                 summarizing={summarizing}
                 onSummarize={() => void summarize()}

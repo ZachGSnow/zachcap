@@ -68,6 +68,10 @@ def fake_claude(
                 messages=SimpleNamespace(parse=self.parse, create=self.create)
             )
 
+        def with_options(self, **options):  # the pick's: fewer tries than usual
+            calls["pick_options"] = options
+            return self
+
         def parse(self, **kwargs):
             calls.update(kwargs)
             return response
@@ -479,6 +483,8 @@ def test_otherwise_claude_picks_one_of_the_kinds_from_the_meeting(meeting, monke
     # One call, to the cheapest model (it has no fallback), answering one of the kinds' ids.
     [pick] = calls["picks"]
     assert pick["model"] == "claude-haiku-5-5" and "fallbacks" not in pick
+    # At most a minute or so when the service hangs: half a minute, tried once more.
+    assert (pick["timeout"], calls["pick_options"]) == (30, {"max_retries": 1})
     assert pick["output_config"]["effort"] == "low"
     ids = pick["output_config"]["format"]["schema"]["properties"]["kind"]["enum"]
     assert ids == [*summarize.TEMPLATES, mine["id"]]
@@ -528,16 +534,37 @@ def test_only_the_start_of_a_long_meeting_is_read_to_pick_its_kind(meeting, monk
     assert "project or status meeting" in calls["system"]
 
 
+def test_the_start_read_to_pick_a_kind_is_short_in_a_language_without_spaces_too():
+    line = "[00:01] Dana: " + "\u4f1a\u8bae" * 1000  # 2,000 characters, one "word"
+    opening = summarize._opening("\n".join([line] * 100))
+    assert len(opening) < summarize.PICK_CHARS + 100
+    assert opening.endswith(" ...") and opening.count("\n") < 13
+
+
+def test_titles_and_questions_are_masked_like_the_rest(meeting, monkeypatch):
+    store, meeting_id = meeting
+    store.set_setting("mask_before_claude", "1")
+    store.update_meeting(meeting_id, title="Cutover with dana@example.com")
+    calls = fake_claude(monkeypatch, sample_summary())
+
+    summarize.summarize(store, meeting_id)
+    assert calls["messages"][0]["content"].startswith("Meeting: Cutover with [email]\nDate: ")
+
+    summarize.ask(store, meeting_id, "Who owns 555-123-4567?")
+    sent = [part["text"] for part in calls["messages"][0]["content"]]
+    assert sent[0].startswith("Meeting: Cutover with [email]\n")
+    assert sent[1] == "Who owns [phone]?"
+
+
 @pytest.mark.parametrize(
-    ("answer", "stop", "paid"),
+    ("answer", "stop"),
     [
-        ('{"kind": "poem"}', "end_turn", True),  # not one of the kinds
-        ("Probably a customer call.", "end_turn", True),  # not the answer asked for
-        ("", "refusal", True),
-        (RuntimeError("Overloaded"), "end_turn", False),  # the call itself failed
+        ('{"kind": "poem"}', "end_turn"),  # not one of the kinds
+        ("Probably a customer call.", "end_turn"),  # not the answer asked for
+        ("", "refusal"),
     ],
 )
-def test_a_pick_that_doesnt_work_out_is_general(meeting, monkeypatch, answer, stop, paid):
+def test_a_pick_that_doesnt_work_out_is_general(meeting, monkeypatch, answer, stop):
     store, meeting_id = meeting
     store.delete_setting("summary_template")
     calls = fake_claude(monkeypatch, sample_summary(), pick=answer, pick_stop=stop)
@@ -548,8 +575,32 @@ def test_a_pick_that_doesnt_work_out_is_general(meeting, monkeypatch, answer, st
     assert calls["system"] == summarize.SYSTEM.format(me="You")  # General: no focus
     saved = store.meeting(meeting_id)
     assert (saved["template"], saved["template_source"]) == ("general", "auto")
-    cost = SUMMARY_COST + (PICK_COST if paid else 0.0)
-    assert store.summary(meeting_id)["cost_usd"] == pytest.approx(cost)
+    assert store.summary(meeting_id)["cost_usd"] == pytest.approx(SUMMARY_COST + PICK_COST)
+
+
+def test_a_pick_that_fails_is_general_for_now_and_picked_the_next_time(meeting, monkeypatch):
+    store, meeting_id = meeting
+    store.delete_setting("summary_template")
+    calls = fake_claude(monkeypatch, sample_summary(), pick=RuntimeError("Overloaded"))
+
+    summarize.summarize(store, meeting_id)
+
+    assert len(calls["picks"]) == 1
+    assert calls["system"] == summarize.SYSTEM.format(me="You")  # General: no focus
+    summary = store.summary(meeting_id)
+    assert summary["content"]["template"] == "general"
+    assert summary["cost_usd"] == pytest.approx(SUMMARY_COST)
+    # The meeting doesn't take General for picked: it's still Automatic.
+    saved = store.meeting(meeting_id)
+    assert (saved["template"], saved["template_source"]) == ("auto", None)
+    store.set_setting("summary_template", "general")  # whatever the usual kind is now
+    calls = fake_claude(monkeypatch, sample_summary(), pick='{"kind": "customer"}')
+
+    summarize.summarize(store, meeting_id)  # Regenerate
+
+    assert len(calls["picks"]) == 1 and "call with a customer or client" in calls["system"]
+    saved = store.meeting(meeting_id)
+    assert (saved["template"], saved["template_source"]) == ("customer", "auto")
 
 
 def test_a_kind_chosen_for_a_meeting_is_never_picked_over(meeting, monkeypatch):

@@ -107,30 +107,33 @@ type Choice = { id: string; label: string };
 const RECIPE_ICON: Record<string, typeof Mail> = { email: Mail, status: Megaphone, ticket: Ticket };
 
 /** The kind of meeting a summary is written for; it decides what the summary focuses on. One
- * ZachCap picked on its own (Automatic) says so next to it. */
+ * ZachCap picked on its own (Automatic) says so next to it, and so does one it couldn't pick. */
 function KindPicker({
   templates,
   value,
   automatic,
+  unpicked,
   onChange,
 }: {
   templates: Choice[];
   value: string;
   automatic: boolean;
+  unpicked: boolean;
   onChange: (id: string) => void;
 }) {
   const note = useId();
   if (!templates.length) return null;
+  const said = automatic ? "Picked automatically" : unpicked ? "No kind could be picked: written as General" : null;
   return (
     <>
-      {automatic && (
+      {said && (
         <span id={note} className="self-center text-xs text-muted-foreground">
-          Picked automatically
+          {said}
         </span>
       )}
       <select
         aria-label="Kind of meeting"
-        aria-describedby={automatic ? note : undefined}
+        aria-describedby={said ? note : undefined}
         title={
           automatic
             ? "Kind of meeting: ZachCap picked this one. Choose another to change it, or Automatic to pick again."
@@ -271,6 +274,7 @@ export function SummaryPanel({
   recipes,
   kind,
   pickedAutomatically,
+  unpicked,
   onKindChange,
   summarizing,
   onSummarize,
@@ -290,6 +294,8 @@ export function SummaryPanel({
   kind: string;
   /** That kind is the meeting's own, and ZachCap picked it (Automatic). */
   pickedAutomatically: boolean;
+  /** The meeting is Automatic, and no kind could be picked for its summary. */
+  unpicked: boolean;
   onKindChange: (kind: string) => void;
   /** Owned by the meeting page, so its header button and this panel can't both start one. */
   summarizing: boolean;
@@ -359,7 +365,13 @@ export function SummaryPanel({
           commitments and who said what. Pick the kind of meeting to set the focus.
         </p>
         <div className="mt-5 flex items-center gap-2">
-          <KindPicker templates={templates} value={kind} automatic={pickedAutomatically} onChange={onKindChange} />
+          <KindPicker
+            templates={templates}
+            value={kind}
+            automatic={pickedAutomatically}
+            unpicked={false}
+            onChange={onKindChange}
+          />
           <Button disabled={summarizing} onClick={onSummarize}>
             {summarizing ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
             {summarizing ? "Summarizing..." : "Summarize with Claude"}
@@ -389,7 +401,13 @@ export function SummaryPanel({
             <Copy className="size-3.5" />
             Copy
           </Button>
-          <KindPicker templates={templates} value={kind} automatic={pickedAutomatically} onChange={onKindChange} />
+          <KindPicker
+            templates={templates}
+            value={kind}
+            automatic={pickedAutomatically}
+            unpicked={unpicked}
+            onChange={onKindChange}
+          />
           <Button size="sm" variant="outline" disabled={summarizing} onClick={onSummarize}>
             {summarizing ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
             Regenerate
