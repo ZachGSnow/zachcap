@@ -9,6 +9,7 @@ terms in the wrong case, are corrected in the transcript text.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
@@ -172,16 +173,21 @@ def secretish(term: str) -> bool:
     return has_letter and has_other
 
 
+def _one_line(words: str) -> bool:
+    """No list separators, and no line break of any kind splitlines knows."""
+    return not any(c in words for c in ":,") and words.splitlines() in ([], [words])
+
+
 def usable(term: str) -> bool:
     """A term that fits on a Words to know line (no list separators) and has letters."""
-    return bool(term) and not any(c in term for c in ":,\n") and any(c.isalpha() for c in term)
+    return _one_line(term) and any(c.isalpha() for c in term)
 
 
 def add_correction(text: str | None, term: str, misheard: str | None) -> str:
     """The Words to know list with ``term`` (and what it was misheard as) added: merged into
     the term's own line when it has one, else a new line at the end."""
     term, misheard = term.strip(), (misheard or "").strip()
-    if not usable(term) or any(c in misheard for c in ":,\n"):
+    if not usable(term) or not _one_line(misheard):
         raise ValueError("A term can't contain a colon, a comma or a line break")
     lines = (text or "").splitlines()
     for index, line in enumerate(lines):
@@ -199,3 +205,20 @@ def add_correction(text: str | None, term: str, misheard: str | None) -> str:
     if len(merged) > LIST_LIMIT:
         raise ValueError("Words to know is full (4,000 characters); make room in Settings")
     return merged
+
+
+def add_terms(text: str | None, terms: Iterable[str]) -> str:
+    """The Words to know list with several terms added, each as add_correction adds one: all of
+    them, or none with its reason. A term that's there already, in any capitals, stays as it is."""
+    merged = text or ""
+    there = {term.lower() for term in parse(merged).terms}
+    for term in terms:
+        if term.strip().lower() not in there:
+            merged = add_correction(merged, term, None)
+            there.add(term.strip().lower())
+    return merged
+
+
+def room(text: str | None) -> int:
+    """How many more characters the list takes."""
+    return max(0, LIST_LIMIT - len((text or "").strip()))
