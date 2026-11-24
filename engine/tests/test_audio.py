@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import av
 import numpy as np
@@ -7,7 +8,7 @@ import pytest
 import soundfile as sf
 from PIL import Image
 
-from zachcap import audio, imports
+from zachcap import audio, decode_child, imports
 
 RATE = 16000
 
@@ -130,6 +131,51 @@ def test_import_converts_to_16k_mono_and_keeps_only_the_range(tmp_path: Path):
     assert np.abs(data[int(0.6 * out_rate) :]).max() < 0.01  # silence after it
 
 
+def test_an_import_keeps_every_sample_as_decoded(tmp_path: Path):
+    # Decoded as int16 and stored as 16-bit FLAC: every value there is comes through unchanged.
+    samples = np.random.default_rng(1).permutation(np.arange(-32768, 32768)).astype(np.int16)
+    sf.write(tmp_path / "in.wav", samples, RATE, subtype="PCM_16")
+
+    audio.import_media(tmp_path / "in.wav", tmp_path / "out.flac")
+
+    assert np.array_equal(sf.read(tmp_path / "out.flac", dtype="int16")[0], samples)
+    assert np.array_equal(audio.load_mono_16k(tmp_path / "out.flac"), samples / np.float32(32768))
+
+
+def test_an_import_leaves_space_to_spare_on_the_drive_it_goes_to(tmp_path: Path, monkeypatch):
+    # The decoder's temp folder can be on another drive than the recordings.
+    free = {"GB": 10}
+    monkeypatch.setattr(decode_child, "decode", lambda source: np.ones(RATE * 3600, np.int16))
+    monkeypatch.setattr(
+        shutil, "disk_usage", lambda folder: SimpleNamespace(free=free["GB"] * 2**30)
+    )
+    folder = tmp_path / "2026-11-21_093000-import"
+    folder.mkdir()
+    free["GB"] = 0.5  # an hour of audio is 110 MB, and 500 MB is kept for a recording
+
+    with pytest.raises(audio.NoRoom, match=r"^call\.mp4 needs at least 610 MB free on drive .:$"):
+        audio.import_media(tmp_path / "call.mp4", folder / "system.flac")
+
+    assert list(folder.iterdir()) == []
+    free["GB"] = 0.6
+    assert audio.import_media(tmp_path / "call.mp4", folder / "system.flac") == 3600
+
+
+def test_whether_there_is_room_is_still_known_once_the_import_is_gone(tmp_path: Path, monkeypatch):
+    asked = []
+
+    def usage(folder):
+        asked.append(Path(folder))
+        return SimpleNamespace(free=audio.SPARE)
+
+    monkeypatch.setattr(shutil, "disk_usage", usage)
+    gone = tmp_path / "2026-11-21_093000-import"  # removed when its import failed
+
+    assert not audio.NoRoom("call.mp4", gone, 1).over()
+    assert audio.NoRoom("call.mp4", gone, 0).over()
+    assert asked == [tmp_path, tmp_path]
+
+
 @pytest.mark.parametrize("suffix", sorted(imports.MEDIA))
 def test_every_kind_the_import_dialog_offers_is_read(tmp_path: Path, suffix: str):
     source = media(tmp_path / f"call{suffix}")
@@ -191,6 +237,113 @@ def test_a_teams_recording_imports_its_audio_and_its_video_is_never_decoded(tmp_
         assert sound.codec_context.format is not None
 
     assert abs(audio.import_media(source, tmp_path / "out.flac") - 1.0) < 0.15
+
+
+class Counted:
+    """A file that counts what FFmpeg reads of it."""
+
+    def __init__(self, file) -> None:
+        self.file, self.name, self.count = file, file.name, 0
+        self.seek, self.tell = file.seek, file.tell
+
+    def read(self, size: int) -> bytes:
+        data = self.file.read(size)
+        self.count += len(data)
+        return data
+
+
+def video_recording(
+    path: Path,
+    form: str,
+    options: dict[str, str] | None = None,
+    first: str = "",
+    tracks: int = 1,
+    late: float = 0.0,
+    seconds: float = 4.0,
+) -> Path:
+    """A recording that's mostly its picture (noise, as JPEGs), with ``tracks`` of audio that
+    start ``late`` seconds in. FFmpeg lays it out by time, unless one kind goes ``first``."""
+    noise = np.random.default_rng(1)
+    with av.open(str(path), "w", format=form, options=options or {}) as out:
+        picture = out.add_stream("mjpeg", rate=10)
+        picture.width, picture.height, picture.pix_fmt = 320, 240, "yuvj420p"
+        picture.bit_rate = 10_000_000
+        sounds = [out.add_stream("aac", rate=RATE, layout="mono") for _ in range(tracks)]
+        packets = {"audio": [], "video": []}
+        for number, sound in enumerate(sounds):
+            samples = tone(seconds - late) * (1 + number) / 2
+            frame = av.AudioFrame.from_ndarray(
+                (samples * 32767).astype(np.int16)[None, :], format="s16", layout="mono"
+            )
+            frame.sample_rate, frame.pts = RATE, int(late * RATE)
+            packets["audio"] += [*sound.encode(frame), *sound.encode(None)]
+        for index in range(int(seconds * 10)):
+            image = noise.integers(0, 255, (240, 320, 3), np.uint8)
+            frame = av.VideoFrame.from_ndarray(image, format="rgb24")
+            frame.pts = index
+            packets["video"] += picture.encode(frame)
+        packets["video"] += picture.encode(None)
+        both = sorted(
+            packets["audio"] + packets["video"],
+            key=lambda p: (first not in ("", p.stream.type), p.dts * p.time_base),
+        )
+        for packet in both:
+            out.mux(packet)
+    return path
+
+
+@pytest.mark.parametrize("form", ["mp4", "mov"])
+def test_only_the_audio_of_a_video_recording_is_read(tmp_path: Path, monkeypatch, form: str):
+    # On a mapped drive over a slow link, reading the video too took so long that the decoder
+    # was ended for taking too long to read. Laid out a second of each at a time (Windows' own
+    # writer takes a third of a second).
+    source = video_recording(tmp_path / f"Weekly sync.{form}", form, {"chunk_duration": "1000000"})
+    opened: list[Counted] = []
+    real = av.open
+
+    def counting(file, **options):
+        opened.append(Counted(file))
+        return real(opened[-1], **options)
+
+    monkeypatch.setattr(av, "open", counting)
+
+    samples = audio.decode_media(source, audio.IMPORTS)
+
+    assert abs(len(samples) / RATE - 4.0) < 0.15
+    (read,) = opened
+    assert read.count < 0.5 * source.stat().st_size
+
+
+@pytest.mark.parametrize(
+    ("name", "form", "how"),
+    [
+        ("call.mp4", "mp4", {}),
+        ("call.mp4", "mp4", {"options": {"movflags": "faststart"}}),
+        ("call.mp4", "mp4", {"options": {"movflags": "frag_keyframe+empty_moov"}}),
+        ("call.mp4", "mp4", {"options": {"chunk_duration": "1000000"}}),
+        ("call.mp4", "mp4", {"first": "audio"}),
+        ("call.mp4", "mp4", {"first": "video"}),
+        ("call.mp4", "mp4", {"tracks": 2}),  # the first is the one that's imported
+        ("call.mp4", "mp4", {"late": 2.0}),
+        ("call.mov", "mov", {}),
+        ("call.mkv", "matroska", {}),
+        ("call.mkv", "matroska", {"first": "video"}),
+        ("call.mkv", "matroska", {"late": 2.0, "tracks": 2}),
+    ],
+)
+def test_skipping_the_rest_leaves_the_audio_as_it_was(tmp_path: Path, name, form, how):
+    source = video_recording(tmp_path / name, form, **how)
+    whole = []  # decoded with everything in the file read, and nothing skipped
+    with av.open(str(source)) as container:
+        sound = container.streams.audio[0]
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=RATE)
+        for frame in [*container.decode(sound), None]:
+            whole += [out.to_ndarray().reshape(-1) for out in resampler.resample(frame)]
+
+    pieces = list(audio.decode_pieces(source, audio.IMPORTS))
+
+    assert np.array_equal(np.concatenate(pieces), np.concatenate(whole))
+    assert len(np.concatenate(pieces)) / RATE > 1.9
 
 
 def test_a_file_with_only_video_is_refused(tmp_path: Path):
@@ -263,6 +416,19 @@ def test_a_path_is_never_taken_for_a_url_or_a_protocol(tmp_path: Path):
     for url in (f"concat:{wav}|{wav}", f"subfile,,start,0,end,{wav.stat().st_size},,:{wav}"):
         with pytest.raises(OSError):  # read as a path: no such file
             audio.import_media(Path(url), tmp_path / "out.flac")
+
+
+def test_a_file_that_is_open_already_is_read_from_there(tmp_path: Path):
+    # The decoder's child opens it, then gives up the rights to open anything (decode_child).
+    source = media(tmp_path / "call.mp4")
+    whole = np.concatenate(list(audio.decode_pieces(source, audio.IMPORTS)))
+
+    with open(source, "rb") as file:
+        elsewhere = tmp_path / "gone" / "call.mp4"  # what it's called doesn't matter
+        pieces = list(audio.decode_pieces(elsewhere, audio.IMPORTS, file=file))
+        assert not file.closed  # it's the caller's
+
+    assert np.array_equal(np.concatenate(pieces), whole)
 
 
 def test_a_file_over_the_size_cap_is_refused_before_ffmpeg_sees_it(tmp_path: Path, monkeypatch):

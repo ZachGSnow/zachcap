@@ -15,9 +15,12 @@ long: files are read in a child process with a time limit (decode_child), so the
 on to the next file. So is one whose reading never finished: each file is noted before it
 is read, so one ZachCap was quit or stopped in the middle of isn't read again on every
 start. One that can't be opened right now (open in another program, a mapped network drive
-or cloud file offline) is simply tried again on the next look. Turning the folder off, or
-choosing another, stops a run between files. The user's files are only ever read: never
-moved, renamed or deleted.
+or cloud file offline) is simply tried again on the next look; one whose reading stalled,
+only a few times, since each of those looks waits for it for minutes. One there isn't the
+free space to decode is listed with the reason too, and tried again by itself once there is:
+each look only asks how much is free, since decoding it would fill the drive every time.
+Turning the folder off, or choosing another, stops a run between files. The user's files
+are only ever read: never moved, renamed or deleted.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import paths
+from .audio import NoRoom, Stalled
 from .imports import MEDIA, import_recording
 from .store import Store
 
@@ -40,6 +44,10 @@ SETTLED_AFTER = 30.0  # seconds since the file last changed
 # or hang of FFmpeg ends only its child process, and is noted as the reason), so it stays
 # only when ZachCap itself stopped part-way: it was quit, or the PC went off.
 UNFINISHED = "ZachCap stopped while reading it"
+# The notes of files that weren't imported, listed in Settings with their reason: "waiting"
+# for free space to decode them, or not to be tried again.
+NOT_IMPORTED = ("failed", "waiting")
+WHEN_THERE_IS = "and is imported once there is"  # a waiting file's reason goes on
 
 
 def media_files(folder: Path) -> dict[str, tuple[int, int]]:
@@ -73,7 +81,8 @@ def skip_existing(store: Store, folder: Path) -> int:
     skipped = 0
     with store.transaction():
         for path, (size, mtime_ns) in media_files(folder).items():
-            if store.watched_file(path, size, mtime_ns) is None:
+            noted = store.watched_file(path, size, mtime_ns)
+            if noted is None or noted["status"] == "waiting":
                 store.record_watched_file(path, size, mtime_ns, "skipped")
                 skipped += 1
     return skipped
@@ -81,7 +90,7 @@ def skip_existing(store: Store, folder: Path) -> int:
 
 def retry_existing(store: Store, folder: Path) -> None:
     """Turned on with "import what's there": files skipped or failed before get another go."""
-    store.forget_watched_files(list(media_files(folder)), ("skipped", "failed"))
+    store.forget_watched_files(list(media_files(folder)), ("skipped", *NOT_IMPORTED))
 
 
 class FolderWatch:
@@ -90,6 +99,7 @@ class FolderWatch:
     folder itself, which on an unreachable share could take most of a minute)."""
 
     TROUBLE_SHOWN_AFTER = 3  # looks in a row a file couldn't be opened before it's shown
+    STALLS = 3  # looks a file's reading may stall on before it's noted as failed
 
     def __init__(
         self,
@@ -99,13 +109,16 @@ class FolderWatch:
         self._submit = submit
         self._clock = clock
         self._last: dict[str, tuple[int, int]] = {}
-        # Files that couldn't be opened, by version: how many looks in a row, and why.
-        self._troubled: dict[tuple[str, int, int], tuple[int, str]] = {}
+        # Files that couldn't be read, by version: how many looks in a row, on how many of
+        # them the reading stalled, and why.
+        self._troubled: dict[tuple[str, int, int], tuple[int, int, str]] = {}
+        # Files there wasn't the free space to decode, by version: how much it takes.
+        self._waiting: dict[tuple[str, int, int], NoRoom] = {}
         self.failures: list[dict] = []
 
     def reset(self) -> None:
         """The folder changed or was turned off: start over."""
-        self._last, self._troubled, self.failures = {}, {}, []
+        self._last, self._troubled, self._waiting, self.failures = {}, {}, {}, []
 
     def check(self, store: Store) -> list[int]:
         """Imports the files that have stopped changing; returns the new meetings' ids."""
@@ -123,21 +136,36 @@ class FolderWatch:
         for path, (size, mtime_ns) in sorted(current.items()):
             if store.setting(SETTING) != folder:
                 break  # turned off, or another folder chosen: stop between files
-            if store.watched_file(path, size, mtime_ns) is not None:
+            version = (path, size, mtime_ns)
+            noted = store.watched_file(*version)
+            if noted is not None and noted["status"] != "waiting":
                 continue  # imported, skipped or failed already: this version is done
             settled = self._last.get(path) == (size, mtime_ns)
             if not settled or now - mtime_ns / 1e9 < SETTLED_AFTER:
                 continue  # still being written or copied (or seen for the first time)
-            version = (path, size, mtime_ns)
+            lacking = self._waiting.get(version)  # none after a restart: tried, to find out
+            if noted is not None and lacking is not None and not lacking.over():
+                continue  # still not the free space it takes
             # Noted before it is read: a file ZachCap stops in the middle of is then listed
             # (with Retry), not read again on every start.
             store.record_watched_file(path, size, mtime_ns, "failed", error=UNFINISHED)
+            self._waiting.pop(version, None)
             try:
                 meeting_id, _ = import_recording(store, Path(path))
             except OSError as exc:  # open elsewhere, offline: just try again next look
+                looks, stalls, _ = self._troubled.pop(version, (0, 0, ""))
+                stalls += isinstance(exc, Stalled)
+                if stalls >= self.STALLS:  # minutes each: noted now, not retried
+                    store.record_watched_file(*version, "failed", error=reason(exc, path))
+                    continue
                 store.forget_watched_files([path], ("failed",))  # the note is taken back
-                looks, _ = self._troubled.get(version, (0, ""))
-                self._troubled[version] = (looks + 1, reason(exc, path))
+                self._troubled[version] = (looks + 1, stalls, reason(exc, path))
+                continue
+            except NoRoom as exc:  # tried again once there's the space
+                self._troubled.pop(version, None)
+                self._waiting[version] = exc
+                why = f"{reason(exc, path)}, {WHEN_THERE_IS}"
+                store.record_watched_file(*version, "waiting", error=why)
                 continue
             except Exception as exc:  # not a recording this can read: noted, not retried
                 self._troubled.pop(version, None)
@@ -165,7 +193,7 @@ class FolderWatch:
         ]
         stuck = [
             {"name": Path(path).name, "error": why, "retrying": True}
-            for (path, size, mtime_ns), (looks, why) in self._troubled.items()
+            for (path, size, mtime_ns), (looks, _, why) in self._troubled.items()
             if looks >= self.TROUBLE_SHOWN_AFTER and current.get(path) == (size, mtime_ns)
         ]
         return failed + stuck
@@ -176,8 +204,8 @@ class FolderWatch:
         if not folder:
             return 0
         rows = store.watched_failures(str(Path(folder)))
-        store.forget_watched_files([row["path"] for row in rows], ("failed",))
-        self._troubled = {}
+        store.forget_watched_files([row["path"] for row in rows], NOT_IMPORTED)
+        self._troubled, self._waiting = {}, {}
         self.failures = []
         return len(rows)
 

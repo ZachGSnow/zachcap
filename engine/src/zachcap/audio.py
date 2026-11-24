@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import shutil
 import stat
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from math import gcd
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, BinaryIO, NamedTuple
 
 import numpy as np
 import soundfile as sf
+
+from .watchdog import LOW_DISK_BYTES
 
 if TYPE_CHECKING:
     from av.container import InputContainer
@@ -52,16 +56,51 @@ IMPORTS = Allowed(
 # itself. Media the user brings in (IMPORTS) is decoded in a child process (decode_child).
 TRACKS = Allowed(formats="flac,wav", decoders="flac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le")
 # Well past any meeting recording: Teams ends one at 4 hours or 1.5 GB and starts another,
-# and 8 GB is 12 hours of video at about 1.5 Mbps. Twelve hours of audio is 2.8 GB once
-# decoded, so the length is also what bounds memory.
+# and 8 GB is 12 hours of video at about 1.5 Mbps. Twelve hours of audio is 1.4 GB once
+# decoded (2.8 GB as float32), so the length is also what bounds memory.
 MAX_BYTES = 8 * 2**30
 MAX_SECONDS = 12 * 3600
+# What decoding and importing leave free on a drive: a recording may be running on it, whose
+# watch warns below this.
+SPARE = LOW_DISK_BYTES
 
 
 class Refused(ValueError):
     """A file ZachCap won't import: of a kind it doesn't read, with no audio or audio it
     doesn't read, too big or too long, or one that crashed the decoder or took it too long
     to read (decode_child). The message says which, for the user."""
+
+
+class Stalled(TimeoutError):
+    """Reading a file got nowhere for so long that it was given up, though its decoder wasn't
+    busy (decode_child): a network drive that stopped answering, most likely, or a cloud file
+    that isn't here yet. An OSError, as for any file that can't be read right now."""
+
+
+class NoRoom(Refused):
+    """A file there isn't the free space to decode: ``size`` bytes of audio go on the drive
+    ``folder`` is on, and SPARE stays free there besides. It's not the file's doing, so the
+    watch folder tries it again once there's room."""
+
+    def __init__(self, name: str, folder: Path, size: int) -> None:
+        self.folder, self.needs = folder, size + SPARE
+        needs = math.ceil(self.needs / 2**20)
+        super().__init__(f"{name} needs at least {needs:,} MB free on drive {folder.drive}")
+
+    def over(self) -> bool:
+        """Whether there's room now (or no telling, in which case it's worth a try)."""
+        try:  # an import's own folder is removed when it fails: the one it was in, then
+            folder = next(f for f in (self.folder, *self.folder.parents) if f.is_dir())
+            return shutil.disk_usage(folder).free >= self.needs
+        except (OSError, StopIteration):
+            return True
+
+
+def check_room(name: str, folder: Path, size: int = 0) -> None:
+    """Raises NoRoom unless there's room for ``size`` bytes of a file's audio."""
+    lacking = NoRoom(name, folder, size)
+    if not lacking.over():
+        raise lacking
 
 
 def load_mono_16k(path: Path) -> np.ndarray:
@@ -128,9 +167,12 @@ def parse_time(value: str | None) -> float | None:
 
 
 @contextmanager
-def open_media(path: Path, allowed: Allowed) -> Iterator[InputContainer]:
+def open_media(
+    path: Path, allowed: Allowed, file: BinaryIO | None = None
+) -> Iterator[InputContainer]:
     """The file opened with FFmpeg, kept to the ``allowed`` kinds of file and decoders and
-    to local files. Everything ZachCap decodes with FFmpeg is opened here.
+    to local files. Everything ZachCap decodes with FFmpeg is opened here. ``file`` is the
+    file, if it's open already.
 
     Python opens the file and FFmpeg reads it through that file object, so the path is never
     taken for a URL, a protocol ("http:", "concat:", "subfile,") or a numbered image
@@ -144,7 +186,7 @@ def open_media(path: Path, allowed: Allowed) -> Iterator[InputContainer]:
     """
     import av
 
-    with open(path, "rb") as file:
+    with open(path, "rb") if file is None else nullcontext(file) as file:
         info = os.fstat(file.fileno())
         if not stat.S_ISREG(info.st_mode):
             raise Refused(f"{path.name} isn't a file")
@@ -170,16 +212,23 @@ def open_media(path: Path, allowed: Allowed) -> Iterator[InputContainer]:
             yield container
 
 
-def decode_pieces(source: Path, allowed: Allowed) -> Iterator[np.ndarray]:
+def decode_pieces(
+    source: Path,
+    allowed: Allowed,
+    starting: Callable[[float], object] | None = None,
+    file: BinaryIO | None = None,
+) -> Iterator[np.ndarray]:
     """The first audio stream of a media file as 16 kHz mono int16, a piece at a time as
-    FFmpeg decodes it. Raises Refused for a file open_media won't open, one with no audio or
-    with audio that isn't allowed, and one that holds over MAX_SECONDS of audio (once that
-    much has come out, if the file doesn't say so first)."""
+    FFmpeg decodes it. ``starting`` is told how long the file says it is, in seconds (0 if it
+    doesn't say), before any of it is decoded; ``file`` is the file, if it's open already.
+    Raises Refused for a file open_media won't open, one with no audio or with audio that
+    isn't allowed, and one that holds over MAX_SECONDS of audio (once that much has come out,
+    if the file doesn't say so first)."""
     import av
 
     too_long = f"{source.name} is over {MAX_SECONDS // 3600} hours, too long to import"
     pieces = 0
-    with open_media(source, allowed) as container:
+    with open_media(source, allowed, file) as container:
         stream = next((s for s in container.streams if s.type == "audio"), None)
         if stream is None:
             raise Refused(f"{source.name} has no audio")
@@ -189,8 +238,17 @@ def decode_pieces(source: Path, allowed: Allowed) -> Iterator[np.ndarray]:
             raise Refused(f"{source.name} has its audio in a format ZachCap doesn't import")
         # The length the file gives is checked before anything is decoded. What is decoded
         # is counted as well: a file cut off by a crash gives no length, and a file can lie.
-        if (container.duration or 0) / av.time_base > MAX_SECONDS:
+        seconds = (container.duration or 0) / av.time_base
+        if seconds > MAX_SECONDS:
             raise Refused(too_long)
+        if starting is not None:
+            starting(seconds)
+        # Only this stream is read: FFmpeg skips the rest where the file lets it. That's most
+        # of a video recording in an .mp4 laid out in pieces of 64 KB or more (as Windows' own
+        # writer does), and nothing of an .mkv.
+        for other in container.streams:
+            if other is not stream:
+                other.discard = av.stream.Discard.all
         resampler = av.AudioResampler(format="s16", layout="mono", rate=RATE)
         kept = 0
         for frame in container.decode(stream):
@@ -220,7 +278,8 @@ def import_media(
 ) -> float:
     """Decode an audio or video file of a kind the Import dialog offers (mp4, m4a, mp3,
     wav...) to a 16 kHz mono FLAC, optionally keeping only start..end. Returns the kept
-    length in seconds. Raises Refused, with the reason, for a file it won't read.
+    length in seconds. Raises Refused, with the reason, for a file it won't read, and NoRoom
+    (one of those) when the decoder's drive or the FLAC's hasn't the free space.
 
     Decoding uses PyAV (FFmpeg built in), so no separate FFmpeg install is needed. It runs
     in a child process (decode_child), so a file that crashes or hangs FFmpeg ends only that
@@ -234,7 +293,8 @@ def import_media(
     audio = audio[first : int(last * RATE) if last is not None else None]
     if audio.size == 0:
         raise ValueError("The selected range has no audio")
-    sf.write(target, audio, RATE, subtype="PCM_16")
+    check_room(source.name, target.parent, audio.nbytes)  # FLAC takes about half of that
+    sf.write(target, audio, RATE, subtype="PCM_16")  # int16, as decoded: nothing is lost
     return len(audio) / RATE
 
 

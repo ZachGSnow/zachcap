@@ -1,16 +1,19 @@
 """The watch folder: recordings saved there import themselves, once each."""
 
 import os
+import shutil
+import subprocess
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import soundfile as sf
 
-from zachcap import imports, watchfolder
+from zachcap import audio, imports, watchfolder
 from zachcap.store import Store
 
 # Makes the decoder's child process crash or hang part-way through a file (decode_child).
@@ -291,18 +294,195 @@ def test_a_file_that_crashes_the_decoder_is_listed_and_the_look_goes_on(library,
 def test_a_file_that_hangs_the_decoder_is_ended_and_listed(library, monkeypatch):
     store, folder = library
     recording(folder / "hangs.wav")
-    monkeypatch.setenv(DECODE_TEST, "hang")  # a minute's sleep once it has some audio
-    monkeypatch.setattr("zachcap.decode_child.START", 2.0)
+    monkeypatch.setenv(DECODE_TEST, "hang")  # a minute's work once it has some audio
+    monkeypatch.setattr("zachcap.decode_child.BUSY", 2.0)
     watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
     watch.check(store)
 
     began = time.monotonic()
     assert watch.check(store) == []
-    assert time.monotonic() - began < 20  # ended at the time limit, not when the sleep ends
+    assert time.monotonic() - began < 50  # ended at the time limit, not when the work is done
 
     hung = [{"name": "hangs.wav", "error": "hangs.wav took too long to read", "retrying": False}]
     assert watch.failures == hung
     assert watch.check(store) == [] and watch.failures == hung  # not tried again
+
+
+def test_a_file_on_a_drive_that_stops_answering_is_tried_again(library, monkeypatch):
+    store, folder = library
+    recording(folder / "a-stalls.wav")
+    recording(folder / "b-fine.wav")
+    real = watchfolder.import_recording
+
+    def stall_on_the_first(store_, path):  # its decoder waits, once it has some audio
+        with monkeypatch.context() as patch:
+            if path.name == "a-stalls.wav":
+                patch.setenv(DECODE_TEST, "stall")
+                patch.setattr("zachcap.decode_child.IDLE", 2.0)
+            return real(store_, path)
+
+    monkeypatch.setattr(watchfolder, "import_recording", stall_on_the_first)
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    watch.check(store)
+    assert len(watch.check(store)) == 1  # b-fine.wav, in the same look
+    assert watch.failures == []
+
+    monkeypatch.setattr(watchfolder, "import_recording", real)  # it answers again
+    assert len(watch.check(store)) == 1 and watch.failures == []
+
+
+def test_a_file_whose_reading_keeps_stalling_is_listed_after_a_few_looks(library, monkeypatch):
+    # Each of those looks waits minutes for it, so it doesn't go on for ever.
+    store, folder = library
+    recording(folder / "cloud.wav")
+    real, reads = watchfolder.import_recording, []
+
+    def stalls(store_, path):
+        reads.append(path.name)
+        if len(reads) == 2:  # in use in between: that's no stall
+            raise PermissionError(13, "The process cannot access the file", str(path))
+        raise audio.Stalled(f"reading {path.name} stalled; its drive may be offline")
+
+    monkeypatch.setattr(watchfolder, "import_recording", stalls)
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    for _ in range(8):
+        watch.check(store)
+
+    assert len(reads) == 4  # three stalls
+    why = "reading cloud.wav stalled; its drive may be offline"
+    assert watch.failures == [{"name": "cloud.wav", "error": why, "retrying": False}]
+    assert watch.retry_failed(store) == 1  # Settings' Retry gives it three more
+    for _ in range(5):
+        watch.check(store)
+    assert len(reads) == 7
+    assert watch.retry_failed(store) == 1
+    monkeypatch.setattr(watchfolder, "import_recording", real)
+    assert len(watch.check(store)) == 1
+
+
+@pytest.fixture
+def drive(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """What Windows says is free on any drive, in MB, and the decoders started."""
+    state = {"free": 100, "decoders": 0}
+    real = subprocess.Popen
+
+    def start(command, *args, **kwargs):
+        state["decoders"] += "zachcap.decode_child" in command
+        return real(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", start)
+    monkeypatch.setattr(
+        shutil, "disk_usage", lambda folder: SimpleNamespace(free=state["free"] * 2**20)
+    )
+    return state
+
+
+def test_a_file_there_is_no_room_to_decode_waits_for_the_room(library, drive):
+    # A full drive isn't the file's doing, so it's imported once there is room; but a look
+    # every 30 s that decoded it again would fill the drive every time.
+    store, folder = library
+    recording(folder / "call.wav", 1.0)
+    queued: list[int] = []
+    watch = watchfolder.FolderWatch(queued.append, clock=Clock())
+    for _ in range(6):
+        assert watch.check(store) == []
+
+    assert drive["decoders"] == 0  # 100 MB free: none was started
+    (listed,) = watch.failures
+    assert listed["name"] == "call.wav" and not listed["retrying"]  # with Settings' Retry
+    assert listed["error"].startswith("call.wav needs at least 500 MB free on drive ")
+    assert listed["error"].endswith(":, and is imported once there is")
+
+    drive["free"] = 5000
+    (meeting_id,) = watch.check(store)  # on its own, at the first look there's room
+    assert queued == [meeting_id] and watch.failures == [] and drive["decoders"] == 1
+    assert watch.check(store) == []
+
+
+def no_room(attempts: list[str], megabytes: int):
+    """An import that finds, once it has decoded the file, that it takes so much space."""
+
+    def decode(store: Store, path: Path):
+        attempts.append(path.name)
+        raise audio.NoRoom(path.name, path.parent, megabytes * 2**20)
+
+    return decode
+
+
+def test_a_file_that_fills_the_drive_is_decoded_again_only_with_the_room_it_took(
+    library, drive, monkeypatch
+):
+    store, folder = library
+    recording(folder / "workshop.mp3")
+    attempts: list[str] = []
+    real = watchfolder.import_recording
+    monkeypatch.setattr(watchfolder, "import_recording", no_room(attempts, 1000))
+    drive["free"] = 1200
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    for free in (1200, 1200, 1200, 1300, 1499):  # 1000 MB, and 500 MB to spare
+        drive["free"] = free
+        watch.check(store)
+    assert attempts == ["workshop.mp3"]
+
+    drive["free"] = 1500
+    watch.check(store)
+    assert len(attempts) == 2
+    restarted = watchfolder.FolderWatch(lambda _: None, clock=Clock())  # ZachCap started again
+    drive["free"] = 1200
+    for _ in range(4):
+        restarted.check(store)
+    assert len(attempts) == 3  # once, to find out how much it takes
+    (listed,) = restarted.failures
+    assert "needs at least 1,500 MB free" in listed["error"]
+
+    assert restarted.retry_failed(store) == 1  # Settings' Retry: whatever is free
+    assert restarted.failures == []
+    restarted.check(store)
+    assert len(attempts) == 4
+    monkeypatch.setattr(watchfolder, "import_recording", real)
+    drive["free"] = 1500
+    assert len(restarted.check(store)) == 1
+
+
+def test_a_file_waiting_for_room_is_skipped_or_taken_like_the_others_there(
+    library, drive, monkeypatch
+):
+    store, folder = library
+    recording(folder / "call.wav")
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    for _ in range(2):
+        watch.check(store)
+    assert len(watch.failures) == 1
+    watch.reset()  # the folder was turned off, and on again with "only new recordings"
+    assert watchfolder.skip_existing(store, folder) == 1
+    drive["free"] = 5000
+    for _ in range(3):
+        assert watch.check(store) == []
+    assert watch.failures == []
+
+    drive["free"] = 100
+    watchfolder.retry_existing(store, folder)  # "import the ones there too"
+    watch.check(store)
+    assert len(watch.failures) == 1
+    watchfolder.retry_existing(store, folder)
+    drive["free"] = 5000
+    assert len(watch.check(store)) == 1
+
+
+def test_audio_that_cant_be_written_out_is_listed_not_decoded_on_every_look(
+    library, drive, monkeypatch
+):
+    store, folder = library
+    recording(folder / "call.wav")
+    drive["free"] = 5000
+    monkeypatch.setenv(DECODE_TEST, "unwritable")  # writing it fails, though there's room
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    for _ in range(5):
+        assert watch.check(store) == []
+
+    why = "the audio of call.wav couldn't be written out: Bad file descriptor"
+    assert watch.failures == [{"name": "call.wav", "error": why, "retrying": False}]
+    assert drive["decoders"] == 1
 
 
 class Crash(BaseException):
