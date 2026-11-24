@@ -1073,7 +1073,7 @@ export function SettingsView() {
           </Row>
           <Row
             label="Export folder"
-            help="Also keep every meeting there as a Markdown file, updated as it changes: for Obsidian or a notes folder. Pick a folder that isn't synced to a work cloud if meetings are confidential."
+            help="Also keep every meeting there as a Markdown file, updated as it changes: for Obsidian or a notes folder. Pick a folder that isn't synced to a work cloud if meetings are confidential, and that isn't inside a vault whose plugins run code from notes (Dataview JavaScript, Templater on new files): anyone on a call can put words in these files."
           >
             <code className="min-w-0 flex-1 truncate font-mono text-xs" title={settings?.export_folder || undefined}>
               {settings?.export_folder || "Off"}

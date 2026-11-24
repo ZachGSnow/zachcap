@@ -4,7 +4,8 @@ An optional export folder (an Obsidian vault, say) gets a Markdown copy of every
 rewritten whenever the meeting changes. Each copy's name ends with the meeting's id, "(M12)",
 so a renamed meeting replaces its old file and two meetings never share one. What other people
 said or wrote, and what Claude made of it, goes into Markdown through inert(), so an image or
-an HTML tag in it never loads anything when the file is opened.
+an HTML tag in it never loads anything when the file is opened, and nothing in it runs as code
+(a Mermaid diagram, a Dataview query, a Templater command).
 """
 
 from __future__ import annotations
@@ -21,20 +22,67 @@ from .store import Store
 
 FORMATS = {"md": "Markdown", "txt": "Text", "srt": "Subtitles (SRT)", "vtt": "Subtitles (WebVTT)"}
 
-# What makes a Markdown app (Obsidian, say) load something when it opens a file: an image,
-# inline, by reference or embedded ("![x](url)", "![x][1]", "![[x]]"), or raw HTML, which
-# starts with "<" and a letter, "/", "!" or "?" (a tag, a comment, "<https://...>"). The
-# backslashes already in front of one are taken along, as they decide whether it is escaped.
-# The page's copy of a summary as Markdown (src/lib/markdown.ts) follows the same rule.
-_LOADS = re.compile(r"(\\*)(!\[|<(?=[A-Za-z/!?]))")
+# What makes a Markdown app (Obsidian, say) load something, or one of its plugins run code,
+# when it opens a file, and the backslash that stops each:
+# - An image, inline, by reference or embedded ("![x](url)", "![x][1]", "![[x]]"), or raw HTML,
+#   which starts with "<" and a letter, "/", "!" or "?" (a tag, a comment, "<https://...>"): a
+#   backslash before it. The backslashes already in front of one are taken along, from the
+#   first of them (so a long run is read once), and doubled, as they decide whether it is
+#   escaped.
+# - "<%", which opens a Templater command wherever it is: Templater reads the file's raw text
+#   (code included) when a new file appears, and has no escape. It is written "<\%".
+# - Three or more backticks or tildes, which open a code block that Obsidian or a plugin runs
+#   (mermaid, dataviewjs, dataview, tasks, button...): a backslash before each. Anywhere, not
+#   only at the start of a line, as a quote, a list item or a footnote ("[^1]: ") can open one
+#   mid-line.
+# - "=" or "$=" where a code's text can start, which Dataview runs as a query (it trims the
+#   text first, and reads code blocks too): after backticks and any spaces; first on a line,
+#   after any spaces and a quote's ">" (a code can go on from the line before, and an editor
+#   may take a backtick left open as the start of one); or after a tab or four spaces (an
+#   indented code block). A backslash goes before the "=": inside code it shows, so the text
+#   no longer starts with Dataview's prefix; elsewhere Markdown hides it.
+# _BLANK is the whitespace JavaScript's trim() removes, other than line breaks, spelled out
+# (Python's \s differs). The page's copy of a summary as Markdown (src/lib/markdown.ts)
+# follows the same rule.
+_BLANK = r"[\t\v\f \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"  # no line break
+_LINE = r"(?:^|(?<=[\n\r]))(?:" + _BLANK + "|>)*"  # a line's start, its spaces and quotes
+_INDENT = r"(?: {4}| {0,3}\t)"  # an indented code block's: four spaces, or a tab after fewer
+_ACTIVE = re.compile(
+    "|".join(
+        (
+            # An image or HTML, and the backslashes in front of it
+            r"(?<!\\)(\\*)(!\[|<(?=[A-Za-z/!?]))",
+            # A Templater command
+            "<%",
+            # A code fence
+            "(`{3,}|~{3,})",
+            # Dataview's prefix at the start of a code's text
+            "(`+" + _BLANK + "*|" + _LINE + "|(?<!" + _BLANK + ")" + _INDENT + _BLANK + "*)([$]?)=",
+        )
+    )
+)
+
+
+def _escaped(found: re.Match[str]) -> str:
+    """What _ACTIVE found, with its backslashes."""
+    slashes, start, fence, code, dollar = found.groups()
+    if start:
+        return slashes * 2 + "\\" + start
+    if fence:
+        return "".join("\\" + mark for mark in fence)
+    if code is not None:
+        return code + dollar + "\\="
+    return "<\\%"
 
 
 def inert(text: str) -> str:
     """Text from a meeting or from Claude, for a Markdown file: a backslash goes before each
-    "![" and each "<" that could start HTML, so a Markdown app shows them as typed and loads
-    nothing (an image's link stays a link), and a text editor shows little change.
-    Backslashes already in front are doubled, so they still show and can't cancel it."""
-    return _LOADS.sub(lambda found: found[1] * 2 + "\\" + found[2], text)
+    "![" and each "<" that could start HTML, inside each "<%", before each mark of a code
+    fence and before the "=" that starts a Dataview query, so a Markdown app shows them as
+    typed (an image's link stays a link, a code block's code a paragraph) and neither it nor
+    its plugins load or run any of it, and a text editor shows little change. Backslashes
+    already in front of "![" or "<" are doubled, so they still show and can't cancel it."""
+    return _ACTIVE.sub(_escaped, text)
 
 
 def _clock(seconds: float) -> str:
