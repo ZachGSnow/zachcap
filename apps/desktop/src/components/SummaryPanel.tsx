@@ -18,6 +18,7 @@ import { useReturnFocus } from "@/hooks/useReturnFocus";
 import { api, type ActionItem, type RecipeResult, type Summary } from "@/lib/engine";
 import { attempt, copyText } from "@/lib/feedback";
 import { clock, toSeconds, type SpeakerColor } from "@/lib/format";
+import { summaryMarkdown } from "@/lib/markdown";
 import { cn } from "@/lib/utils";
 
 export function modelLabel(id: string): string {
@@ -27,26 +28,6 @@ export function modelLabel(id: string): string {
     "claude-fable-5-1": "Claude Fable 5.1",
   };
   return known[id] ?? id;
-}
-
-function toMarkdown(title: string, summary: Summary, items: ActionItem[]): string {
-  const c = summary.content;
-  const list = (values: string[]) => values.map((value) => `- ${value}`).join("\n");
-  const sections = [
-    `# ${title}`,
-    c.overview,
-    items.length
-      ? `## Action items\n${items
-          .map((a) => `- [${a.status === "done" ? "x" : " "}] **${a.owner}**: ${a.task}${a.due ? ` (${a.due})` : ""}`)
-          .join("\n")}`
-      : "",
-    c.decisions.length ? `## Decisions\n${list(c.decisions)}` : "",
-    c.who_said_what?.length
-      ? `## Who said what\n${c.who_said_what.map((s) => `**${s.speaker}**\n${list(s.points)}`).join("\n\n")}`
-      : "",
-    c.open_questions.length ? `## Open questions\n${list(c.open_questions)}` : "",
-  ];
-  return sections.filter(Boolean).join("\n\n");
 }
 
 function Section({ title, count, children }: { title: string; count?: number; children: ReactNode }) {
@@ -376,7 +357,7 @@ export function SummaryPanel({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => void copyText(toMarkdown(title, summary, items), "Summary copied as Markdown")}
+            onClick={() => void copyText(summaryMarkdown(title, summary, items), "Summary copied as Markdown")}
           >
             <Copy className="size-3.5" />
             Copy

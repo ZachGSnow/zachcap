@@ -25,6 +25,7 @@ FORMATS = {"md": "Markdown", "txt": "Text", "srt": "Subtitles (SRT)", "vtt": "Su
 # inline, by reference or embedded ("![x](url)", "![x][1]", "![[x]]"), or raw HTML, which
 # starts with "<" and a letter, "/", "!" or "?" (a tag, a comment, "<https://...>"). The
 # backslashes already in front of one are taken along, as they decide whether it is escaped.
+# The page's copy of a summary as Markdown (src/lib/markdown.ts) follows the same rule.
 _LOADS = re.compile(r"(\\*)(!\[|<(?=[A-Za-z/!?]))")
 
 
