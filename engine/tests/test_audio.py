@@ -266,6 +266,8 @@ def test_a_path_is_never_taken_for_a_url_or_a_protocol(tmp_path: Path):
 
 
 def test_a_file_over_the_size_cap_is_refused_before_ffmpeg_sees_it(tmp_path: Path, monkeypatch):
+    # Here, where the caps are checked: an import does it in a child process, which a cap
+    # changed by a test doesn't reach.
     source = media(tmp_path / "all-day.mp4")
     monkeypatch.setattr(audio, "MAX_BYTES", source.stat().st_size - 1)
     with monkeypatch.context() as patch:
@@ -273,10 +275,10 @@ def test_a_file_over_the_size_cap_is_refused_before_ffmpeg_sees_it(tmp_path: Pat
         with pytest.raises(
             audio.Refused, match=r"^all-day\.mp4 is over \d+ GB, too big to import$"
         ):
-            audio.import_media(source, tmp_path / "out.flac")
+            audio.decode_media(source, audio.IMPORTS)
 
     monkeypatch.setattr(audio, "MAX_BYTES", source.stat().st_size)
-    assert audio.import_media(source, tmp_path / "out.flac") > 0.9
+    assert len(audio.decode_media(source, audio.IMPORTS)) / RATE > 0.9
 
 
 def saying(path: Path, seconds: float) -> Path:
@@ -297,7 +299,7 @@ def test_a_file_that_says_it_is_too_long_is_refused_before_it_is_decoded(
     monkeypatch.setattr(av, "AudioResampler", lambda **kwargs: pytest.fail("decoded"))
 
     with pytest.raises(audio.Refused, match="^workshop.flac is over 12 hours, too long to import$"):
-        audio.import_media(source, tmp_path / "out.flac")
+        audio.decode_media(source, audio.IMPORTS)  # here: the patch doesn't reach a child
 
 
 @pytest.mark.parametrize("header", ["no length", "a wrong length"])
@@ -313,3 +315,50 @@ def test_a_length_the_file_doesnt_give_is_counted_while_decoding(
 
     with pytest.raises(audio.Refused, match="too long to import"):
         audio.decode_media(source)
+
+
+def not_here(*args, **kwargs):
+    pytest.fail("FFmpeg opened the file in the engine's own process")
+
+
+def test_an_import_is_decoded_in_a_child_process(tmp_path: Path, monkeypatch):
+    # FFmpeg never opens a file the user brings in inside the engine, so a crafted or broken
+    # one can only crash or hang the child.
+    source = media(tmp_path / "Weekly sync-20261121_093000-Meeting Recording.mp4")
+    monkeypatch.setattr(av, "open", not_here)
+
+    seconds = audio.import_media(source, tmp_path / "out.flac", start="0.25")
+
+    data, rate = sf.read(tmp_path / "out.flac")
+    assert abs(seconds - 0.75) < 0.15 and rate == RATE and data.ndim == 1
+    assert np.abs(data).max() > 0.2  # the tone, kept from 0.25 s on
+
+
+@pytest.mark.parametrize(
+    ("name", "make", "message"),
+    [
+        ("screen.mp4", lambda path: encode(path, "mp4", None, video=True), "has no audio"),
+        (
+            "film.mkv",
+            lambda path: encode(path, "matroska", "ac3", rate=48000),
+            "has its audio in a format ZachCap doesn't import",
+        ),
+        ("voicemail.mp3", concat_list, "isn't in a format ZachCap imports"),
+        (
+            "workshop.flac",
+            lambda path: saying(media(path), 13 * 3600),
+            "is over 12 hours, too long to import",
+        ),
+    ],
+)
+def test_a_refusal_from_the_child_reads_as_it_did(
+    tmp_path: Path, monkeypatch, name: str, make, message: str
+):
+    source = make(tmp_path / name)
+    monkeypatch.setattr(av, "open", not_here)
+
+    with pytest.raises(audio.Refused) as refused:
+        audio.import_media(source, tmp_path / "out.flac")
+
+    assert str(refused.value) == f"{name} {message}"
+    assert not (tmp_path / "out.flac").exists()

@@ -13,6 +13,9 @@ import soundfile as sf
 from zachcap import imports, watchfolder
 from zachcap.store import Store
 
+# Makes the decoder's child process crash or hang part-way through a file (decode_child).
+DECODE_TEST = "ZACHCAP_DECODE_TEST"
+
 
 class Clock:
     def __init__(self) -> None:
@@ -249,8 +252,62 @@ def test_a_playlist_saved_as_mp3_is_listed_with_the_reason_not_followed(library)
     ]
 
 
+def test_a_file_that_crashes_the_decoder_is_listed_and_the_look_goes_on(library, monkeypatch):
+    store, folder = library
+    recording(folder / "a-crash.wav")
+    recording(folder / "b-fine.wav")
+    real, reads = watchfolder.import_recording, []
+
+    def crash_on_the_first(store_, path):
+        reads.append(path.name)
+        if reads == ["a-crash.wav"]:  # its decoder crashes once it has some audio
+            monkeypatch.setenv(DECODE_TEST, "crash")
+        try:
+            return real(store_, path)
+        finally:
+            monkeypatch.delenv(DECODE_TEST, raising=False)
+
+    monkeypatch.setattr(watchfolder, "import_recording", crash_on_the_first)
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    watch.check(store)
+    assert len(watch.check(store)) == 1  # b-fine.wav, in the same look
+
+    crashed = [
+        {
+            "name": "a-crash.wav",
+            "error": "a-crash.wav crashed the decoder (0xC0000005)",
+            "retrying": False,
+        }
+    ]
+    assert watch.failures == crashed
+    restarted = watchfolder.FolderWatch(lambda _: None, clock=Clock())  # ZachCap started again
+    for _ in range(2):
+        restarted.check(store)
+    assert reads == ["a-crash.wav", "b-fine.wav"] and restarted.failures == crashed
+    assert restarted.retry_failed(store) == 1  # Settings' Retry gives it another go
+    assert len(restarted.check(store)) == 1
+
+
+def test_a_file_that_hangs_the_decoder_is_ended_and_listed(library, monkeypatch):
+    store, folder = library
+    recording(folder / "hangs.wav")
+    monkeypatch.setenv(DECODE_TEST, "hang")  # a minute's sleep once it has some audio
+    monkeypatch.setattr("zachcap.decode_child.START", 2.0)
+    watch = watchfolder.FolderWatch(lambda _: None, clock=Clock())
+    watch.check(store)
+
+    began = time.monotonic()
+    assert watch.check(store) == []
+    assert time.monotonic() - began < 20  # ended at the time limit, not when the sleep ends
+
+    hung = [{"name": "hangs.wav", "error": "hangs.wav took too long to read", "retrying": False}]
+    assert watch.failures == hung
+    assert watch.check(store) == [] and watch.failures == hung  # not tried again
+
+
 class Crash(BaseException):
-    """ZachCap dying inside FFmpeg: nothing after the read runs."""
+    """ZachCap stopping while it reads a file (quit, or the PC going off): nothing after the
+    read runs."""
 
 
 def test_a_file_that_crashes_ffmpeg_isnt_read_again_after_a_restart(library, monkeypatch):
