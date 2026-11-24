@@ -331,11 +331,12 @@ let info: EngineInfo | null = null;
 
 export const isTauri = () => "__TAURI_INTERNALS__" in window;
 
-export async function connect(): Promise<EngineInfo> {
-  if (info) return info;
+/** Where the engine is: asked of the shell each time, since every start of the engine (a
+ * restart included) has a port and a token of its own; null while it's starting. */
+export async function connect(): Promise<EngineInfo | null> {
   if (isTauri()) {
-    info = await invoke<EngineInfo>("engine_info");
-  } else {
+    info = await invoke<EngineInfo | null>("engine_info");
+  } else if (!info) {
     // Browser development: start the engine yourself with a token of your own (there's no
     // default), and give the page the same one in VITE_ZACHCAP_TOKEN.
     const token = import.meta.env.VITE_ZACHCAP_TOKEN;
@@ -380,6 +381,9 @@ export async function waitForEngine(timeoutMs = 180_000, onSetup?: (step: string
   let deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
+      // Asked again each time: until the engine says which port it got there's none, and
+      // after a restart it's a new one.
+      if (!(await connect())) throw new Error("The engine is starting");
       await api("/api/health");
       return;
     } catch (error) {
