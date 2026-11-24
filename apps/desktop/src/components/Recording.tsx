@@ -1,6 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Bookmark, Camera, Captions, Circle, Megaphone, Mic, Pause, Play, Square, Timer, TriangleAlert } from "lucide-react";
+import {
+  Bookmark,
+  Camera,
+  Captions,
+  Circle,
+  Lock,
+  LockOpen,
+  Megaphone,
+  Mic,
+  Pause,
+  Play,
+  Square,
+  Timer,
+  TriangleAlert,
+} from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -59,6 +73,8 @@ type RecordingContext = {
   /** A note, or with no text a bookmark, at this moment of the recording. */
   note: (text?: string) => Promise<boolean>;
   pause: (paused: boolean) => Promise<void>;
+  /** Keeps the meeting being recorded from Claude, or stops keeping it. */
+  keepFromClaude: (on: boolean) => Promise<void>;
   /** A picture of the call window and the text in it, as a note at this moment. */
   snapshot: () => Promise<void>;
   /** The note being typed in the recording bar. Stopping saves it into this meeting. */
@@ -192,6 +208,18 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
     [refresh],
   );
 
+  const keepFromClaude = useCallback(
+    async (on: boolean) => {
+      try {
+        await api("/api/record/private", { method: "POST", json: { private: on } });
+        await refresh();
+      } catch (error) {
+        void announce("Couldn't change who reads this meeting", String(error), "error");
+      }
+    },
+    [refresh],
+  );
+
   // A picture of the call window and the text in it, as a note at this moment.
   const snapshot = useCallback(async () => {
     try {
@@ -316,7 +344,9 @@ export function RecordingProvider({ children, onSaved }: { children: ReactNode; 
   }, [toggle, note, snapshot]);
 
   return (
-    <Context.Provider value={{ state, start, stop, toggle, note, pause, snapshot, draft, setDraft, autoStop, keepRecording, decline }}>
+    <Context.Provider
+      value={{ state, start, stop, toggle, note, pause, keepFromClaude, snapshot, draft, setDraft, autoStop, keepRecording, decline }}
+    >
       {children}
     </Context.Provider>
   );
@@ -447,12 +477,14 @@ function Meter({ label, dbfs }: { label: string; dbfs: number }) {
 /** One row when there's room. In a narrower window the note field gets a row of its own and
  * the level meters go, so Pause and Stop always stay on screen. */
 export function RecordingBar() {
-  const { state, stop, note, pause, snapshot, draft, setDraft, autoStop, keepRecording, decline } = useRecording();
+  const { state, stop, note, pause, keepFromClaude, snapshot, draft, setDraft, autoStop, keepRecording, decline } =
+    useRecording();
   const [stopping, setStopping] = useState(false);
   const saving = useRef(false);
   const shortcutKeys = useKeys();
   if (!state?.recording) return null;
   const paused = state.paused ?? false;
+  const isPrivate = state.private ?? false;
 
   const finish = async () => {
     setStopping(true);
@@ -592,6 +624,21 @@ export function RecordingBar() {
               Don't record
             </Button>
           )}
+          <Button
+            size="icon"
+            variant={isPrivate ? "secondary" : "ghost"}
+            className="size-8"
+            title={
+              isPrivate
+                ? "Private: nothing in this meeting is sent to Claude. Click to let Claude read it."
+                : "Keep this meeting from Claude: no summary, Ask or MCP server for it"
+            }
+            aria-label="Keep this meeting from Claude"
+            aria-pressed={isPrivate}
+            onClick={() => void keepFromClaude(!isPrivate)}
+          >
+            {isPrivate ? <Lock className="size-4" /> : <LockOpen className="size-4" />}
+          </Button>
           <Button
             size="icon"
             variant="ghost"

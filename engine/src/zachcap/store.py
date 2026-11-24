@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS meetings (
     client_source TEXT,                             -- 'user' (yours), 'auto' (kept as was)
     ticket_source TEXT,                             -- 'auto' (filled in), 'user' (yours)
     template_source TEXT,                           -- 'auto' (picked on its own); else chosen
+    private     INTEGER NOT NULL DEFAULT 0,         -- 1: never sent to Claude (privacy.py)
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -254,6 +255,9 @@ class Store:
             if column not in columns:
                 self.db.execute(f"ALTER TABLE meetings ADD COLUMN {column} TEXT")
                 self.db.commit()
+        if "private" not in columns:
+            self.db.execute("ALTER TABLE meetings ADD COLUMN private INTEGER NOT NULL DEFAULT 0")
+            self.db.commit()
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(segments)")}
         if "edited" not in columns:
             self.db.execute("ALTER TABLE segments ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
@@ -451,6 +455,19 @@ class Store:
             "SELECT * FROM meetings WHERE status != 'recording' ORDER BY started_at DESC"
         ).fetchall()
 
+    def has_private(self) -> bool:
+        """Whether meetings can be private here: not yet in a library from before they could
+        be, which the read-only MCP server reads as it is."""
+        columns = self.db.execute("PRAGMA table_info(meetings)")
+        return any(row["name"] == "private" for row in columns)
+
+    def private_meetings(self) -> set[int]:
+        """The ids of the meetings that are never sent to Claude."""
+        if not self.has_private():
+            return set()
+        rows = self.db.execute("SELECT id FROM meetings WHERE private = 1")
+        return {row["id"] for row in rows}
+
     def meetings_with_status(self, *statuses: str) -> list[sqlite3.Row]:
         marks = ", ".join("?" * len(statuses))
         return self.db.execute(
@@ -574,11 +591,13 @@ class Store:
         ).fetchall()
 
     def search_lines(
-        self, query: str, limit: int = 25, meeting_id: int | None = None
+        self, query: str, limit: int = 25, meeting_id: int | None = None, private: bool = True
     ) -> list[sqlite3.Row]:
         """Whole transcript lines matching a full-text query (in one meeting, or all), best
-        matches first."""
+        matches first; with ``private`` off, only meetings Claude may read."""
         one = "AND s.meeting_id = ? " if meeting_id is not None else ""
+        if not private and self.has_private():
+            one += "AND m.private = 0 "
         return self.db.execute(
             f"SELECT s.meeting_id, m.title, m.started_at, s.start, {SPEAKER_NAME} AS speaker, "
             "s.text FROM segments_fts f JOIN segments s ON s.id = f.rowid "
@@ -954,19 +973,29 @@ class Store:
             (meeting_id,),
         ).fetchall()
 
-    def people_stats(self) -> list[sqlite3.Row]:
+    def people_stats(self, private: bool = True) -> list[sqlite3.Row]:
+        """Everyone, with what they said and when; with ``private`` off, as if private
+        meetings weren't there (people heard only in those aren't either)."""
+        heard, known = "ms.status IN ('auto', 'confirmed')", ""
+        if not private and self.has_private():
+            hidden = "(SELECT id FROM meetings WHERE private = 1)"
+            heard += f" AND ms.meeting_id NOT IN {hidden}"
+            in_any = "SELECT 1 FROM meeting_speakers ms WHERE ms.person_id = p.id"
+            known = (
+                f"WHERE p.is_me = 1 OR NOT EXISTS ({in_any} AND ms.meeting_id IN {hidden}) "
+                f"OR EXISTS ({in_any} AND ms.meeting_id NOT IN {hidden}) "
+            )
         return self.db.execute(
             "SELECT p.*, "
             "(SELECT COUNT(*) FROM voice_samples v WHERE v.person_id = p.id) AS samples, "
             "(SELECT COUNT(DISTINCT ms.meeting_id) FROM meeting_speakers ms "
-            " WHERE ms.person_id = p.id AND ms.status IN ('auto', 'confirmed')) AS meetings, "
+            f" WHERE ms.person_id = p.id AND {heard}) AS meetings, "
             "(SELECT COALESCE(SUM(s.end - s.start), 0) FROM segments s "
             " JOIN meeting_speakers ms ON ms.id = s.meeting_speaker_id "
-            " WHERE ms.person_id = p.id AND ms.status IN ('auto', 'confirmed')) AS talk_seconds, "
+            f" WHERE ms.person_id = p.id AND {heard}) AS talk_seconds, "
             "(SELECT MAX(m.started_at) FROM meetings m JOIN meeting_speakers ms "
-            " ON ms.meeting_id = m.id WHERE ms.person_id = p.id "
-            " AND ms.status IN ('auto', 'confirmed')) AS last_seen "
-            "FROM people p ORDER BY p.is_me DESC, talk_seconds DESC, p.name"
+            f" ON ms.meeting_id = m.id WHERE ms.person_id = p.id AND {heard}) AS last_seen "
+            f"FROM people p {known}ORDER BY p.is_me DESC, talk_seconds DESC, p.name"
         ).fetchall()
 
     def stats(self) -> dict:

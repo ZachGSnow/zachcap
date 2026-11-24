@@ -1,5 +1,5 @@
-"""Privacy settings that act on data: masking contact details before text goes to Claude,
-and deleting old recordings while keeping their transcripts."""
+"""What keeps data private: meetings kept from Claude, masking contact details before text
+goes to Claude, and deleting old recordings while keeping their transcripts."""
 
 from __future__ import annotations
 
@@ -21,6 +21,24 @@ PHONE = re.compile(
 )
 # ".redacting": a rewrite a crash interrupted, holding audio like the file it replaces.
 AUDIO_SUFFIXES = {".flac", ".wav", ".mp3", ".m4a", ".ogg", ".redacting"}
+
+
+# A private meeting: none of it is sent to Claude. It isn't summarized, asked about or
+# written from, and the library Ask and MCP clients read (assistant.py) doesn't have it.
+PRIVATE = (
+    "This meeting is private: nothing in it is sent to Claude. To let Claude read it, turn "
+    "that off in the meeting's menu."
+)
+
+
+def is_private(store: Store, meeting) -> bool:
+    return bool(store.column(meeting, "private"))
+
+
+def refuse_private(store: Store, meeting) -> None:
+    """Called before anything of one meeting is sent to Claude."""
+    if is_private(store, meeting):
+        raise RuntimeError(PRIVATE)
 
 
 def _luhn(digits: str) -> bool:

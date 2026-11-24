@@ -1,6 +1,7 @@
 import { Check, Copy, FileText, Loader2, Mail, Megaphone, MessageSquareQuote, RotateCw, Sparkles, Ticket } from "lucide-react";
 import { useId, useRef, useState, type ReactNode } from "react";
 
+import { PrivateNote } from "@/components/PrivateNote";
 import { PersonAvatar } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -275,6 +276,8 @@ export function SummaryPanel({
   kind,
   pickedAutomatically,
   unpicked,
+  isPrivate,
+  onAllow,
   onKindChange,
   summarizing,
   onSummarize,
@@ -296,6 +299,9 @@ export function SummaryPanel({
   pickedAutomatically: boolean;
   /** The meeting is Automatic, and no kind could be picked for its summary. */
   unpicked: boolean;
+  /** Kept from Claude: nothing is written from it until it's allowed (``onAllow``). */
+  isPrivate: boolean;
+  onAllow: () => void;
   onKindChange: (kind: string) => void;
   /** Owned by the meeting page, so its header button and this panel can't both start one. */
   summarizing: boolean;
@@ -353,6 +359,8 @@ export function SummaryPanel({
     } else void write(recipe);
   };
 
+  if (!summary && isPrivate) return <PrivateNote what="so there's no summary of it." onAllow={onAllow} />;
+
   if (!summary) {
     return (
       <div className="flex flex-col items-center py-14 text-center">
@@ -401,21 +409,30 @@ export function SummaryPanel({
             <Copy className="size-3.5" />
             Copy
           </Button>
-          <KindPicker
-            templates={templates}
-            value={kind}
-            automatic={pickedAutomatically}
-            unpicked={unpicked}
-            onChange={onKindChange}
-          />
-          <Button size="sm" variant="outline" disabled={summarizing} onClick={onSummarize}>
-            {summarizing ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
-            Regenerate
-          </Button>
+          {!isPrivate && (
+            <>
+              <KindPicker
+                templates={templates}
+                value={kind}
+                automatic={pickedAutomatically}
+                unpicked={unpicked}
+                onChange={onKindChange}
+              />
+              <Button size="sm" variant="outline" disabled={summarizing} onClick={onSummarize}>
+                {summarizing ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
+                Regenerate
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
-      {recipes.length > 0 && (
+      {isPrivate && (
+        <p className="mt-3 text-xs text-muted-foreground">
+          This meeting is private now: Claude can't regenerate the summary or write from it.
+        </p>
+      )}
+      {recipes.length > 0 && !isPrivate && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">Write from this meeting:</span>
           {recipes.map((recipe) => {

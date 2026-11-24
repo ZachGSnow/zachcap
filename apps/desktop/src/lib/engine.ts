@@ -34,6 +34,8 @@ export type Meeting = {
   client_kept?: boolean;
   /** Set on it by you: with no client, that's "no client". */
   client_set?: boolean;
+  /** Kept from Claude: not summarized, asked about or read by the MCP server. */
+  private?: boolean;
 };
 
 /** A ticket number found in a meeting, and where: offered to pick as its ticket. */
@@ -242,6 +244,8 @@ export type RecordState =
       devices?: { mic: string; system: string };
       errors?: string[];
       paused?: boolean;
+      /** The meeting is kept from Claude. */
+      private?: boolean;
       notes?: number;
       /** Things to check while it runs: a muted mic, no call audio, a nearly full disk. */
       warnings?: { key: string; text: string }[];

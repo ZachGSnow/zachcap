@@ -58,9 +58,11 @@ def _time_range(started: datetime, seconds: float | None) -> str:
     return f"{started:%H:%M}-{started + timedelta(seconds=seconds):%H:%M}"
 
 
-def build(store: Store, period: str, day: date, client: str | None = None) -> dict:
+def build(
+    store: Store, period: str, day: date, client: str | None = None, private: bool = True
+) -> dict:
     """The work log for the day or week containing ``day`` (only ``client``'s meetings, if
-    given)."""
+    given). With ``private`` off, for Claude: without private meetings."""
     from . import clients, topics
 
     start, end = period_range(period, day)
@@ -68,6 +70,9 @@ def build(store: Store, period: str, day: date, client: str | None = None) -> di
     me = store.me()["name"]
     # Only the period's meetings are read: the log is rebuilt on every change to one of them.
     meetings = store.meetings_between(start.isoformat(), end.isoformat())
+    if not private:
+        hidden = store.private_meetings()
+        meetings = [m for m in meetings if m["id"] not in hidden]
     client_of = clients.of_meetings(store, meetings)
     meetings = [m for m in meetings if clients.matches(client_of[m["id"]], client)]
     participants = store.participants([m["id"] for m in meetings])
