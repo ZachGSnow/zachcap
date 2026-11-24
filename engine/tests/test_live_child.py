@@ -297,8 +297,8 @@ def test_a_child_gets_the_real_python_and_none_of_the_engines_secrets(monkeypatc
 
 
 def test_one_that_cant_be_started_leaves_nothing_behind(stand_in, monkeypatch):
-    def refused(self, process) -> None:
-        pids.append(process.pid)
+    def refused(self, pid: int) -> None:
+        pids.append(pid)
         raise OSError("not allowed in a job")
 
     pids: list[int] = []

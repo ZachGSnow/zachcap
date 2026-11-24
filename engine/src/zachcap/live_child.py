@@ -77,8 +77,8 @@ class Child:
         self._talker = threading.Thread(target=self._talk, name="live-speech", daemon=True)
         self._talker.start()
         try:
-            # It waits for something to do, so it's in its job before it does anything.
-            self._job.add(self._process)
+            # In its job before it's asked anything.
+            self._job.add(self._process.pid)
         except OSError:
             self._process.kill()
             self.end()
