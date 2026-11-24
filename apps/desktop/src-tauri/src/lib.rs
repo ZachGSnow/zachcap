@@ -709,17 +709,9 @@ fn set_up(engine: &Engine) -> Result<(), String> {
         std::fs::remove_dir_all(&venv)
             .map_err(|error| format!("Couldn't clear the old speech engine ({error})."))?;
     }
-    let wheel = std::fs::read_dir(launch.engine.join("wheel"))
-        .ok()
-        .and_then(|entries| {
-            entries
-                .flatten()
-                .map(|entry| entry.path())
-                .find(|path| path.extension().is_some_and(|ext| ext == "whl"))
-        })
-        .ok_or(
-            "The installer's copy of the engine is incomplete (no wheel). Install ZachCap again.",
-        )?;
+    let wheel = wheel_for(&launch.engine.join("wheel"), &build).ok_or(
+        "The installer's copy of the engine is incomplete (no wheel). Install ZachCap again.",
+    )?;
     *engine.setup.lock().unwrap() = Some("Getting ready...".to_string());
     let mut log = std::fs::create_dir_all(data_dir())
         .and_then(|_| std::fs::File::create(data_dir().join("engine-setup.log")))
@@ -746,6 +738,16 @@ fn set_up(engine: &Engine) -> Result<(), String> {
     })?;
     let _ = std::fs::write(&marker, &build);
     Ok(())
+}
+
+/// The wheel of this build's version in the installer's wheel folder (`build` is the BUILD
+/// stamp, which starts with the version). An update that didn't uninstall first leaves the
+/// older version's wheel beside it, so the first one found isn't good enough.
+fn wheel_for(folder: &Path, build: &str) -> Option<PathBuf> {
+    let version = build.split_whitespace().next()?;
+    let name = format!("zachcap-{version}-py3-none-any.whl");
+    let wheel = folder.join(name);
+    wheel.is_file().then_some(wheel)
 }
 
 /// Runs the bundled uv to set the engine up: what it says goes to the startup screen and
@@ -1545,6 +1547,24 @@ mod tests {
             std::fs::write(&file, text).unwrap();
             assert_eq!(read_port(&file), port, "{text:?}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setup_takes_the_wheel_of_this_builds_version() {
+        let dir = std::env::temp_dir().join(format!("zachcap-wheel-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // An update that didn't uninstall first: the older wheel is still there, listed first.
+        for version in ["0.2.0", "0.3.0"] {
+            std::fs::write(dir.join(format!("zachcap-{version}-py3-none-any.whl")), b"").unwrap();
+        }
+        let wheel = wheel_for(&dir, "0.3.0 2970921 2026-11-24T14:28:40Z").unwrap();
+        assert!(
+            wheel.ends_with("zachcap-0.3.0-py3-none-any.whl"),
+            "{wheel:?}"
+        );
+        assert_eq!(wheel_for(&dir, "0.4.0 abc1234 2026-12-01T00:00:00Z"), None);
+        assert_eq!(wheel_for(&dir, ""), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
