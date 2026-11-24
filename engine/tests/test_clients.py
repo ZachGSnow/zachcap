@@ -260,7 +260,7 @@ def test_reprocessing_lets_a_kept_client_follow_its_people_again(
     monkeypatch.setattr(
         pipeline,
         "_diarize",
-        lambda tracks, words, log: ({"system": Diarization([Turn(0.0, 0.5, "system")], {})}, False),
+        lambda *args: ({"system": Diarization([Turn(0.0, 0.5, "system")], {})}, False),
     )
 
     for meeting_id in (ids["cutover"], ids["both"]):

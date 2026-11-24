@@ -319,6 +319,8 @@ export type Settings = {
   auto_record_apps: string[];
   /** The call apps that can (never a web browser). */
   auto_record_choices: string[];
+  /** Separate speakers faster (less time without a GPU), a little less exactly. */
+  faster_speakers: boolean;
   /** A live transcript in a small panel over the call while recording. Unless turned on or
    * off here, on only with a CUDA GPU. */
   live_transcript: boolean;

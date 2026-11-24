@@ -87,7 +87,7 @@ def test_words_to_know_are_spelled_before_the_database_is_locked(tmp_path: Path,
     monkeypatch.setattr(
         pipeline,
         "_diarize",
-        lambda tracks, words, log: ({"system": Diarization([Turn(0.0, 1.2, "system")], {})}, False),
+        lambda *args: ({"system": Diarization([Turn(0.0, 1.2, "system")], {})}, False),
     )
     while_locked = []
     correct = vocabulary.Vocabulary.correct

@@ -39,6 +39,7 @@ from . import (
     audio,
     autorecord,
     clients,
+    diarize,
     dictation,
     digest,
     export,
@@ -188,6 +189,7 @@ class ImportBody(BaseModel):
 class SettingsBody(BaseModel):
     summary_model: str | None = None
     language: str | None = None
+    faster_speakers: bool | None = None  # separate speakers faster (see diarize.SETTING)
     mic_device: str | None = None
     output_device: str | None = None
     vocabulary: str | None = None
@@ -1777,6 +1779,7 @@ def create_app(token: str) -> FastAPI:
                 "templates": prompts.choices(store, "template"),
                 "recipes": prompts.choices(store, "recipe"),
                 "language": store.setting("language", "en"),
+                "faster_speakers": store.setting(diarize.SETTING) == "1",
                 "languages": [{"id": k, "label": v} for k, v in LANGUAGES.items()],
                 "mic_device": store.setting("mic_device", ""),
                 "output_device": store.setting("output_device", ""),
@@ -1897,6 +1900,8 @@ def create_app(token: str) -> FastAPI:
             if body.language not in LANGUAGES:
                 raise HTTPException(status_code=400, detail="Unknown language")
             store.set_setting("language", body.language)
+        if body.faster_speakers is not None:
+            store.set_setting(diarize.SETTING, "1" if body.faster_speakers else "0")
         for key in ("mic_device", "output_device"):
             value = getattr(body, key)
             if value is not None:
