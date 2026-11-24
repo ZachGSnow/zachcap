@@ -89,8 +89,8 @@ def test_device_paths_streams_and_odd_paths_are_refused(path: str):
 @pytest.mark.parametrize(
     ("path", "used"),
     [
-        (r"C:\Users\Dana\Videos\Weekly sync.mp4", r"C:\Users\Dana\Videos\Weekly sync.mp4"),
-        ("C:/Users/Dana/Videos/call.mp4", r"C:\Users\Dana\Videos\call.mp4"),
+        (r"C:\Users\Public\Videos\Weekly sync.mp4", r"C:\Users\Public\Videos\Weekly sync.mp4"),
+        ("C:/Users/Public/Videos/call.mp4", r"C:\Users\Public\Videos\call.mp4"),
         (
             r"D:\Recordings\Contoso call 2026-11-23.m4a",
             r"D:\Recordings\Contoso call 2026-11-23.m4a",
@@ -100,7 +100,7 @@ def test_device_paths_streams_and_odd_paths_are_refused(path: str):
             "C:\\Users\\Dana\\M\u00fasica\\Llamada con Zo\u00eb \u4f1a\u8b70.m4a",
             "C:\\Users\\Dana\\M\u00fasica\\Llamada con Zo\u00eb \u4f1a\u8b70.m4a",
         ),
-        (r"C:\Users\Dana\Videos\..\Documents\notes.txt", r"C:\Users\Dana\Documents\notes.txt"),
+        (r"C:\Users\Public\Videos\..\Documents\notes.txt", r"C:\Users\Public\Documents\notes.txt"),
         (r"C:\..\..\Calls\call.mp4", r"C:\Calls\call.mp4"),  # never above the drive
         (r"C:\Calls\.\call.mp4", r"C:\Calls\call.mp4"),
         (r"C:\Calls\call.mp4. ", r"C:\Calls\call.mp4"),  # Windows drops trailing dots and spaces
