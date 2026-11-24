@@ -9,6 +9,8 @@ from zachcap import shortcuts
 from zachcap.api import create_app
 from zachcap.store import Store
 
+LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
+
 AUTH = {"Authorization": "Bearer test-token"}
 
 
@@ -96,7 +98,7 @@ def test_only_changed_keys_are_saved_and_two_shortcuts_never_share_keys(store: S
 
 def test_shortcuts_through_the_settings_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     assert client.get("/api/settings", headers=AUTH).json()["shortcuts"] == shortcuts.DEFAULTS
 
     changed = client.put(

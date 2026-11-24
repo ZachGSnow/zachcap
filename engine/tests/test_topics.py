@@ -11,6 +11,8 @@ from zachcap.api import create_app
 from zachcap.store import Store
 from zachcap.voiceprint import Match
 
+LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
+
 AUTH = {"Authorization": "Bearer test-token"}
 TOPICS = "Renewals: renewal, contract\nWindows 10: windows 10, win10\nSecurity: MFA, phishing"
 
@@ -96,7 +98,7 @@ def test_the_topics_page_and_the_work_log(store: Store, tmp_path: Path):
 
 def test_topics_through_the_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     store = Store()
     meeting_id = meeting(
         store, tmp_path, "Call", "2026-11-23T09:00:00-05:00", "Renew the contract."

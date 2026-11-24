@@ -336,11 +336,11 @@ export async function connect(): Promise<EngineInfo> {
   if (isTauri()) {
     info = await invoke<EngineInfo>("engine_info");
   } else {
-    // Browser development: start the engine yourself with a fixed port and token.
-    info = {
-      port: Number(import.meta.env.VITE_ZACHCAP_PORT ?? 8765),
-      token: import.meta.env.VITE_ZACHCAP_TOKEN ?? "dev",
-    };
+    // Browser development: start the engine yourself with a token of your own (there's no
+    // default), and give the page the same one in VITE_ZACHCAP_TOKEN.
+    const token = import.meta.env.VITE_ZACHCAP_TOKEN;
+    if (!token) throw new Error("Set VITE_ZACHCAP_TOKEN to the token the engine was started with.");
+    info = { port: Number(import.meta.env.VITE_ZACHCAP_PORT ?? 8765), token };
   }
   return info;
 }

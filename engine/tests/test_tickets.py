@@ -11,6 +11,8 @@ from zachcap.api import create_app
 from zachcap.store import Store
 from zachcap.voiceprint import Match
 
+LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
+
 AUTH = {"Authorization": "Bearer test-token"}
 
 
@@ -152,7 +154,7 @@ def test_a_log_without_tickets_keeps_its_columns(store: Store, tmp_path):
 
 def test_tickets_through_the_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     store = Store()
     meeting_id = store.create_meeting("Printer down", "2026-11-23T09:00:00", tmp_path / "m")
     lines(store, meeting_id, "Ticket 1924086 is the one.")

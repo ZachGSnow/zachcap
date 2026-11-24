@@ -2,7 +2,8 @@
 
 Listens on 127.0.0.1 only. The Tauri shell picks the port and a random token
 at launch; every request must carry the token (as a Bearer header, or a
-``token`` query parameter for <audio> elements, which can't send headers).
+``token`` query parameter for <audio> elements, which can't send headers),
+which gate.py checks, with the host and the body's size, before anything else.
 GPU work runs on a single background worker so jobs never compete for memory.
 """
 
@@ -39,6 +40,7 @@ from . import (
     dictation,
     digest,
     export,
+    gate,
     imports,
     insights,
     mentions,
@@ -298,6 +300,9 @@ def create_app(token: str) -> FastAPI:
     app = FastAPI(
         title="ZachCap engine", version=__version__, docs_url=None, redoc_url=None, openapi_url=None
     )
+    # Added first, so it runs inside CORS: a browser's preflight is answered there, and a
+    # refusal still carries the CORS headers the page needs to read it.
+    app.add_middleware(gate.Gate, token=token)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=ALLOWED_ORIGINS,
@@ -511,9 +516,12 @@ def create_app(token: str) -> FastAPI:
     app.state.folder_watch = watchfolder.FolderWatch(worker.submit)
 
     def authorized(request: Request) -> None:
-        supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-        supplied = supplied or request.query_params.get("token", "")
-        if not pysecrets.compare_digest(supplied, token):
+        """The gate has checked the token already; every route checks it again, so none can
+        be reached without it if the middleware ever changes. Compared as bytes, like there."""
+        supplied = gate.supplied_token(
+            dict(request.scope["headers"]), request.scope["query_string"]
+        )
+        if not pysecrets.compare_digest(supplied, token.encode()):
             raise HTTPException(status_code=401, detail="Missing or wrong token")
 
     def db():

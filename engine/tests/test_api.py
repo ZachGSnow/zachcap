@@ -10,11 +10,13 @@ from zachcap.api import create_app
 from zachcap.store import Store
 from zachcap.voiceprint import Match
 
+LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
+
 
 @pytest.fixture
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
-    return TestClient(create_app("test-token"))
+    return TestClient(create_app("test-token"), base_url=LOCAL)
 
 
 def test_every_call_needs_the_token(client: TestClient):
@@ -82,7 +84,8 @@ def test_import_rejects_missing_files_and_actions_validate(client: TestClient, t
 
 def test_there_are_no_open_docs_pages(client: TestClient):
     for path in ("/docs", "/redoc", "/openapi.json"):
-        assert client.get(path).status_code == 404
+        assert client.get(path).status_code == 401  # the gate: no token, no answer
+        assert client.get(path, headers=AUTH).status_code == 404
 
 
 class FakeRecorder:
@@ -180,7 +183,7 @@ def test_startup_finishes_what_a_crash_left_behind(tmp_path: Path, monkeypatch):
     (deleted / "mic-000.flac").write_bytes(b"")
     (deleted / "recording.json").write_text('{"complete": true}', encoding="utf-8")
 
-    client = TestClient(create_app("test-token"))
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
     deadline = time.monotonic() + 5
     while len(processed) < 3 and time.monotonic() < deadline:
         time.sleep(0.02)

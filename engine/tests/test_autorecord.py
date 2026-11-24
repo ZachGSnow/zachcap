@@ -9,6 +9,8 @@ from zachcap import autorecord, capture, pipeline
 from zachcap.api import create_app
 from zachcap.autorecord import CALL_AFTER, LET_GO, QUIET_FOR, QUIET_STOP_IN, STOP_IN, CallWatch
 
+LOCAL = "http://127.0.0.1"  # the engine only answers requests to this PC (gate.py)
+
 AUTH = {"Authorization": "Bearer test-token"}
 
 
@@ -274,7 +276,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
     monkeypatch.setattr(capture, "Recorder", FakeRecorder)
     monkeypatch.setattr(pipeline, "process", lambda *args, **kwargs: "ready")
-    return TestClient(create_app("test-token"))
+    return TestClient(create_app("test-token"), base_url=LOCAL)
 
 
 def test_through_the_api(client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
