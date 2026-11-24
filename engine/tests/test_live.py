@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from zachcap import capture, cpu, cuda, dictation, live, models, pipeline
+from zachcap import capture, cpu, cuda, dictation, echo, live, models, pipeline
 from zachcap.api import create_app
 from zachcap.live import BEHIND, END_SILENCE, LONGEST, RATE, GpuTurns, Live, Resampler, Speech
 
@@ -215,24 +215,126 @@ def test_someone_speaking_over_the_call_is_heard():
     ]
 
 
+def test_an_answer_right_after_the_call_is_told_from_its_echo():
+    transcript, heard = make({"system": "do you want friday", "mic": "friday"})
+    call_audio = np.concatenate([quiet(1), talk(3, seed=1), quiet(4)])
+    answer = np.concatenate([quiet(4.4), 1.5 * talk(1, seed=2), quiet(2.6)])
+    Feeder(transcript, "system").play(call_audio)
+    Feeder(transcript, "mic").play(heard_late(call_audio, delay=0.12, gain=0.15) + answer)
+    transcript.step()
+    lines = transcript.lines()
+    assert [line["track"] for line in lines] == ["system", "mic"]
+    assert abs(lines[1]["start"] - 4.4) < 0.2 and abs(lines[1]["end"] - 5.4) < 0.2
+    assert [track for track, _ in heard] == ["system", "mic"]  # the echo before it wasn't read
+
+
+def test_what_you_say_right_before_the_call_is_told_from_its_echo():
+    transcript, heard = make({"system": "friday then", "mic": "friday"})
+    call_audio = np.concatenate([quiet(2.4), talk(3, seed=1), quiet(3)])
+    mine = np.concatenate([quiet(1), 1.5 * talk(1, seed=2), quiet(6.4)])
+    Feeder(transcript, "system").play(call_audio)
+    Feeder(transcript, "mic").play(heard_late(call_audio, delay=0.12, gain=0.15) + mine)
+    transcript.step()
+    lines = transcript.lines()
+    assert [line["track"] for line in lines] == ["mic", "system"]
+    assert abs(lines[0]["start"] - 1.0) < 0.2 and abs(lines[0]["end"] - 2.0) < 0.5
+    assert [track for track, _ in heard] == ["system", "mic"]
+
+
+def test_a_short_reply_over_the_call_is_kept_on_a_headset(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(echo, "measure", lambda mic, call: 0.9)  # by chance
+    transcript, _ = make({"system": "the cutover is friday", "mic": "right"})
+    Feeder(transcript, "system").play(np.concatenate([quiet(1), talk(5, seed=1), quiet(2)]))
+    Feeder(transcript, "mic").play(np.concatenate([quiet(3), talk(0.6, seed=2), quiet(4.4)]))
+    transcript.step()
+    assert [line["track"] for line in transcript.lines()] == ["system", "mic"]
+
+
+def test_a_word_they_put_in_doesnt_split_your_sentence():
+    transcript, heard = make({"system": "right", "mic": "the cutover is on friday at nine"})
+    # A headset: nothing of the call reaches the mic.
+    Feeder(transcript, "system").play(np.concatenate([quiet(3), talk(0.6, seed=1), quiet(4.4)]))
+    Feeder(transcript, "mic").play(np.concatenate([quiet(1), talk(5, seed=2), quiet(2)]))
+    transcript.step()
+    [yours] = [line for line in transcript.lines() if line["track"] == "mic"]
+    assert abs(yours["start"] - 1.0) < 0.2 and abs(yours["end"] - 6.0) < 0.2
+    assert len(heard) == 2  # in one go, not one clip for each piece of it
+
+
+def test_a_leak_unlike_the_call_is_told_from_your_voice_by_its_level():
+    def transcribe(audio, track):
+        if track == "system":
+            return "do you want friday"
+        return "friday" if np.abs(audio).max() > 0.5 else Doubtful("Thank you.")
+
+    transcript = Live(transcribe, speech=loud_spans)
+    Feeder(transcript, "system").play(np.concatenate([quiet(1), talk(3, seed=1), quiet(4)]))
+    leak = np.concatenate([quiet(1), 0.2 * talk(3, seed=3), quiet(4)])  # nothing like the call
+    answer = np.concatenate([quiet(4.4), 1.5 * talk(1, seed=2), quiet(2.6)])
+    Feeder(transcript, "mic").play(leak + answer)
+    transcript.step()
+    lines = transcript.lines()
+    assert [line["text"] for line in lines] == ["do you want friday", "friday"]
+    assert abs(lines[1]["start"] - 4.4) < 0.3
+
+
+@pytest.mark.parametrize("pause", [0.4, 1.2])
+def test_an_answer_that_repeats_a_word_of_the_question_is_kept(pause: float):
+    transcript, _ = make({"system": "do you want tuesday or wednesday", "mic": "wednesday"})
+    Feeder(transcript, "system").play(np.concatenate([quiet(1), tone(2), quiet(5)]))
+    answer = np.concatenate([quiet(3 + pause), tone(0.6), quiet(4.4 - pause)])
+    Feeder(transcript, "mic").play(answer)  # the call quiet: nothing of it in the mic
+    transcript.step()
+    assert [line["track"] for line in transcript.lines()] == ["system", "mic"]
+
+
+def test_what_you_said_first_is_kept_when_they_repeat_it():
+    transcript, _ = make({"system": "friday at nine, got it", "mic": "friday at nine"})
+    Feeder(transcript, "mic").play(np.concatenate([quiet(1), tone(1.5), quiet(4)]))
+    Feeder(transcript, "system").play(np.concatenate([quiet(1.5), tone(2.5), quiet(2.5)]))
+    transcript.step()
+    assert [line["track"] for line in transcript.lines()] == ["mic", "system"]
+
+
 def test_the_echo_measure_follows_the_speakers_not_the_people():
     call_audio = talk(4, seed=1, rate=RATE)
-    call = live.loudness(call_audio)
-    delay = round(live.ECHO_DELAY * 100)
+    call = echo.loudness(call_audio)
     span = slice(100, 300)  # 2 s of the mic, compared with the call from 250 ms before
-    theirs = call[span.start - delay : span.stop]
-    echo = live.loudness(heard_late(call_audio, delay=0.12, gain=0.2, rate=RATE))[span]
-    assert live.echo_measure(echo, theirs) > 0.95
-    person = live.loudness(talk(4, seed=2, rate=RATE))[span]
-    assert live.echo_measure(person, theirs) < live.ECHO_LIKE
-    over = live.loudness(heard_late(call_audio, 0.12, 0.2, RATE) + talk(4, seed=2, rate=RATE))
-    assert live.echo_measure(over[span], theirs) < live.ECHO_LIKE  # double-talk
-    assert live.echo_measure(echo, np.zeros_like(theirs)) == 0  # the call quiet
-    assert live.echo_measure(echo, np.full_like(theirs, np.nan)) == 0  # nothing known of it
+    theirs = call[span.start - echo.LATE : span.stop]
+    leak = echo.loudness(heard_late(call_audio, delay=0.12, gain=0.2, rate=RATE))[span]
+    assert echo.measure(leak, theirs) > 0.95 and echo.Speakers().heard(leak, theirs)
+    person = echo.loudness(talk(4, seed=2, rate=RATE))[span]
+    assert echo.measure(person, theirs) < echo.ECHO_LIKE
+    over = echo.loudness(heard_late(call_audio, 0.12, 0.2, RATE) + talk(4, seed=2, rate=RATE))
+    assert echo.measure(over[span], theirs) < echo.ECHO_LIKE  # double-talk
+    hum = echo.loudness(tone(4, rate=RATE))  # the same tone on both: nothing to tell by
+    assert echo.measure(hum[span], hum[span.start - echo.LATE : span.stop]) == 0
+    assert echo.measure(leak, np.zeros_like(theirs)) == 0  # the call quiet
+    assert echo.measure(leak, np.full_like(theirs, np.nan)) == 0  # nothing known of it
+
+
+def test_a_short_stretch_must_also_be_as_quiet_as_the_speakers(monkeypatch: pytest.MonkeyPatch):
+    # Over a few syllables your own voice can follow the call's by chance.
+    follows = {"now": 0.75}
+    monkeypatch.setattr(echo, "measure", lambda mic, call: follows["now"])
+    speakers = echo.Speakers()
+
+    def heard(seconds: float, level: float, call: float = 0.1) -> bool:
+        frames = int(seconds * 100)
+        theirs = np.full(frames + echo.LATE, call, np.float32)
+        return speakers.heard(np.full(frames, level, np.float32), theirs)
+
+    assert not heard(1.0, 0.01)  # nothing is known of the speakers in this mic yet
+    assert heard(2, 0.01) and heard(3, 0.01)  # long ones need nothing more, and show their level
+    assert heard(1.0, 0.015) and not heard(1.0, 0.1)  # ... your voice over them is louder
+    assert not heard(0.6, 0.01)  # not followed closely enough for one this short
+    follows["now"] = 0.85
+    assert heard(0.6, 0.01) and not heard(0.6, 0.1)
+    assert not heard(3, 0.01, call=0)  # the call quiet: nothing to hear
 
 
 def test_the_calls_loudness_is_kept_on_the_timeline():
-    history = live.Loudness()
+    history = echo.Loudness(live.HISTORY)
     history.add(np.full(1680, 0.5, np.float32), 0)  # ten frames and a half
     history.add(np.full(80, 0.5, np.float32), 1680)  # the eleventh, whole
     assert np.allclose(history.span(0, 11), 0.5) and np.isnan(history.span(11, 12)).all()
@@ -242,6 +344,18 @@ def test_the_calls_loudness_is_kept_on_the_timeline():
     history.add(np.zeros(int(live.HISTORY * RATE), np.float32), RATE + 1600)
     assert np.isnan(history.span(0, 110)).all()  # older than HISTORY: let go
     assert history.span(history.first, history.first + 1)[0] == 0
+
+
+def test_the_calls_turns_have_word_gaps_closed_and_noise_left_out():
+    call = np.zeros(400, np.float32)
+    call[50:100] = 0.1
+    call[120:200] = 0.1  # 0.2 s between words: the same turn
+    call[260:300] = 0.1  # 0.6 s later: another
+    assert echo.call_turns(call) == [(50, 200), (260, 300)]
+    assert echo.call_turns(call + 0.001) == [(50, 200), (260, 300)]  # noise on the line, -60 dBFS
+    call[280:] = np.nan  # not known yet: as it was, not a stop
+    assert echo.call_turns(call) == [(50, 200), (260, 400)]
+    assert echo.call_turns(np.full(100, np.nan, np.float32)) == []
 
 
 class Doubtful(str):
@@ -266,6 +380,13 @@ def test_a_doubtful_mic_line_while_the_call_plays_is_left_out():
     Feeder(transcript, "mic").play(leak)
     transcript.step()
     assert [line["track"] for line in transcript.lines()] == ["system"]
+
+
+def test_a_doubtful_line_on_the_call_is_left_out():
+    transcript = Live(lambda audio, track: Doubtful("Thank you."), speech=loud_spans)
+    Feeder(transcript, "system").play(said())  # hold music, say
+    transcript.step()
+    assert transcript.lines() == []
 
 
 def test_with_the_call_quiet_every_mic_line_is_kept():

@@ -2,14 +2,16 @@
 
 Whisper gives timed words, diarization gives timed speaker turns. Each word goes
 to the turn it falls in, consecutive words by the same speaker become an
-utterance, and the mic and computer-audio tracks are merged by time. Mic lines
-that repeat what the computer audio said at the same moment are echo and dropped.
+utterance, and the mic and computer-audio tracks are merged by time. What the mic heard
+from the speakers (the computer audio's words, at the moment it said them) is echo and dropped.
 """
 
 from __future__ import annotations
 
 import bisect
+import itertools
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
@@ -84,25 +86,77 @@ def build_utterances(
     return utterances
 
 
+# The mic hears a word from the speakers at the moment they say it: its end is at most this
+# many seconds before or after the word's end on the computer audio (up to 0.2 s of delay and
+# Whisper's own error: 98% of 759 words measured were from 0.16 before to 0.35 after). Ends,
+# since Whisper starts a line's first word anywhere in the pause before it.
+ECHO_EARLY = 0.3
+ECHO_LATE = 0.6
+ECHO_SHARE = 0.6  # of the words the mic heard while the computer audio spoke, this many its own
+
+
 def _tokens(text: str) -> list[str]:
     return re.sub(r"[^a-z0-9' ]+", " ", text.lower()).split()
 
 
+def repeats(mine: str, theirs: str, threshold: float = 0.6) -> bool:
+    """Whether what the mic heard is mostly what the computer audio said."""
+    a, b = _tokens(mine), _tokens(theirs)
+    return bool(a and b) and (
+        SequenceMatcher(None, a, b).ratio() >= threshold or _covered(a, b) >= 0.8
+    )
+
+
+class Spoken:
+    """What the computer audio said, to tell its words when the mic hears them from the
+    speakers (see ECHO_EARLY). ``playing`` says whether it had any sound in a stretch of
+    seconds, when that's known."""
+
+    def __init__(
+        self, utterances: list[Utterance], playing: Callable[[float, float], bool] | None = None
+    ) -> None:
+        self.words = sorted((w for u in utterances for w in u.words), key=lambda w: w.end)
+        self.ends = [w.end for w in self.words]
+        self.playing = playing
+
+    def during(self, word: Word) -> bool:
+        """Whether it was speaking as the mic heard a word: the word may be its echo."""
+        next_ = bisect.bisect_left(self.ends, word.end - ECHO_LATE)
+        if next_ == len(self.words) or self.words[next_].start > word.end + ECHO_EARLY:
+            return False
+        return self.playing is None or self.playing(max(word.start, word.end - 0.2), word.end)
+
+    def said(self, word: Word) -> bool:
+        """Whether it said that very word then."""
+        first = bisect.bisect_left(self.ends, word.end - ECHO_LATE)
+        last = bisect.bisect_right(self.ends, word.end + ECHO_EARLY)
+        theirs = {token for w in self.words[first:last] for token in _tokens(w.text)}
+        return any(token in theirs for token in _tokens(word.text))
+
+
 def drop_echo(
-    mic: list[Utterance], system: list[Utterance], window: float = 1.5, threshold: float = 0.6
+    mic: list[Utterance],
+    system: list[Utterance],
+    playing: Callable[[float, float], bool] | None = None,
 ) -> tuple[list[Utterance], list[Utterance]]:
-    """Split mic utterances into (kept, echo). Echo = mostly the same words as the
-    computer audio at the same time, i.e. the mic hearing the speakers."""
+    """Split the mic's utterances into (kept, echo). Echo is the mic hearing the speakers:
+    words in a row said while the computer audio spoke, most of them its own at that very
+    moment. The words before and after those are yours, in the same utterance or not: an
+    answer often repeats a word of the question, and they repeat yours."""
+    call = Spoken(system, playing)
     kept, echo = [], []
     for utt in mic:
-        mine = _tokens(utt.text)
-        nearby = [s for s in system if s.start <= utt.end + window and s.end >= utt.start - window]
-        theirs = [token for s in nearby for token in _tokens(s.text)]
-        is_echo = bool(mine and theirs) and (
-            SequenceMatcher(None, mine, theirs).ratio() >= threshold
-            or _covered(mine, theirs) >= 0.8
-        )
-        (echo if is_echo else kept).append(utt)
+        parts: list[tuple[bool, list[Word]]] = []
+        for during, row in itertools.groupby(utt.words, key=call.during):
+            words = list(row)
+            heard = during and sum(map(call.said, words)) >= ECHO_SHARE * len(words)
+            if parts and parts[-1][0] == heard:
+                parts[-1][1].extend(words)
+            else:
+                parts.append((heard, words))
+        for heard, words in parts:
+            part = Utterance(utt.track, utt.speaker, words[0].start, words[-1].end, words)
+            (echo if heard else kept).append(part)
     return kept, echo
 
 

@@ -72,6 +72,30 @@ def test_unknown_speakers_tracks_and_gaps_keep_lines_apart():
     assert len(merge_same_person(rows, who)) == 6
 
 
+def test_the_echo_of_the_call_is_dropped_and_your_answer_kept(tmp_path: Path, monkeypatch):
+    from zachcap.diarize import Diarization
+    from zachcap.transcript import Turn, Word
+
+    call = np.zeros(6 * 16000, np.float32)
+    call[16000 : 3 * 16000] = 0.1  # they speak from 1 to 3 s; their times say until 3.4
+    question = [Word(1.0, 1.4, " Tuesday"), Word(1.4, 2.0, " or"), Word(2.0, 3.4, " Friday?")]
+    heard = [Word(w.start + 0.1, w.end + 0.1, w.text) for w in question[:2]]
+    heard += [Word(2.1, 3.0, " Friday?"), Word(3.4, 3.9, " Friday.")]
+    store = Store(tmp_path / "test.db")
+    meeting = store.create_meeting("Sync", "2026-11-22T20:00:00", tmp_path)
+    tracks = {"mic": np.zeros(6 * 16000, np.float32), "system": call}
+    monkeypatch.setattr(pipeline, "_load_tracks", lambda folder, log: tracks)
+    monkeypatch.setattr(pipeline, "_transcribe", lambda *args: {"mic": heard, "system": question})
+    one_voice = {name: Diarization([Turn(0.0, 6.0, name)], {}) for name in tracks}
+    monkeypatch.setattr(pipeline, "_diarize", lambda *args: (one_voice, False))
+
+    pipeline.process(store, meeting, log=lambda message: None)
+
+    lines = [(row["track"], row["text"]) for row in store.transcript(meeting)]
+    assert lines == [("system", "Tuesday or Friday?"), ("mic", "Friday.")]
+    store.close()
+
+
 def test_words_to_know_are_spelled_before_the_database_is_locked(tmp_path: Path, monkeypatch):
     from zachcap import vocabulary
     from zachcap.diarize import Diarization
