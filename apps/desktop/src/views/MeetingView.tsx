@@ -595,7 +595,7 @@ export function MeetingView({ id, at, onBack }: { id: number; at?: number; onBac
           {processing && (
             <div className="mb-4 flex items-center gap-2 rounded-xl border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" />
-              {progress === "queued" ? "Waiting for the GPU..." : (progress ?? "Working...")}
+              {progress === "queued" ? "Waiting its turn..." : (progress ?? "Working...")}
             </div>
           )}
           {stalled && (

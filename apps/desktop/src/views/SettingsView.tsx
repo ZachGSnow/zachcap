@@ -883,7 +883,7 @@ export function SettingsView() {
         </Section>
 
         <Section icon={<Speaker className="size-3.5" />} title="Transcription">
-          <Row label="Language" help="Whisper runs on your GPU. Pick the meeting language, or let it detect.">
+          <Row label="Language" help="Whisper runs on this PC, on the GPU when there is one. Pick the meeting language, or let it detect.">
             <Select
               label="Language"
               value={settings?.language ?? "en"}
