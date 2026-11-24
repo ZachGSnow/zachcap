@@ -63,8 +63,8 @@ function Startup({ error, setup, onRetry }: { error?: string; setup?: string; on
             Setting up the speech engine
           </p>
           <p className="max-w-md text-sm text-muted-foreground">
-            The first start after installing downloads Python and the speech libraries (a few GB), so it
-            takes a few minutes. ZachCap opens when it's done.
+            The first time, this downloads Python and the speech libraries (a few GB) and takes a few
+            minutes. ZachCap opens when it's done.
           </p>
           <p className="max-w-md truncate font-mono text-xs text-muted-foreground">{setup}</p>
         </>

@@ -46,8 +46,6 @@ struct Engine {
     /// While an installed copy sets its engine up: the last thing uv said, for the startup
     /// screen.
     setup: Mutex<Option<String>>,
-    /// The uv setting the engine up, while it runs, so quitting ZachCap stops its download too.
-    uv: Mutex<Option<u32>>,
 }
 
 /// Where the engine and uv are. An installed copy runs the engine that came with it, in a
@@ -612,8 +610,10 @@ fn begin(app: AppHandle) {
         let engine = app.state::<Engine>();
         let token = uuid::Uuid::new_v4().simple().to_string();
         let port_file = data_dir().join(format!("engine-{}.port", uuid::Uuid::new_v4().simple()));
-        let started = set_up(&engine).and_then(|()| {
+        let started = set_up(&engine, &data_dir()).and_then(|()| {
             start_engine(&engine.launch, &token, &port_file).map_err(|error| {
+                // Its python.exe may be what's missing.
+                unmark(&engine.launch);
                 if engine.launch.installed {
                     format!("Couldn't start the engine ({error}).")
                 } else {
@@ -629,23 +629,7 @@ fn begin(app: AppHandle) {
                 *engine.child.lock().unwrap() = Some(child);
                 match wait_for_port(&engine, &port_file) {
                     Some(port) => *engine.info.lock().unwrap() = Some(EngineInfo { port, token }),
-                    None => {
-                        if engine.stopped.lock().unwrap().is_none() {
-                            if let Some(mut child) = engine.child.lock().unwrap().take() {
-                                let _ = child.kill();
-                            }
-                            *engine.stopped.lock().unwrap() = Some(
-                                "The engine started but never said which port it's on.".into(),
-                            );
-                        } // else it stopped, and check_engine said why
-                        // An installed engine that can't start may be a broken venv: the next
-                        // start (Try again) sets it up again instead of failing the same way.
-                        if engine.launch.installed {
-                            let _ = std::fs::remove_file(
-                                engine.launch.engine.join(".venv").join(SET_UP),
-                            );
-                        }
-                    }
+                    None => start_failed(&engine),
                 }
             }
             Err(message) => *engine.stopped.lock().unwrap() = Some(message),
@@ -653,6 +637,26 @@ fn begin(app: AppHandle) {
         let _ = std::fs::remove_file(&port_file);
         engine.starting.store(false, Ordering::SeqCst);
     });
+}
+
+/// Deals with an engine that never said which port it's on. One that stopped (check_engine
+/// said why) may have damaged or missing files in its venv, so the venv loses its mark and the
+/// next start (Try again) builds it from scratch instead of failing the same way. One still
+/// starting after PORT_WAIT is ended, and its venv kept: a slow PC compiles the libraries'
+/// Python files at the first start, and would have to start over in a new one.
+fn start_failed(engine: &Engine) {
+    if engine.stopped.lock().unwrap().is_some() {
+        // Not while ZachCap exits, which ends the engine too.
+        if !EXITING.load(Ordering::Relaxed) {
+            unmark(&engine.launch);
+        }
+        return;
+    }
+    if let Some(mut child) = engine.child.lock().unwrap().take() {
+        let _ = child.kill();
+    }
+    *engine.stopped.lock().unwrap() =
+        Some("The engine started but never said which port it's on.".into());
 }
 
 /// Waits for the engine to write the port it got (see report_port in api.py). None when it
@@ -677,67 +681,255 @@ fn read_port(port_file: &Path) -> Option<u16> {
     text.trim().parse::<u16>().ok().filter(|&port| port != 0)
 }
 
-/// The file in an installed copy's venv that records which build it was set up for.
+/// The file in an installed copy's venv that records which build it was set up for: written
+/// when a setup has finished, and gone while one changes the venv and once the engine couldn't
+/// start from it.
 const SET_UP: &str = "zachcap-build.txt";
 
+/// Where a venv that's replaced is moved, next to it, until it's deleted (the uninstaller
+/// deletes it too).
+const OLD_VENVS: &str = ".venv-old";
+
+/// How long something that has a file of the venv open (an antivirus looking at it, say) gets
+/// to let go when the venv is replaced.
+const LET_GO: Duration = Duration::from_secs(10);
+
+/// What an installed copy's venv needs before the engine can start from it.
+#[derive(Debug, PartialEq)]
+enum Setup {
+    /// Nothing: it's set up for this build.
+    Done,
+    /// What changed since the build it was set up for (an update).
+    Update,
+    /// All of it: it isn't there, or may not be whole (a setup was cut short, the engine
+    /// couldn't start from it, or an uninstall left half of it).
+    Fresh,
+}
+
+/// What the venv needs for this build (`build` is the installer's BUILD stamp), by the mark of
+/// the last setup that finished. Without one, packages may have files missing (an antivirus
+/// took them, or uv was ended part-way through), and uv doesn't put them back: to it a package
+/// is installed if its dist-info folder is there.
+fn setup_for(venv: &Path, build: &str) -> Setup {
+    use std::io::ErrorKind::{InvalidData, NotFound};
+    let mark = match std::fs::read_to_string(venv.join(SET_UP)) {
+        Ok(mark) => mark,
+        Err(error) if matches!(error.kind(), NotFound | InvalidData) => String::new(),
+        // It's there, but something has it open: no reason to throw the venv away.
+        Err(_) => return Setup::Update,
+    };
+    // A stamp starts with a version (a power cut can leave an empty mark, or zeros). A venv
+    // without its pyvenv.cfg was half removed (an uninstall while it ran): its python.exe would
+    // quietly run uv's shared Python instead.
+    let marked = mark.starts_with(|first: char| first.is_ascii_digit());
+    if !marked || !venv.join("pyvenv.cfg").is_file() {
+        Setup::Fresh
+    } else if mark == build {
+        Setup::Done
+    } else {
+        Setup::Update
+    }
+}
+
+/// Has the next start build an installed copy's venv from scratch.
+fn unmark(launch: &Launch) {
+    if launch.installed {
+        let _ = std::fs::remove_file(launch.engine.join(".venv").join(SET_UP));
+    }
+}
+
+/// Whether anything is at a path: a link counts, wherever it points (exists() follows it).
+fn is_there(path: &Path) -> bool {
+    path.symlink_metadata().is_ok()
+}
+
+/// Moves a venv out of the way (into OLD_VENVS), to be deleted from there. It's renamed, which
+/// Windows does whole or not at all, so there's never half a venv in its place. That works
+/// while a program runs from it (ZachCap's MCP server for Claude), but not while one has a file
+/// or a folder of it open: that one gets `wait` to let go. A link (in the venv, or in its place)
+/// is moved itself, not what it points to.
+fn set_aside(venv: &Path, wait: Duration) -> std::io::Result<()> {
+    let old = venv.with_file_name(OLD_VENVS);
+    let deadline = std::time::Instant::now() + wait;
+    while is_there(venv) {
+        // One that can't be deleted yet (a program runs from it) keeps its number.
+        let mut number = 1;
+        while is_there(&old.join(number.to_string())) {
+            number += 1;
+        }
+        let moved = std::fs::create_dir_all(&old)
+            .and_then(|()| std::fs::rename(venv, old.join(number.to_string())));
+        if let Err(error) = moved {
+            if std::time::Instant::now() >= deadline {
+                return Err(error);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    Ok(())
+}
+
 /// Brings an installed copy's engine venv up to date with the bundled uv: Python and the
-/// speech libraries on first launch (a few GB), what changed after an update. Skipped when
-/// this build is set up already (the installer's BUILD stamp is in the venv). What uv says
-/// is shown on the startup screen and kept in engine-setup.log.
-///
-/// In two steps, so nothing that isn't pinned is fetched or run: the libraries from uv.lock
-/// (each checked against its hash), then ZachCap's own code from the wheel the installer
-/// carries, built when the release was (building it here would fetch its build tool).
-fn set_up(engine: &Engine) -> Result<(), String> {
+/// speech libraries on first launch (a few GB), what changed after an update, all of it again
+/// (from uv's cache) when the venv may not be whole. Skipped when this build is set up already
+/// (the installer's BUILD stamp is in the venv). What uv says is shown on the startup screen
+/// and kept in engine-setup.log, in `data`.
+fn set_up(engine: &Engine, data: &Path) -> Result<(), String> {
     let launch = &engine.launch;
     if !launch.installed {
         return Ok(());
     }
     let venv = launch.engine.join(".venv");
+    let old = launch.engine.join(OLD_VENVS);
     let marker = venv.join(SET_UP);
     let build = std::fs::read_to_string(launch.engine.join("BUILD")).unwrap_or_default();
-    // A venv without its pyvenv.cfg was half removed (an uninstall while it ran): its python.exe
-    // would quietly run uv's shared Python instead, so it's set up again from scratch.
-    let whole = venv.join("pyvenv.cfg").is_file();
-    if whole
-        && !build.is_empty()
-        && std::fs::read_to_string(&marker).is_ok_and(|done| done == build)
-    {
+    let setup = setup_for(&venv, &build);
+    if setup == Setup::Done {
+        // What was still in use when the venv was replaced; the engine doesn't wait for it.
+        if is_there(&old) {
+            std::thread::spawn(move || std::fs::remove_dir_all(old));
+        }
         return Ok(());
-    }
-    if venv.exists() && !whole {
-        std::fs::remove_dir_all(&venv)
-            .map_err(|error| format!("Couldn't clear the old speech engine ({error})."))?;
     }
     let wheel = wheel_for(&launch.engine.join("wheel"), &build).ok_or(
         "The installer's copy of the engine is incomplete (no wheel). Install ZachCap again.",
     )?;
-    *engine.setup.lock().unwrap() = Some("Getting ready...".to_string());
-    let mut log = std::fs::create_dir_all(data_dir())
-        .and_then(|_| std::fs::File::create(data_dir().join("engine-setup.log")))
+    let say = |step: &str| *engine.setup.lock().unwrap() = Some(step.to_string());
+    say("Getting ready...");
+    let mut log = std::fs::create_dir_all(data)
+        .and_then(|_| std::fs::File::create(data.join("engine-setup.log")))
         .ok();
+    let again = setup == Setup::Fresh && (is_there(&venv) || is_there(&old));
+    let mut before = None;
+    if again {
+        say("Clearing the last setup...");
+        set_aside(&venv, LET_GO).map_err(|error| {
+            // Tauri gives the program's folder with \\?\ in front.
+            let venv = venv.display().to_string();
+            format!(
+                "Couldn't replace the speech engine ({error}). Close anything that has {} open (a \
+                 folder window, a terminal), or restart the PC, and press Try again.",
+                venv.trim_start_matches(r"\\?\")
+            )
+        })?;
+        // A link is deleted itself, never followed. What's still in use goes on a later start.
+        let _ = std::fs::remove_dir_all(&old);
+        say("Getting ready...");
+    } else if setup == Setup::Update {
+        // Not marked again until it's finished: cut short, it may not be whole.
+        before = Some((std::fs::read(&marker), installed_packages(&venv)));
+        std::fs::remove_file(&marker)
+            .map_err(|error| format!("Couldn't update the speech engine ({error})."))?;
+    }
+    let installed = install(engine, &venv, &wheel, again, &mut log);
+    if installed.is_ok() {
+        let _ = std::fs::write(&marker, &build);
+    } else if let Some((Ok(mark), packages)) = before
+        && packages == installed_packages(&venv)
+        && damaged_packages(&venv).is_empty()
+    {
+        // uv gave up before it changed anything (no internet, say): still the venv to update.
+        let _ = std::fs::write(&marker, mark);
+    }
+    installed
+}
+
+/// Installs what `venv` is missing. In two steps, so nothing that isn't pinned is fetched or
+/// run: the libraries from uv.lock (each checked against its hash), then ZachCap's own code
+/// from the wheel the installer carries, built when the release was (building it here would
+/// fetch its build tool). `again`: the venv is built from scratch after one that may not have
+/// been whole.
+fn install(
+    engine: &Engine,
+    venv: &Path,
+    wheel: &Path,
+    again: bool,
+    log: &mut Option<std::fs::File>,
+) -> Result<(), String> {
     // The lock as shipped, without the test tools or ZachCap itself. Only the project's own
     // settings: no uv.toml from the user's or the machine's config folders (another account
     // can write C:\ProgramData), and a Python uv manages, not whatever 3.12 is installed.
-    run_uv(engine, &mut log, |command| {
+    let sync = |command: &mut Command| {
         command
             .arg("sync")
             .arg("--project")
-            .arg(&launch.engine)
+            .arg(&engine.launch.engine)
             .args(["--locked", "--no-dev", "--no-install-project"])
             .args(["--no-config", "--managed-python"])
-            .env("UV_PROJECT_ENVIRONMENT", &venv);
-    })?;
-    // ZachCap's own code, copied into the venv (so the installed files are only read).
-    run_uv(engine, &mut log, |command| {
+            .env("UV_PROJECT_ENVIRONMENT", venv);
+    };
+    run_uv(engine, log, sync)?;
+    // A venv's files are mostly hard links to the ones in uv's cache: one damaged in the last
+    // venv is damaged in the cache too, and an antivirus may have taken both. uv doesn't look,
+    // so those packages are downloaded again.
+    let damaged = if again {
+        damaged_packages(venv)
+    } else {
+        Vec::new()
+    };
+    if !damaged.is_empty() {
+        if let Some(log) = log.as_mut() {
+            let _ = writeln!(
+                log,
+                "[ZachCap] Damaged in uv's cache: {}",
+                damaged.join(" ")
+            );
+        }
+        run_uv(engine, log, |command| {
+            sync(command);
+            command.arg("--no-cache");
+            for package in &damaged {
+                command.arg("--reinstall-package").arg(package);
+            }
+        })?;
+    }
+    // ZachCap's own code, copied into the venv (so the installed files are only read), from the
+    // wheel itself and not what uv's cache has of it.
+    run_uv(engine, log, |command| {
         command
             .args(["pip", "install", "--python"])
-            .arg(&venv)
-            .args(["--no-deps", "--reinstall", "--offline", "--no-config"])
-            .arg(&wheel);
-    })?;
-    let _ = std::fs::write(&marker, &build);
-    Ok(())
+            .arg(venv)
+            .args(["--no-deps", "--reinstall", "--offline", "--no-cache"])
+            .arg("--no-config")
+            .arg(wheel);
+    })
+}
+
+/// The dist-info folders of a venv's packages, which are what uv goes by.
+fn installed_packages(venv: &Path) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(venv.join("Lib").join("site-packages"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|kind| kind == "dist-info"))
+        .collect();
+    folders.sort();
+    folders
+}
+
+/// The names of a venv's packages that have a file missing, or of another size than their wheel
+/// had it (their RECORD says). Not by hash: that's a few GB to read.
+fn damaged_packages(venv: &Path) -> Vec<String> {
+    let packages = venv.join("Lib").join("site-packages");
+    let whole = |folder: &PathBuf| {
+        let record = std::fs::read_to_string(folder.join("RECORD"));
+        record.is_ok_and(|record| {
+            // Each line is "path,hash,size"; a path with a comma in it has quotes around it.
+            record.lines().all(|line| {
+                let mut fields = line.rsplitn(3, ',');
+                let size = fields.next().and_then(|size| size.parse::<u64>().ok());
+                let path = packages.join(fields.nth(1).unwrap_or_default().trim_matches('"'));
+                size.is_none_or(|size| std::fs::metadata(path).is_ok_and(|file| file.len() == size))
+            })
+        })
+    };
+    installed_packages(venv)
+        .iter()
+        .filter(|folder| !whole(folder))
+        .filter_map(|folder| folder.file_stem()?.to_str()?.split('-').next())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The wheel of this build's version in the installer's wheel folder (`build` is the BUILD
@@ -751,7 +943,7 @@ fn wheel_for(folder: &Path, build: &str) -> Option<PathBuf> {
 }
 
 /// Runs the bundled uv to set the engine up: what it says goes to the startup screen and
-/// the log, and quitting ZachCap meanwhile stops it (see the Exit handler).
+/// the log, and it ends with ZachCap (see end_with_zachcap).
 fn run_uv(
     engine: &Engine,
     log: &mut Option<std::fs::File>,
@@ -768,7 +960,7 @@ fn run_uv(
     let mut child = command
         .spawn()
         .map_err(|error| format!("Couldn't run the bundled uv ({error})."))?;
-    *engine.uv.lock().unwrap() = Some(child.id());
+    let _job = end_with_zachcap(&child);
     let mut last = String::new();
     if let Some(stderr) = child.stderr.take() {
         use std::io::BufRead;
@@ -786,9 +978,8 @@ fn run_uv(
             }
         }
     }
-    let status = child.wait().map_err(|error| error.to_string());
-    *engine.uv.lock().unwrap() = None;
-    if !status?.success() {
+    let status = child.wait().map_err(|error| error.to_string())?;
+    if !status.success() {
         return Err(format!(
             "Setting up the engine didn't finish ({last}). Check the internet connection and press Try again. \
              What happened is in {}.",
@@ -797,6 +988,41 @@ fn run_uv(
     }
     Ok(())
 }
+
+/// Has a process, and those it starts, end when the job returned is dropped or ZachCap goes,
+/// however it goes: Quit, a crash, or the installer closing it. A uv left running would go on
+/// downloading, and keep the venv it's working in open. None if Windows won't do it.
+#[cfg(windows)]
+fn end_with_zachcap(child: &Child) -> Option<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    // SAFETY: the job's handle is owned from here on; the limits (plain numbers, all zero but
+    // one) outlive the call that reads them.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+        let job = OwnedHandle::from_raw_handle(job);
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let limited = SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            size_of_val(&limits) as u32,
+        );
+        let added = AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle());
+        (limited != 0 && added != 0).then_some(job)
+    }
+}
+
+#[cfg(not(windows))]
+fn end_with_zachcap(_: &Child) {}
 
 fn no_window(command: &mut Command) {
     #[cfg(windows)]
@@ -1182,7 +1408,6 @@ pub fn run() {
                 stopped: Mutex::new(None),
                 starting: AtomicBool::new(false),
                 setup: Mutex::new(None),
-                uv: Mutex::new(None),
             });
             begin(app.handle().clone());
             app.manage(Follow(Mutex::new(Following::default())));
@@ -1344,32 +1569,8 @@ pub fn run() {
                 if let Some(mut child) = engine.child.lock().unwrap().take() {
                     let _ = child.kill();
                 }
-                if let Some(pid) = engine.uv.lock().unwrap().take() {
-                    end_process(pid);
-                }
             }
         });
-}
-
-/// Ends a process by its id (uv, which set_up reads from on another thread).
-fn end_process(pid: u32) {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
-        };
-        // SAFETY: a handle opened here and closed here; a pid that's gone gives a null one.
-        unsafe {
-            let process = OpenProcess(PROCESS_TERMINATE, 0, pid);
-            if !process.is_null() {
-                TerminateProcess(process, 1);
-                CloseHandle(process);
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = pid;
 }
 
 #[cfg(all(test, windows))]
@@ -1420,7 +1621,6 @@ mod tests {
             stopped: Mutex::new(None),
             starting: AtomicBool::new(false),
             setup: Mutex::new(None),
-            uv: Mutex::new(None),
         }
     }
 
@@ -1566,6 +1766,425 @@ mod tests {
         assert_eq!(wheel_for(&dir, "0.4.0 abc1234 2026-12-01T00:00:00Z"), None);
         assert_eq!(wheel_for(&dir, ""), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_manifest_has_the_same_version() {
+        // Setup takes the wheel of tauri.conf.json's version (the BUILD stamp's), which is built
+        // with pyproject.toml's, and needs uv.lock to go with that.
+        let json = |text: &str| -> serde_json::Value { serde_json::from_str(text).unwrap() };
+        let config = json(include_str!("../tauri.conf.json"));
+        let version = config["version"].as_str().unwrap();
+        assert_eq!(env!("CARGO_PKG_VERSION"), version, "Cargo.toml");
+        let page = json(include_str!("../../package.json"));
+        assert_eq!(page["version"], version, "package.json");
+        let engine = format!("name = \"zachcap\"\nversion = \"{version}\"\n");
+        for (name, text) in [
+            (
+                "pyproject.toml",
+                include_str!("../../../../engine/pyproject.toml"),
+            ),
+            ("uv.lock", include_str!("../../../../engine/uv.lock")),
+        ] {
+            let text = text.replace("\r\n", "\n");
+            assert!(text.contains(&engine), "{name} isn't at {version}");
+        }
+    }
+
+    /// A folder for one test, gone after it.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let name = format!("zachcap-{name}-test-{}", std::process::id());
+            let dir = std::env::temp_dir().join(name);
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const BUILD: &str = "0.3.0 2970921 2026-11-24T14:28:40Z";
+    const OLDER_BUILD: &str = "0.2.0 a297271 2026-11-24T12:28:06Z";
+    /// The package in the venv of `installed`: its file, and what uv goes by.
+    const FILE: &str = r"Lib\site-packages\library.py";
+    const DIST_INFO: &str = r"Lib\site-packages\library-1.0.dist-info";
+
+    /// An installed copy in `dir`, its venv marked like that, with a stand-in for uv.
+    fn installed(dir: &Path, mark: Option<&str>) -> Engine {
+        let folder = dir.join("engine");
+        let venv = folder.join(".venv");
+        std::fs::create_dir_all(folder.join("wheel")).unwrap();
+        std::fs::write(folder.join(r"wheel\zachcap-0.3.0-py3-none-any.whl"), b"").unwrap();
+        std::fs::write(folder.join("BUILD"), BUILD).unwrap();
+        std::fs::create_dir_all(venv.join(DIST_INFO)).unwrap();
+        std::fs::write(venv.join(FILE), b"").unwrap();
+        std::fs::write(
+            venv.join(DIST_INFO).join("RECORD"),
+            "library.py,sha256=x,0\nlibrary-1.0.dist-info/RECORD,,\n",
+        )
+        .unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), b"").unwrap();
+        if let Some(mark) = mark {
+            std::fs::write(venv.join(SET_UP), mark).unwrap();
+        }
+        uv_syncs(dir, &[]);
+        let mut engine = engine(None);
+        engine.launch = Launch {
+            uv: dir.join("uv.cmd"),
+            engine: folder,
+            installed: true,
+        };
+        engine
+    }
+
+    /// Has the stand-in for uv note what it's asked and, for a sync, run these lines (the
+    /// venv's packages are in %packages%), then make the venv if there's none.
+    fn uv_syncs(dir: &Path, lines: &[&str]) {
+        let mut batch = vec![
+            "@echo off",
+            r#">>"%~dp0asked.txt" echo %*"#,
+            r#"if not "%~1"=="sync" exit /b 0"#,
+            r#"set packages=%UV_PROJECT_ENVIRONMENT%\Lib\site-packages"#,
+        ];
+        batch.extend(lines);
+        batch.push(r#"if not exist "%packages%" mkdir "%packages%""#);
+        batch.push(r#">"%UV_PROJECT_ENVIRONMENT%\pyvenv.cfg" echo home"#);
+        std::fs::write(dir.join("uv.cmd"), batch.join("\r\n") + "\r\n").unwrap();
+    }
+
+    /// What the stand-in for uv was asked so far, a line each time.
+    fn asked(dir: &Path) -> Vec<String> {
+        let text = std::fs::read_to_string(dir.join("asked.txt")).unwrap_or_default();
+        text.lines().map(str::to_string).collect()
+    }
+
+    fn mark_of(engine: &Engine) -> Option<String> {
+        std::fs::read_to_string(engine.launch.engine.join(".venv").join(SET_UP)).ok()
+    }
+
+    #[test]
+    fn the_mark_says_what_a_venv_needs() {
+        let dir = Scratch::new("marks");
+        let venv = dir.0.join("venv");
+        assert_eq!(setup_for(&venv, BUILD), Setup::Fresh, "there's none");
+        for (mark, needs) in [
+            (Some(BUILD), Setup::Done),
+            (Some(OLDER_BUILD), Setup::Update),
+            (None, Setup::Fresh),
+            // Left by a power cut.
+            (Some(""), Setup::Fresh),
+            (Some("\0\0\0\0\0\0\0\0"), Setup::Fresh),
+        ] {
+            let _ = std::fs::remove_dir_all(&venv);
+            std::fs::create_dir_all(&venv).unwrap();
+            if let Some(mark) = mark {
+                std::fs::write(venv.join(SET_UP), mark).unwrap();
+            }
+            assert_eq!(setup_for(&venv, BUILD), Setup::Fresh, "half removed");
+            std::fs::write(venv.join("pyvenv.cfg"), b"").unwrap();
+            assert_eq!(setup_for(&venv, BUILD), needs, "{mark:?}");
+        }
+        // One that can't be read just now is there, so the venv is kept.
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut alone = std::fs::OpenOptions::new();
+        let alone = alone.write(true).create(true).truncate(true).share_mode(0);
+        let held = alone.open(venv.join(SET_UP)).unwrap();
+        assert_eq!(setup_for(&venv, BUILD), Setup::Update);
+        drop(held);
+    }
+
+    #[test]
+    fn a_venv_without_its_mark_is_built_from_scratch() {
+        let dir = Scratch::new("fresh");
+        let engine = installed(&dir.0, None);
+        let venv = engine.launch.engine.join(".venv");
+        // An antivirus took it; to uv, the package is still installed.
+        std::fs::remove_file(venv.join(FILE)).unwrap();
+        set_up(&engine, &dir.0).unwrap();
+        assert!(venv.join("pyvenv.cfg").is_file());
+        assert!(!venv.join(DIST_INFO).exists());
+        assert!(!is_there(&engine.launch.engine.join(OLD_VENVS)));
+        assert_eq!(mark_of(&engine).as_deref(), Some(BUILD));
+        let calls = asked(&dir.0);
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(calls[0].starts_with("sync "), "{calls:?}");
+        assert!(calls[1].starts_with("pip install "), "{calls:?}");
+        // ZachCap's own wheel as it is, not as uv's cache has it.
+        assert!(calls[1].contains(" --no-cache "), "{calls:?}");
+
+        // Set up: nothing more to ask uv.
+        set_up(&engine, &dir.0).unwrap();
+        assert_eq!(asked(&dir.0).len(), 2);
+    }
+
+    #[test]
+    fn a_replacement_cut_short_is_finished_by_the_next_start() {
+        let dir = Scratch::new("cut-short");
+        let engine = installed(&dir.0, None);
+        let venv = engine.launch.engine.join(".venv");
+        // With the old venv moved away, and not yet deleted.
+        set_aside(&venv, Duration::ZERO).unwrap();
+        assert!(!is_there(&venv));
+        set_up(&engine, &dir.0).unwrap();
+        assert!(!is_there(&engine.launch.engine.join(OLD_VENVS)));
+        assert_eq!(mark_of(&engine).as_deref(), Some(BUILD));
+
+        // With the new one half built: uv is ended (Quit, a power cut) before it's marked.
+        unmark(&engine.launch);
+        uv_syncs(&dir.0, &["exit /b 2"]);
+        assert!(set_up(&engine, &dir.0).is_err());
+        assert_eq!(mark_of(&engine), None);
+        uv_syncs(&dir.0, &[]);
+        set_up(&engine, &dir.0).unwrap();
+        assert_eq!(mark_of(&engine).as_deref(), Some(BUILD));
+    }
+
+    #[test]
+    fn an_update_keeps_the_venv() {
+        let dir = Scratch::new("update");
+        let engine = installed(&dir.0, Some(OLDER_BUILD));
+        // While uv changes it there's no mark: cut short, it's built from scratch next time.
+        uv_syncs(
+            &dir.0,
+            &[r#"if exist "%UV_PROJECT_ENVIRONMENT%\zachcap-build.txt" exit /b 2"#],
+        );
+        set_up(&engine, &dir.0).unwrap();
+        assert!(engine.launch.engine.join(".venv").join(FILE).is_file());
+        assert_eq!(mark_of(&engine).as_deref(), Some(BUILD));
+    }
+
+    #[test]
+    fn an_update_that_failed_starts_over_unless_nothing_was_changed() {
+        let dir = Scratch::new("failed-update");
+        let engine = installed(&dir.0, Some(OLDER_BUILD));
+        let venv = engine.launch.engine.join(".venv");
+        // No internet.
+        uv_syncs(&dir.0, &["exit /b 2"]);
+        assert!(set_up(&engine, &dir.0).is_err());
+        assert!(venv.join(FILE).is_file());
+        assert_eq!(mark_of(&engine).as_deref(), Some(OLDER_BUILD));
+
+        for changed in [
+            r#"rmdir /s /q "%packages%\library-1.0.dist-info""#,
+            r#"del "%packages%\library.py""#,
+            r#"mkdir "%packages%\other-1.0.dist-info""#,
+        ] {
+            let engine = installed(&dir.0, Some(OLDER_BUILD));
+            uv_syncs(&dir.0, &[changed, "exit /b 2"]);
+            assert!(set_up(&engine, &dir.0).is_err());
+            assert_eq!(mark_of(&engine), None, "{changed}");
+            uv_syncs(&dir.0, &[]);
+            set_up(&engine, &dir.0).unwrap();
+            assert!(!venv.join(FILE).exists());
+            assert_eq!(mark_of(&engine).as_deref(), Some(BUILD));
+        }
+    }
+
+    #[test]
+    fn nothing_is_cleared_when_the_wheel_is_missing() {
+        let dir = Scratch::new("no-wheel");
+        let engine = installed(&dir.0, None);
+        std::fs::remove_dir_all(engine.launch.engine.join("wheel")).unwrap();
+        assert!(set_up(&engine, &dir.0).unwrap_err().contains("no wheel"));
+        assert!(engine.launch.engine.join(".venv").join(FILE).is_file());
+        assert!(asked(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn what_is_damaged_in_uvs_cache_is_downloaded_again() {
+        let dir = Scratch::new("damaged");
+        let engine = installed(&dir.0, None);
+        let lost = [
+            r#"if not exist "%packages%\lost-1.0.dist-info" mkdir "%packages%\lost-1.0.dist-info""#,
+            r#">"%packages%\lost-1.0.dist-info\RECORD" echo lost/lost.py,sha256=x,5"#,
+        ];
+        uv_syncs(&dir.0, &lost);
+        set_up(&engine, &dir.0).unwrap();
+        let calls = asked(&dir.0);
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert!(!calls[0].contains("--no-cache"), "{calls:?}");
+        assert!(
+            calls[1].ends_with(" --no-cache --reinstall-package lost"),
+            "{calls:?}"
+        );
+
+        // Not at a first setup: the cache has just been filled.
+        std::fs::remove_dir_all(engine.launch.engine.join(".venv")).unwrap();
+        set_up(&engine, &dir.0).unwrap();
+        assert_eq!(asked(&dir.0).len(), 5);
+    }
+
+    #[test]
+    fn a_package_is_damaged_when_a_file_is_missing_or_of_another_size() {
+        let dir = Scratch::new("record");
+        let packages = dir.0.join(r"Lib\site-packages");
+        for (package, record) in [
+            (
+                "whole_one-1.0",
+                "whole_one/a.py,sha256=x,3\r\n\"b,c.py\",sha256=x,0\r\n\
+                 ../../Scripts/whole.exe,sha256=x,2\r\nunsized.pyc,,\r\n\
+                 whole_one-1.0.dist-info/RECORD,,\r\n",
+            ),
+            ("missing-2.0.1", "missing.py,sha256=x,1\n"),
+            ("resized-3.0", "whole_one/a.py,sha256=x,4\n"),
+        ] {
+            let info = packages.join(format!("{package}.dist-info"));
+            std::fs::create_dir_all(&info).unwrap();
+            std::fs::write(info.join("RECORD"), record).unwrap();
+        }
+        // uv was ended before it wrote a RECORD.
+        std::fs::create_dir_all(packages.join("half-4.0.dist-info")).unwrap();
+        std::fs::create_dir_all(packages.join("whole_one")).unwrap();
+        std::fs::create_dir_all(dir.0.join("Scripts")).unwrap();
+        std::fs::write(packages.join(r"whole_one\a.py"), b"abc").unwrap();
+        std::fs::write(packages.join("b,c.py"), b"").unwrap();
+        std::fs::write(dir.0.join(r"Scripts\whole.exe"), b"MZ").unwrap();
+        let damaged = ["half", "missing", "resized"];
+        assert_eq!(damaged_packages(&dir.0), damaged);
+        // As the app has it, with \\?\ in front (where a / in a path isn't a separator).
+        assert_eq!(damaged_packages(&dir.0.canonicalize().unwrap()), damaged);
+    }
+
+    #[test]
+    fn replacing_a_venv_never_follows_a_link_out_of_it() {
+        let dir = Scratch::new("links");
+        let elsewhere = dir.0.join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("folder")).unwrap();
+        std::fs::write(elsewhere.join(r"folder\kept.txt"), b"").unwrap();
+        // A junction, which takes no rights to make.
+        let link = |at: &Path| {
+            let made = Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .args([at, &elsewhere])
+                .stdout(Stdio::null())
+                .status();
+            assert!(made.unwrap().success());
+        };
+        let engine = installed(&dir.0, None);
+        let venv = engine.launch.engine.join(".venv");
+        let old = engine.launch.engine.join(OLD_VENVS);
+        link(&venv.join(r"Lib\link"));
+        set_up(&engine, &dir.0).unwrap();
+        assert!(!is_there(&venv.join(r"Lib\link")) && !is_there(&old));
+        assert!(elsewhere.join(r"folder\kept.txt").is_file());
+
+        // One where the venv should be, and one where it's moved to.
+        std::fs::remove_dir_all(&venv).unwrap();
+        link(&venv);
+        link(&old);
+        set_up(&engine, &dir.0).unwrap();
+        assert!(venv.symlink_metadata().unwrap().is_dir(), "a folder now");
+        assert!(!is_there(&old));
+        assert!(elsewhere.join(r"folder\kept.txt").is_file());
+    }
+
+    #[test]
+    fn a_venv_with_a_file_open_stays_whole_until_its_let_go() {
+        let dir = Scratch::new("open");
+        let engine = installed(&dir.0, None);
+        let venv = engine.launch.engine.join(".venv");
+        let open = std::fs::File::open(venv.join(FILE)).unwrap();
+        assert!(set_aside(&venv, Duration::from_millis(300)).is_err());
+        assert!(venv.join(FILE).is_file() && venv.join("pyvenv.cfg").is_file());
+
+        let letting_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            drop(open);
+        });
+        set_aside(&venv, Duration::from_secs(30)).unwrap();
+        assert!(!is_there(&venv));
+        letting_go.join().unwrap();
+    }
+
+    #[test]
+    fn a_program_running_from_a_venv_doesnt_keep_it_from_being_replaced() {
+        let dir = Scratch::new("running");
+        let engine = installed(&dir.0, None);
+        let venv = engine.launch.engine.join(".venv");
+        let old = engine.launch.engine.join(OLD_VENVS);
+        // Runs until its stdin is closed.
+        let program = venv.join("sort.exe");
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        std::fs::copy(system.join("sort.exe"), &program).unwrap();
+        let mut running = Command::new(&program)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        set_up(&engine, &dir.0).unwrap();
+        assert!(!venv.join(FILE).exists());
+        assert!(old.join(r"1\sort.exe").is_file(), "it can't be deleted yet");
+
+        // Again, while it still runs.
+        unmark(&engine.launch);
+        std::fs::write(venv.join(FILE), b"").unwrap();
+        set_up(&engine, &dir.0).unwrap();
+        assert!(!venv.join(FILE).exists());
+        assert!(running.try_wait().unwrap().is_none());
+
+        // Once it has ended, a start deletes what's left of it.
+        running.kill().unwrap();
+        running.wait().unwrap();
+        set_up(&engine, &dir.0).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while is_there(&old) {
+            assert!(std::time::Instant::now() < deadline, "still there");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(mark_of(&engine).as_deref(), Some(BUILD));
+    }
+
+    #[test]
+    fn only_an_engine_that_stopped_has_its_venv_built_again() {
+        let dir = Scratch::new("stopped");
+        let engine = installed(&dir.0, Some(BUILD));
+        // Still starting when its time was up: ended, and its venv kept.
+        let mut slow = Command::new("cmd");
+        slow.args(["/c", "pause"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null());
+        *engine.child.lock().unwrap() = Some(slow.spawn().unwrap());
+        start_failed(&engine);
+        assert!(engine.child.lock().unwrap().is_none());
+        assert!(engine.stopped.lock().unwrap().is_some());
+        assert_eq!(mark_of(&engine).as_deref(), Some(BUILD));
+
+        *engine.stopped.lock().unwrap() = Some("The engine stopped (exit code: 1).".into());
+        start_failed(&engine);
+        assert_eq!(mark_of(&engine), None);
+
+        // The repo's engine in development is never touched.
+        let mut repo = installed(&dir.0, Some(BUILD));
+        repo.launch.installed = false;
+        *repo.stopped.lock().unwrap() = Some("The engine stopped (exit code: 1).".into());
+        start_failed(&repo);
+        assert_eq!(mark_of(&repo).as_deref(), Some(BUILD));
+    }
+
+    #[test]
+    fn uv_ends_with_its_job() {
+        let mut waiting = Command::new("cmd")
+            .args(["/c", "pause"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let job = end_with_zachcap(&waiting).expect("a job");
+        assert!(waiting.try_wait().unwrap().is_none());
+        // As Windows closes it when ZachCap goes.
+        drop(job);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while waiting.try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "still running");
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]

@@ -59,7 +59,7 @@ Requirements: Windows 10 or 11 (64-bit), an internet connection for the first st
    1. A free [Hugging Face](https://huggingface.co) token, after accepting the terms of [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1). Without it ZachCap still transcribes, labeling the two sides "You" and "Call audio".
    2. An [Anthropic API key](https://platform.claude.com) for summaries and questions (optional; about $0.09 per hour-long meeting with Opus 5.5).
 
-Keys are stored in Windows Credential Manager. Your meetings, voices and settings live in `%LOCALAPPDATA%\ZachCap`; uninstalling (Settings > Apps) removes the program and its speech engine but leaves them. Updating is running a newer installer: it keeps the speech engine and downloads only what changed.
+Keys are stored in Windows Credential Manager. Your meetings, voices and settings live in `%LOCALAPPDATA%\ZachCap`; uninstalling (Settings > Apps) removes the program and its speech engine but leaves them. Updating is running a newer installer: it keeps the speech engine and downloads only what changed. If the engine can't start because files of it are damaged or missing (an antivirus took one, say), **Try again** on the startup screen sets it up from scratch, mostly from what was downloaded before.
 
 Windows **Smart App Control**, when it is on, blocks parts of the speech libraries (they aren't signed by their makers), and the engine can't start. If the startup screen reports that, Smart App Control has to be turned off (Windows Security > App & browser control).
 
