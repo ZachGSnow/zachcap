@@ -1,19 +1,21 @@
 """The live transcript: lines a moment after each person stops talking, echo left out, and
 never a risk to the recording (bounded, never waiting, the GPU handed to meetings first).
 
-Whisper and the speech finder are stand-ins: nothing is downloaded, and these run without
-the GPU stack (CI doesn't install it)."""
+The speech models' process is a stand-in here (test_live_child.py has the real one), so
+these run without the GPU stack (CI doesn't install it)."""
 
+import subprocess
+import sys
 import threading
 import time
+from functools import partial
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from zachcap import capture, cpu, cuda, dictation, echo, live, models, pipeline
+from zachcap import api, capture, cpu, dictation, echo, live, live_child, pipeline
 from zachcap.api import create_app
 from zachcap.live import BEHIND, END_SILENCE, LONGEST, RATE, GpuTurns, Live, Resampler, Speech
 
@@ -553,6 +555,34 @@ def test_stopping_never_waits_and_the_worker_frees_the_model(monkeypatch: pytest
     assert lines == ["system"]  # the line it was on, not the rest
 
 
+IN_THE_ENGINE = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import numpy as np
+from zachcap import api, live
+transcript = live.Live(lambda audio, track: "said", speech=lambda audio: [(0, 8000)])
+for track, rate in (("mic", 44100), ("system", 48000)):
+    for frame in range(0, rate * 3, rate // 10):
+        transcript.feed(track, np.zeros(rate // 10, np.float32), rate, frame)
+transcript.step()
+print(bool(transcript.lines()), [name for name in HEAVY if name in sys.modules])
+"""
+
+
+def test_the_worker_loads_nothing_heavy_into_the_engine():
+    # Importing these holds up the recorder's threads for up to 0.2 s at a time, mid-call.
+    heavy = ("scipy.signal", "torch", "faster_whisper", "ctranslate2", "onnxruntime")
+    ran = subprocess.run(
+        [sys.executable, "-c", IN_THE_ENGINE.replace("HEAVY", repr(heavy))]
+        + [str(Path(live.__file__).parents[1])],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    assert ran.stdout.strip() == "True []", ran.stderr
+
+
 def test_a_listener_hears_the_audio_once_its_on_disk_and_a_failing_one_is_let_go(
     tmp_path: Path,
 ):
@@ -591,95 +621,187 @@ def test_the_listener_keeps_the_timeline_after_a_disk_error(tmp_path: Path):
 # The GPU: meetings being processed come first ------------------------------------------
 
 
-class FakeModel:
-    loaded: list = []
+class FakeChild:
+    """The speech models' process, as Speech sees it: what it's asked is answered at once, by
+    ``replies`` (a dict, an exception to raise, or None: no answer yet), else as it should be."""
 
-    def __init__(self, name, **options) -> None:
-        FakeModel.loaded.append((name, options))
+    made: list = []
+    replies: dict = {}
 
-    def transcribe(self, audio, **options):
-        said = SimpleNamespace(text=" what was said ", no_speech_prob=0.01, avg_logprob=-0.2)
-        return [said], None
+    def __init__(self, *args: str) -> None:
+        self.args, self.asked, self.ended = args, [], 0
+        FakeChild.made.append(self)
+
+    def send(self, do: str, audio=None, **more) -> None:
+        assert not self.ended
+        self.asked.append((do, more))
+
+    def answer(self, timeout: float) -> dict | None:
+        do = self.asked[-1][0]
+        usual = {"find": {"spans": [[0, RATE]]}, "hear": {"text": "said", "doubtful": False}}
+        reply = FakeChild.replies.get(do, usual[do])
+        if isinstance(reply, Exception):
+            raise reply
+        if reply is None:
+            time.sleep(0.01)
+        return reply
+
+    def end(self) -> None:
+        self.ended += 1
+
+
+class Check:
+    """A GPU check (live.GpuCheck) that's done."""
+
+    def __init__(self, usable: bool) -> None:
+        self.usable = usable
+
+    def look(self) -> bool:
+        return self.usable
 
 
 @pytest.fixture
-def whisper(monkeypatch: pytest.MonkeyPatch) -> list:
-    """Whisper models made, as (name, options); on the GPU unless a test says otherwise."""
-    FakeModel.loaded = []
-    monkeypatch.setattr(models, "whisper", FakeModel)
-    monkeypatch.setattr(cuda, "prepare", lambda: True)
-    return FakeModel.loaded
+def children() -> list[FakeChild]:
+    """The speech children started."""
+    FakeChild.made, FakeChild.replies = [], {}
+    return FakeChild.made
 
 
-def test_the_live_model_is_the_meetings_on_the_gpu(whisper: list):
-    speech = Speech("en", "Contoso", gpu=GpuTurns())
-    assert speech.ready()
-    assert speech(np.zeros(RATE, np.float32), "system") == "what was said"
-    options = {"device": "cuda", "compute_type": "int8_float16", "local_files_only": True}
-    assert whisper == [("large-v3-turbo", options)]
+def speech_on(gpu: bool, turns: GpuTurns | None = None, language: str | None = "en") -> Speech:
+    return Speech(language, "Contoso", gpu=turns, check=Check(gpu), start=FakeChild)
 
 
-def test_a_line_takes_one_pass(whisper: list, monkeypatch: pytest.MonkeyPatch):
-    asked: list = []
-    real = FakeModel.transcribe
+CLIP = np.zeros(RATE, np.float32)
 
-    def transcribe(self, audio, **options):
-        asked.append(options)
-        return real(self, audio, **options)
 
-    monkeypatch.setattr(FakeModel, "transcribe", transcribe)
-    speech = Speech("en", None, gpu=GpuTurns())
-    assert speech.ready()
-    speech(np.zeros(RATE, np.float32), "system")
-    # Left to itself, faster-whisper tries up to five more temperatures when in doubt.
-    assert asked[0]["temperature"] == 0 and asked[0]["beam_size"] == 1
+def test_the_live_model_is_the_meetings_on_the_gpu(children: list):
+    speech = speech_on(True, GpuTurns())
+    assert speech.ready() and children == []  # nothing until there's audio to look at
+    assert speech.find(CLIP) == [(0, RATE)]
+    heard = speech(CLIP, "system")
+    assert heard == "said" and not heard.doubtful
+    [child] = children  # one for everything
+    assert child.args == ("cuda",)
+    assert child.asked[1] == (
+        "hear",
+        {
+            "model": "large-v3-turbo",
+            "options": {"device": "cuda", "compute_type": "int8_float16"},
+            "language": "en",
+            "hotwords": "Contoso",
+        },
+    )
 
 
 def test_on_the_cpu_half_the_cores_are_left_for_the_call(
-    whisper: list, monkeypatch: pytest.MonkeyPatch
+    children: list, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr(cuda, "prepare", lambda: False)
     monkeypatch.setattr(cpu, "physical_cores", lambda: 6)
-    speech = Speech("en", None, gpu=GpuTurns())
+    speech = speech_on(False, GpuTurns())
     assert speech.ready()
-    speech(np.zeros(RATE, np.float32), "mic")
-    options = {"device": "cpu", "compute_type": "int8", "cpu_threads": 3, "local_files_only": True}
-    assert whisper == [(dictation.model_for("en"), options)]
+    speech(CLIP, "mic")
+    assert children[0].args == ()
+    asked = children[0].asked[0][1]
+    assert asked["model"] == dictation.model_for("en")
+    assert asked["options"] == {"device": "cpu", "compute_type": "int8", "cpu_threads": 3}
     monkeypatch.setattr(cpu, "physical_cores", lambda: 1)
-    single = Speech(None, None)  # one core, and any language
+    single = speech_on(False, language=None)  # one core, and any language
     assert single.ready()
-    single(np.zeros(RATE, np.float32), "mic")
-    assert whisper[-1] == (dictation.model_for(None), {**options, "cpu_threads": 1})
+    single(CLIP, "mic")
+    asked = children[1].asked[0][1]
+    assert asked["model"] == dictation.model_for(None) and asked["options"]["cpu_threads"] == 1
 
 
-def test_a_meeting_takes_the_gpu_from_the_live_transcript(whisper: list):
+def test_a_meeting_takes_the_gpu_from_the_live_transcript(children: list):
     turns = GpuTurns()
-    speech = Speech("en", None, gpu=turns)
+    speech = speech_on(True, turns)
     assert speech.ready()
-    speech(np.zeros(RATE, np.float32), "system")
+    speech(CLIP, "system")
     turns.meeting_waiting()  # a recording stopped: its meeting is to be transcribed
-    assert not speech.ready()  # lets go of its model and its turn
-    assert speech._model is None
+    assert not speech.ready()  # its model's process is ended, and its turn given back
+    assert children[0].ended == 1
     started = time.monotonic()
     with turns.for_meeting(wait=5):
         assert time.monotonic() - started < 0.5  # it had let go already
         assert not speech.ready()
     turns.meetings_done()
     assert speech.ready()
-    speech(np.zeros(RATE, np.float32), "system")
-    assert len(whisper) == 2  # loaded again after the meeting
+    speech(CLIP, "system")
+    assert len(children) == 2 and not children[1].ended  # started again after the meeting
 
 
-def test_on_the_cpu_it_waits_while_a_meeting_is_processed(
-    whisper: list, monkeypatch: pytest.MonkeyPatch
-):
-    monkeypatch.setattr(cuda, "prepare", lambda: False)
+def test_the_turn_is_given_back_only_once_the_models_process_is_gone(children: list, monkeypatch):
     turns = GpuTurns()
-    speech = Speech("en", None, gpu=turns)
+    speech = speech_on(True, turns)
     assert speech.ready()
-    speech(np.zeros(RATE, np.float32), "system")
+    speech(CLIP, "system")
+    held = []
+    monkeypatch.setattr(FakeChild, "end", lambda self: held.append(turns._lock.locked()))
+    turns.meeting_waiting()
+    assert not speech.ready()
+    assert held == [True] and not turns._lock.locked()
+
+
+def test_a_line_under_way_gives_way_to_a_meeting_and_its_audio_waits(
+    children: list, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(live, "LINGER", 0.3)
+    turns = GpuTurns()
+    speech = speech_on(True, turns)
+    transcript = Live(speech, speech=loud_spans)
+    FakeChild.replies["hear"] = None  # the line takes forever (the model is loading, say)
+    Feeder(transcript, "system").play(said())
+    threading.Timer(0.2, turns.meeting_waiting).start()
+    started = time.monotonic()
+    with pytest.raises(live.NotNow):
+        transcript.step()
+    assert 0.4 < time.monotonic() - started < 6  # it had its LINGER seconds
+    assert children[0].ended == 1 and not turns._lock.locked()
+    assert speech.failed is None and transcript.error is None  # nothing went wrong
+    FakeChild.replies.clear()
+    turns.meetings_done()
+    transcript.step()
+    assert [line["text"] for line in transcript.lines()] == ["said"]  # after the meeting
+
+
+def test_letting_go_for_a_meeting_is_a_wait_not_an_error(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(live, "TICK", 0.01)
+    tried: list = []
+
+    def transcribe(audio, track):
+        tried.append(track)
+        raise live.NotNow
+
+    transcript = Live(transcribe, speech=loud_spans)
+    transcript.start()
+    Feeder(transcript, "system").play(said())
+    assert wait_for(lambda: len(tried) > 2)  # the same line is tried again: it isn't lost
+    assert transcript.error is None and transcript.waiting
+    transcript.stop()
+    assert transcript.join(5)
+
+
+def test_stopping_doesnt_wait_for_a_line_that_takes_forever(
+    children: list, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(live, "LINGER", 0.1)
+    monkeypatch.setattr(live, "TICK", 0.01)
+    FakeChild.replies["hear"] = None
+    transcript = Live(speech_on(False), speech=loud_spans)
+    transcript.start()
+    Feeder(transcript, "system").play(said())
+    assert wait_for(lambda: children and children[0].asked)
+    transcript.stop()
+    assert transcript.join(5) and children[0].ended
+
+
+def test_on_the_cpu_it_waits_while_a_meeting_is_processed(children: list):
+    turns = GpuTurns()
+    speech = speech_on(False, turns)
+    assert speech.ready()
+    speech(CLIP, "system")
     turns.meeting_waiting()  # it will use every core
-    assert not speech.ready() and speech._model is None
+    assert not speech.ready() and children[0].ended
     started = time.monotonic()
     with turns.for_meeting(wait=5):  # which needn't wait: there's no turn to give back
         assert time.monotonic() - started < 0.5
@@ -689,13 +811,209 @@ def test_on_the_cpu_it_waits_while_a_meeting_is_processed(
 
 def test_a_meeting_never_waits_long_for_the_live_transcript():
     turns = GpuTurns()
-    assert turns.take()  # the live transcript's, and it's stuck (a model downloading)
+    assert turns.take()  # the live transcript's, and it's stuck (a driver that hangs)
     started = time.monotonic()
     with turns.for_meeting(wait=0.2):
         waited = time.monotonic() - started
     assert 0.15 < waited < 2
     assert not turns.take()  # still a meeting's until none is left
     turns.meetings_done()
+
+
+def test_a_crash_is_a_notice_and_the_models_process_is_started_again(children: list):
+    transcript = Live(speech_on(False), speech=loud_spans)
+    call = Feeder(transcript, "system")
+    FakeChild.replies["hear"] = live_child.Gone("0xC0000409")
+    call.play(said())
+    transcript.step()  # nothing is raised: that line is lost
+    assert transcript.error == "its speech model stopped (0xC0000409) and is starting again"
+    assert children[0].ended and transcript.lines() == []
+    FakeChild.replies.clear()
+    call.play(said())
+    transcript.step()
+    assert [line["text"] for line in transcript.lines()] == ["said"] and len(children) == 2
+    assert transcript.error is None  # it works again
+
+
+def test_one_that_keeps_crashing_is_let_go_of(children: list, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(live, "TICK", 0.01)
+    transcript = Live(speech_on(False))
+    FakeChild.replies["find"] = live_child.Gone("0xC0000005")  # even looking for speech
+    transcript.start()
+    call = Feeder(transcript, "system")
+    call.play(said())
+    assert transcript.join(10)  # its worker ended by itself
+    assert len(children) == live.RESTARTS + 1 and all(child.ended for child in children)
+    assert "stopped 6 times (0xC0000005)" in transcript.error and not transcript.waiting
+    assert transcript.on  # the panel stays, and says so
+    call.play(said())
+    assert transcript._arriving == {}  # nothing more is kept for it
+
+
+def test_one_that_hangs_is_ended(children: list, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(live, "ANSWER", 0.1)
+    monkeypatch.setattr(live, "FIRST", 0.2)
+    speech = speech_on(False)
+    assert speech.ready()
+    FakeChild.replies["hear"] = None
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="no answer for 0 seconds"):
+        speech(CLIP, "mic")
+    assert 0.25 < time.monotonic() - started < 6 and children[0].ended  # it may be loading
+    FakeChild.replies.clear()
+    assert speech(CLIP, "mic") == "said" and len(children) == 2
+
+
+def test_a_line_that_fails_gets_a_fresh_model_for_the_next(children: list):
+    speech = speech_on(False)
+    assert speech.ready()
+    FakeChild.replies["hear"] = {"error": "CUDA failed with error unspecified launch failure"}
+    with pytest.raises(RuntimeError, match="unspecified launch failure"):
+        speech(CLIP, "system")
+    FakeChild.replies.clear()
+    assert speech(CLIP, "system") == "said"
+    assert children[0].ended and len(children) == 2
+
+
+def test_one_that_cant_be_started_is_a_notice_too():
+    def refused(*args):
+        raise OSError("blocked by your administrator")
+
+    speech = Speech("en", None, start=refused)
+    assert speech.ready()
+    for _ in range(live.RESTARTS + 1):
+        with pytest.raises(RuntimeError, match="blocked by your administrator"):
+            speech.find(CLIP)
+    assert speech.failed and not speech.ready()
+
+
+@pytest.mark.parametrize(
+    ("load", "said"), [("missing", "isn't on this PC yet"), ("failed", "didn't load .*model.bin")]
+)
+def test_a_model_that_doesnt_load_is_tried_once_a_recording(children: list, load: str, said: str):
+    # "failed": what a download that was cut off looks like, or a disk that's full.
+    FakeChild.replies["hear"] = {"load": load, "error": "Unable to open file 'model.bin'"}
+    speech = speech_on(True, GpuTurns())
+    assert speech.ready()
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match=said):
+            speech(CLIP, "mic")
+    assert len(children) == 1 and len(children[0].asked) == 1
+    assert speech.missing == "large-v3-turbo"  # to be downloaded, or finished, after the call
+
+
+def test_a_closed_speech_model_never_starts_again(children: list):
+    turns = GpuTurns()
+    speech = speech_on(True, turns)
+    assert speech.ready()
+    speech(CLIP, "system")
+    speech.close()
+    assert children[0].ended and not speech.ready()
+    with pytest.raises(RuntimeError):
+        speech(CLIP, "system")
+    with pytest.raises(RuntimeError):
+        speech.find(CLIP)
+    assert len(children) == 1
+    assert turns.take()  # its turn was given back
+
+
+def test_a_summary_written_on_this_pc_takes_the_gpu_from_the_live_transcript(
+    children: list, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(live, "TICK", 0.01)
+    worker = api.Worker()
+    transcript = Live(speech_on(True, worker.gpu), speech=loud_spans)
+    transcript.start()
+    call = Feeder(transcript, "system")
+    call.play(said())
+    assert wait_for(transcript.lines)
+    seen: list = []
+    written = threading.Event()
+
+    def write() -> None:
+        seen.append((children[0].ended, wait_for(lambda: transcript.waiting)))
+        call.play(said())  # the call goes on meanwhile
+        time.sleep(0.1)
+        seen.append(len(transcript.lines()))
+        written.set()
+
+    worker.in_turn(write)
+    assert written.wait(10)
+    assert seen == [(1, True), 1]  # the live model was gone before it started, and stayed so
+    assert wait_for(lambda: len(transcript.lines()) == 2)  # and is back after it
+    assert len(children) == 2 and not transcript.waiting
+    transcript.stop()
+    assert transcript.join(5)
+
+
+def test_the_gpu_has_one_model_at_a_time_however_meetings_and_calls_overlap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The real worker, turns, Live and Speech: recordings back to back, and meetings and
+    summaries written here handed over at any moment."""
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    monkeypatch.setattr(live, "TICK", 0.01)
+    monkeypatch.setattr(live, "LINGER", 0.05)
+    on_gpu: set = set()
+    most, processed = [0], []
+
+    def take_up(model) -> None:
+        on_gpu.add(model)
+        most[0] = max(most[0], len(on_gpu))
+
+    class LoadingChild(FakeChild):
+        def answer(self, timeout: float) -> dict | None:
+            if self.asked[-1][0] == "hear":
+                take_up(self)
+                time.sleep(0.02)
+            return super().answer(timeout)
+
+        def end(self) -> None:
+            super().end()
+            on_gpu.discard(self)
+
+    def process(store, meeting_id, log=print):
+        take_up(meeting_id)
+        time.sleep(0.03)
+        on_gpu.discard(meeting_id)
+        processed.append(meeting_id)
+        return "ready"
+
+    monkeypatch.setattr(pipeline, "process", process)
+    monkeypatch.setattr(api.tickets, "fill", lambda *args: None)
+    monkeypatch.setattr(api.export, "auto_export", lambda *args: None)
+    worker = api.Worker()
+
+    def write(name: str) -> None:  # in two steps: the meetings recorded meanwhile go first
+        for _ in range(2):
+            take_up(name)
+            time.sleep(0.01)
+            on_gpu.discard(name)
+            worker.meetings_first()
+        processed.append(name)
+
+    recordings, writing, rng = [], 0, np.random.default_rng(5)
+    for number in range(1, 13):
+        speech = Speech("en", None, gpu=worker.gpu, check=Check(True), start=LoadingChild)
+        transcript = Live(speech, speech=loud_spans)
+        transcript.start()
+        recordings.append(transcript)
+        call = Feeder(transcript, "system", 16000)
+        for _ in range(4):
+            call.play(np.concatenate([tone(0.5, 16000), quiet(1, 16000)]))
+            time.sleep(float(rng.uniform(0.005, 0.05)))
+            if rng.random() < 0.3:
+                worker.submit(100 + number)
+            if rng.random() < 0.2:
+                worker.in_turn(partial(write, f"summary {writing}"))
+                writing += 1
+        transcript.stop()
+        worker.submit(number)
+    assert all(transcript.join(10) for transcript in recordings)
+    assert wait_for(lambda: not worker.gpu.wanted(), 20)
+    assert most[0] == 1 and set(range(1, 13)) <= set(processed)
+    assert writing and {f"summary {n}" for n in range(writing)} <= set(processed)
+    assert not on_gpu and not worker.gpu._lock.locked()  # nothing left behind
 
 
 def test_while_a_meeting_has_the_gpu_the_audio_waits(monkeypatch: pytest.MonkeyPatch):
@@ -730,84 +1048,6 @@ def test_while_a_meeting_has_the_gpu_the_audio_waits(monkeypatch: pytest.MonkeyP
     assert abs(waiting + transcript.skipped - (1 + 1.5 * BEHIND)) < 0.1
 
 
-def test_a_line_is_doubtful_only_when_whisper_and_silero_both_doubt_it(
-    whisper: list, monkeypatch: pytest.MonkeyPatch
-):
-    asked: list = []
-    said = {"logprob": -0.9, "peak": 0.5}
-
-    def transcribe(self, audio, **options):
-        segment = SimpleNamespace(
-            text=" Thank you.", no_speech_prob=0.0, avg_logprob=said["logprob"]
-        )
-        return [segment], None
-
-    monkeypatch.setattr(FakeModel, "transcribe", transcribe)
-    monkeypatch.setattr(live, "speech_peak", lambda audio: asked.append(1) or said["peak"])
-    speech = Speech("en", None, gpu=GpuTurns())
-    assert speech.ready()
-    clip = np.zeros(RATE, np.float32)
-    assert speech(clip, "mic").doubtful  # the echo's leftovers: unlikely, and not speech
-    said["peak"] = 0.95
-    assert not speech(clip, "mic").doubtful  # Silero is sure: someone said it
-    said.update(logprob=-0.2, peak=0.5)
-    asked.clear()
-    assert not speech(clip, "mic").doubtful and asked == []  # likely words: no need to ask
-
-
-def test_a_model_that_doesnt_load_is_tried_once_a_recording(monkeypatch: pytest.MonkeyPatch):
-    tries = []
-
-    def fails(name, **options):
-        tries.append(name)
-        raise RuntimeError("no space left on the disk")
-
-    monkeypatch.setattr(models, "whisper", fails)
-    monkeypatch.setattr(cuda, "prepare", lambda: False)
-    speech = Speech("en", None)
-    assert speech.ready()
-    for _ in range(3):
-        with pytest.raises(RuntimeError, match="no space left"):
-            speech(np.zeros(RATE, np.float32), "mic")
-    assert len(tries) == 1
-
-
-def test_a_model_not_on_this_pc_is_downloaded_after_the_call_not_during_it(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    loads, downloads = [], []
-
-    def whisper(name, local_files_only=False, **options):
-        loads.append((name, local_files_only))
-        raise FileNotFoundError("not in the cache, and downloads are off")
-
-    monkeypatch.setattr(models, "whisper", whisper)
-    monkeypatch.setattr(models, "download_whisper", downloads.append)
-    monkeypatch.setattr(cuda, "prepare", lambda: True)
-    speech = Speech("en", None, gpu=GpuTurns())
-    assert speech.ready()
-    for _ in range(2):
-        with pytest.raises(RuntimeError, match="isn't on this PC yet"):
-            speech(np.zeros(RATE, np.float32), "system")
-    assert loads == [("large-v3-turbo", True)] and downloads == []  # nothing during the call
-    speech.close()
-    speech.fetching.join(5)
-    assert downloads == ["large-v3-turbo"]  # the call over: for the next one
-
-
-def test_a_closed_speech_model_never_loads_again(whisper: list):
-    turns = GpuTurns()
-    speech = Speech("en", None, gpu=turns)
-    assert speech.ready()
-    speech(np.zeros(RATE, np.float32), "system")
-    speech.close()
-    assert not speech.ready()
-    with pytest.raises(RuntimeError):
-        speech(np.zeros(RATE, np.float32), "system")
-    assert len(whisper) == 1
-    assert turns.take()  # its turn was given back
-
-
 # Through the API ------------------------------------------------------------------------
 
 
@@ -816,7 +1056,7 @@ class FakeLive:
 
     def __init__(self, speech) -> None:
         self.speech, self.started, self.on, self.fed = speech, False, True, []
-        self.error, self.skipped, self.waiting = None, 0.0, False
+        self.error, self.skipped, self.waiting, self.missing = None, 0.0, False, None
         self.forgotten: list = []
         FakeLive.made.append(self)
 
@@ -866,7 +1106,7 @@ class ListeningRecorder:
 
 
 def with_gpu(monkeypatch: pytest.MonkeyPatch, usable: bool) -> None:
-    monkeypatch.setattr(cuda, "prepare", lambda: usable)
+    monkeypatch.setattr(live_child, "gpu_usable", lambda: usable)
 
 
 @pytest.fixture
@@ -877,7 +1117,7 @@ def engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(capture, "Recorder", ListeningRecorder)
     monkeypatch.setattr(pipeline, "process", lambda *args, **kwargs: "ready")
     monkeypatch.setattr(live, "Live", FakeLive)
-    monkeypatch.setattr(live, "Speech", lambda language, hotwords, gpu: ("speech", language))
+    monkeypatch.setattr(live, "Speech", lambda language, hotwords, **gpu: ("speech", language))
     with_gpu(monkeypatch, False)
     FakeLive.made = []
     return TestClient(create_app("test-token"), base_url=LOCAL)
@@ -1000,7 +1240,8 @@ def test_turning_it_off_stops_the_one_running_and_the_next_has_none(client: Test
 
 def test_on_by_default_only_with_a_cuda_gpu(engine: TestClient, monkeypatch):
     with_gpu(monkeypatch, False)
-    assert client_setting(engine) is False  # Settings waits for the look
+    engine.app.state.look_for_gpu()  # as the engine does as it starts
+    assert client_setting(engine) is False
     engine.post("/api/record/start", headers=AUTH, json={})
     assert FakeLive.made == []  # on the CPU it waits to be turned on
     engine.post("/api/record/stop", headers=AUTH)
@@ -1012,7 +1253,7 @@ def test_on_by_default_only_with_a_cuda_gpu(engine: TestClient, monkeypatch):
 
 def test_on_by_default_with_a_cuda_gpu_unless_turned_off(engine: TestClient, monkeypatch):
     with_gpu(monkeypatch, True)
-    engine.app.state.look_for_gpu()  # as the engine does as it starts
+    engine.app.state.look_for_gpu()
     assert client_setting(engine) is True
     engine.post("/api/record/start", headers=AUTH, json={})
     assert len(FakeLive.made) == 1
@@ -1024,7 +1265,7 @@ def test_on_by_default_with_a_cuda_gpu_unless_turned_off(engine: TestClient, mon
     engine.post("/api/record/stop", headers=AUTH)
 
 
-def test_a_recording_never_waits_for_the_gpu_check(engine: TestClient, monkeypatch):
+def test_nothing_waits_for_the_gpu_check(engine: TestClient, monkeypatch):
     looking, done = threading.Event(), threading.Event()
 
     def slow_look():
@@ -1032,28 +1273,105 @@ def test_a_recording_never_waits_for_the_gpu_check(engine: TestClient, monkeypat
         done.wait(5)  # importing torch for the first time
         return True
 
-    monkeypatch.setattr(cuda, "prepare", slow_look)
+    monkeypatch.setattr(live_child, "gpu_usable", slow_look)
     check = threading.Thread(target=engine.app.state.look_for_gpu)
     check.start()
     assert looking.wait(5)
     started = time.monotonic()
+    assert client_setting(engine) is False  # Settings, which the dictation keys need as well
     engine.post("/api/record/start", headers=AUTH, json={})
     assert time.monotonic() - started < 2
     assert FakeLive.made == []  # started before the look was done: none this time
     engine.post("/api/record/stop", headers=AUTH)
     done.set()
     check.join(5)
+    assert client_setting(engine) is True
     engine.post("/api/record/start", headers=AUTH, json={})
     assert len(FakeLive.made) == 1
     engine.post("/api/record/stop", headers=AUTH)
 
 
-def test_a_set_choice_needs_no_gpu_check(engine: TestClient, monkeypatch):
+def test_until_this_starts_look_is_done_the_last_ones_answer_counts(
+    engine: TestClient, monkeypatch
+):
+    with_gpu(monkeypatch, True)
+    engine.app.state.look_for_gpu()
+    # The engine starts again (mid-call, say), and its look hasn't finished.
+    again = TestClient(create_app("test-token"), base_url=LOCAL)
+    assert client_setting(again) is True
+    again.post("/api/record/start", headers=AUTH, json={})
+    assert len(FakeLive.made) == 1
+    again.post("/api/record/stop", headers=AUTH)
+    with_gpu(monkeypatch, False)  # no GPU any more
+    again.app.state.look_for_gpu()
+    assert client_setting(again) is False
+    assert client_setting(TestClient(create_app("test-token"), base_url=LOCAL)) is False
+
+
+def test_a_check_that_fails_means_no_gpu(engine: TestClient, monkeypatch):
+    def crashed():
+        raise live_child.Gone("0xC0000005")
+
+    monkeypatch.setattr(live_child, "gpu_usable", crashed)
+    engine.app.state.look_for_gpu()
+    assert client_setting(engine) is False
+
+
+def test_turned_off_needs_no_gpu_check(engine: TestClient, monkeypatch):
     looked = []
-    monkeypatch.setattr(cuda, "prepare", lambda: looked.append(1) or True)
+    monkeypatch.setattr(live_child, "gpu_usable", lambda: looked.append(1) or True)
     engine.put("/api/settings", headers=AUTH, json={"live_transcript": False})
     engine.app.state.look_for_gpu()
     assert client_setting(engine) is False and looked == []
+    # Turned on, the look says what it runs on.
+    engine.put("/api/settings", headers=AUTH, json={"live_transcript": True})
+    engine.app.state.look_for_gpu()
+    assert looked == [1]
+
+
+class FakeDownload:
+    """The download of a model between calls: what was asked of it."""
+
+    def __init__(self) -> None:
+        self.asked: list = []
+        FakeDownload.made = self
+
+    def start(self, model: str) -> None:
+        self.asked.append(model)
+
+    def stop(self) -> None:
+        self.asked.append("stopped")
+
+
+def test_a_missing_model_is_downloaded_once_no_call_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(live_child, "Download", FakeDownload)
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    monkeypatch.setattr(capture, "Recorder", ListeningRecorder)
+    monkeypatch.setattr(pipeline, "process", lambda *args, **kwargs: "ready")
+    monkeypatch.setattr(live, "Live", FakeLive)
+    monkeypatch.setattr(live, "Speech", lambda language, hotwords, **gpu: ("speech", language))
+    with_gpu(monkeypatch, False)
+    FakeLive.made = []
+    client = TestClient(create_app("test-token"), base_url=LOCAL)
+    asked = FakeDownload.made.asked
+
+    def call() -> None:
+        client.post("/api/record/start", headers=AUTH, json={})
+        FakeLive.made[-1].missing = "small.en"
+
+    client.put("/api/settings", headers=AUTH, json={"live_transcript": True})
+    call()
+    assert asked == ["stopped"]  # nothing is downloaded during the call
+    client.post("/api/record/stop", headers=AUTH)
+    assert asked == ["stopped", "small.en"]  # now it is
+    call()
+    assert asked[2:] == ["stopped"]  # the next call has the bandwidth to itself again
+    # Turned off during the call: its model isn't wanted any more.
+    client.put("/api/settings", headers=AUTH, json={"live_transcript": False})
+    client.post("/api/record/stop", headers=AUTH)
+    assert "small.en" not in asked[2:]
 
 
 def client_setting(client: TestClient) -> bool:

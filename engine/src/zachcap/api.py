@@ -48,6 +48,7 @@ from . import (
     imports,
     insights,
     live,
+    live_child,
     local_summary,
     mentions,
     ollama,
@@ -483,31 +484,35 @@ def create_app(token: str) -> FastAPI:
         startup.close()
 
     # Whether there's a CUDA GPU: until Settings says otherwise, recordings have a live
-    # transcript only then (live_on). The first look takes seconds, so serve() has it done
-    # on its own thread as the engine starts.
+    # transcript only then (live_on). Looking takes seconds where there's an NVIDIA driver, so
+    # serve() has it done on its own thread as the engine starts, and nothing waits for it.
     gpu = live.GpuCheck()
 
     def look_for_gpu() -> None:
-        """Looks for a CUDA GPU, when the live transcript's default still depends on it."""
+        """Looks for a CUDA GPU, unless the live transcript is off, and keeps what it found
+        for the next start's live_on."""
         store = Store()
         try:
-            undecided = store.setting(live.SETTING) is None
+            if store.setting(live.SETTING) == "0":
+                return
+            found = "1" if gpu.look() else "0"
+            if store.setting(live.GPU_SETTING) != found:
+                store.set_setting(live.GPU_SETTING, found)
         finally:
             store.close()
-        if undecided:
-            gpu.look()
 
     app.state.look_for_gpu = look_for_gpu
 
-    def live_on(store: Store, wait: bool = False) -> bool:
+    def live_on(store: Store) -> bool:
         """Whether recordings have a live transcript: as set in Settings, else only with a
-        CUDA GPU, where a line takes a fraction of a second. On the CPU it competes with the
-        call app and the recorder for cores, so there it waits to be turned on. A recording
-        doesn't ``wait`` for the GPU check: one started before it's done has none."""
+        CUDA GPU, where a line takes a fraction of a second (on the CPU it competes with the
+        call app and the recorder for cores, so there it waits to be turned on). Until this
+        start's look for one is done, there's a GPU if the last look found one."""
         setting = store.setting(live.SETTING)
         if setting is not None:
             return setting == "1"
-        return gpu.look() if wait else gpu.known()
+        usable = gpu.known()
+        return usable if usable is not None else store.setting(live.GPU_SETTING) == "1"
 
     def remove_old_audio() -> None:
         """The "keep recordings" setting, applied at startup and every few hours after."""
@@ -548,6 +553,30 @@ def create_app(token: str) -> FastAPI:
         if now is not None and now.meeting_id == meeting_id:
             now.live.forget(start, end)
 
+    # The live transcript's speech model, when a call found it isn't (all) on this PC:
+    # downloaded between calls.
+    model_download = live_child.Download()
+
+    def fetch_live_model() -> None:
+        """Downloads the model the last recording's live transcript couldn't load, once no
+        recording runs (the call needs the bandwidth) and if it's still wanted: also what's
+        left of one that was cut off."""
+        with lock:  # none starts meanwhile: that stops the download
+            now = live_state["now"]
+            model = now.live.missing if now is not None else None
+            if model is None or recording.get("recorder") is not None:
+                return
+            try:
+                store = Store()
+                try:
+                    wanted = live_on(store)
+                finally:
+                    store.close()
+                if wanted:
+                    model_download.start(model)
+            except Exception:  # never worth failing a Stop over
+                traceback.print_exc()
+
     def finish_recording(meeting_id: int | None = None) -> int | None:
         """Stop the recorder, if one is running, and save its meeting. Returns the meeting id.
         Used by Stop, and by the engine itself when the app goes away mid-recording. With a
@@ -578,6 +607,7 @@ def create_app(token: str) -> FastAPI:
                 store.update_meeting(meeting_id, status="recorded", duration=round(duration, 3))
             finally:
                 store.close()
+            fetch_live_model()
         return meeting_id
 
     def begin_recording(store: Store, title: str | None, private: bool = False) -> int:
@@ -597,6 +627,7 @@ def create_app(token: str) -> FastAPI:
             while folder.exists():
                 stamp += timedelta(seconds=1)
                 folder = paths.meetings_dir() / stamp.strftime("%Y-%m-%d_%H%M%S")
+            model_download.stop()  # the call needs the bandwidth
             # A live transcript of its own: one that ended a moment ago (Stop, then Start)
             # may still be finishing a line, and it's never this one's.
             listening = None
@@ -605,7 +636,7 @@ def create_app(token: str) -> FastAPI:
                     p["name"] for p in store.people() if p["name"].lower() not in {"you", "me"}
                 ]
                 hotwords = words.parse(store.setting("vocabulary")).hotwords(names)
-                speech = live.Speech(language_of(store), hotwords, gpu=worker.gpu)
+                speech = live.Speech(language_of(store), hotwords, gpu=worker.gpu, check=gpu)
                 listening = live.Live(speech)
             recorder = Recorder(
                 folder,
@@ -2128,7 +2159,7 @@ def create_app(token: str) -> FastAPI:
                 "auto_record_choices": autorecord.choosable(),
                 # A live transcript in a panel over the call while recording: as set, else
                 # on only with a CUDA GPU (live_on).
-                "live_transcript": live_on(store, wait=True),
+                "live_transcript": live_on(store),
                 "export_work_log": store.setting("export_work_log") == "1",
                 "dictation": store.setting(dictation.SETTING) == "1",
                 "dictation_snippets": store.setting(dictation.SNIPPETS, ""),
@@ -2205,6 +2236,7 @@ def create_app(token: str) -> FastAPI:
             store.set_setting(live.SETTING, "1" if body.live_transcript else "0")
             if not body.live_transcript:
                 stop_live()  # this call's too: its model leaves the GPU now (on: from the next)
+                model_download.stop()
         if body.auto_record_apps is not None:  # checked above
             store.set_setting(autorecord.APPS_SETTING, ", ".join(sorted(body.auto_record_apps)))
         call_settings_changed()  # the call watch reads the new ones at its next look

@@ -8,6 +8,18 @@ Call ``prepare()`` before importing faster_whisper.
 
 from __future__ import annotations
 
+import os
+import sys
+
+
+def driver() -> bool:
+    """Whether NVIDIA's driver is there (its nvcuda.dll): without it there is no CUDA GPU, and
+    nothing need be loaded to find that out."""
+    if sys.platform != "win32":
+        return True
+    windows = os.environ.get("SystemRoot", r"C:\Windows")
+    return os.path.exists(os.path.join(windows, "System32", "nvcuda.dll"))
+
 
 def prepare() -> bool:
     """Load the CUDA DLLs. Returns True when a CUDA GPU is usable."""
