@@ -89,14 +89,19 @@ class ChunkWriter:
         self._heard = 0  # frames handed to the listener: the timeline, even after a disk error
 
     def write(self, mono: np.ndarray) -> None:
+        if not self.failed:
+            self._save(mono)
         if self._listener is not None:
+            # After the disk, so whatever listens never holds the recording up; and one that
+            # fails is let go, so it fails once, not ten times a second.
             try:
                 self._listener(self.name, mono, self.rate, self._heard)
-            except Exception:  # whatever listens never touches the recording
+            except Exception:
                 traceback.print_exc()
-            self._heard += len(mono)
-        if self.failed:
-            return
+                self._listener = None
+        self._heard += len(mono)
+
+    def _save(self, mono: np.ndarray) -> None:
         try:
             if self._current is None or self._written >= self.chunk_frames:
                 if self._current is not None:

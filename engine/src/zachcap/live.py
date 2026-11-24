@@ -10,6 +10,11 @@ hearing the speakers (echo), and is left out.
 This is for glancing at during the call: the live panel, its notes, being asked something.
 The transcript kept with the meeting is still made after the call by the full pipeline.
 Everything here stays in memory, until the next recording starts.
+
+None of it may put the recording at risk. The recorder's threads only queue audio here,
+never waiting on the worker, and at most BEHIND seconds of a track wait (the oldest goes
+when the worker can't keep up); whatever goes wrong is caught and shown on the panel; and
+meetings being processed come first on the GPU (GpuTurns).
 """
 
 from __future__ import annotations
@@ -17,15 +22,17 @@ from __future__ import annotations
 import gc
 import threading
 import traceback
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from math import gcd
 
 import numpy as np
 
-from . import transcript
+from . import cuda, transcript
 
-SETTING = "live_transcript"  # "1": a live transcript (and notes) during recordings
+SETTING = "live_transcript"  # "1" (the default): a live transcript during recordings
 RATE = 16000
 TICK = 0.5  # how often the worker looks for speech that ended
 END_SILENCE = 0.7  # this much quiet after speech: the person stopped talking
@@ -36,6 +43,7 @@ BEHIND = 120.0  # more audio than this waiting: the GPU can't keep up, skip ahea
 CAUGHT_UP = 20.0  # ... to this much
 PAD = 3200  # 0.2 s of audio either side of the speech, as Whisper likes it
 LINES_KEPT = 2000
+GPU_WAIT = 30.0  # a meeting waits this long at most for the live transcript to let go
 
 
 @dataclass
@@ -97,12 +105,62 @@ class Resampler:
 
 
 @dataclass
+class Arriving:
+    """A track's audio from the recorder, not taken by the worker yet: (frame, block)
+    pairs at the track's own rate, ``frames`` long in all."""
+
+    rate: int
+    blocks: deque = field(default_factory=deque)
+    frames: int = 0
+
+
+@dataclass
 class TrackState:
     name: str
     resampler: Resampler
     audio: np.ndarray = field(default_factory=lambda: np.zeros(0, np.float32))  # 16 kHz
     offset: int = 0  # the recording's timeline sample where ``audio`` begins
-    pending: list[np.ndarray] = field(default_factory=list)  # arrived, not taken yet
+    next_frame: int | None = None  # where the next block starts (native rate), if no gap
+
+
+class GpuTurns:
+    """The GPU, shared by the meetings being processed (the worker in api.py) and the live
+    transcript, with one model on it at a time: a 4 GB GPU can't hold both. Meetings come
+    first: while one waits or is processed, the live transcript lets go of its model, and it
+    takes the GPU again once none is left."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()  # held by whoever has a model on the GPU now
+        self._meetings = threading.Event()  # one is waiting or being processed
+
+    def meeting_waiting(self) -> None:
+        self._meetings.set()
+
+    def meetings_done(self) -> None:
+        self._meetings.clear()
+
+    @contextmanager
+    def for_meeting(self, wait: float = GPU_WAIT) -> Iterator[None]:
+        """A meeting's turn. The live transcript lets go within a tick, or after the line
+        it's on; past ``wait`` the meeting goes ahead anyway, so it never waits long."""
+        self._meetings.set()
+        taken = self._lock.acquire(timeout=wait)
+        try:
+            yield
+        finally:
+            if taken:
+                self._lock.release()
+
+    def wanted(self) -> bool:
+        """Whether a meeting is waiting for the GPU, or has it."""
+        return self._meetings.is_set()
+
+    def take(self) -> bool:
+        """The live transcript's turn, if no meeting wants the GPU: kept until give_back."""
+        return not self._meetings.is_set() and self._lock.acquire(blocking=False)
+
+    def give_back(self) -> None:
+        self._lock.release()
 
 
 class Live:
@@ -111,7 +169,8 @@ class Live:
 
     ``transcribe(audio, track)`` turns a stretch of 16 kHz speech into text, and
     ``speech(audio)`` finds the speech in it as (start, end) sample pairs: given, so tests can
-    pretend. ``transcribe`` may have a ``close()`` (it's called at the end)."""
+    pretend. ``transcribe`` may have a ``ready()`` (False: not now, the audio waits) and a
+    ``close()``, which the worker calls as it ends."""
 
     def __init__(
         self,
@@ -120,27 +179,50 @@ class Live:
     ) -> None:
         self._transcribe = transcribe
         self._speech = speech or find_speech
-        self._lock = threading.Lock()  # the pending audio and the lines
-        self._tracks: dict[str, TrackState] = {}
+        self._feeding = threading.Lock()  # the audio arriving: the recorder's threads
+        self._arriving: dict[str, Arriving] = {}
+        self._lock = threading.Lock()  # the lines
+        self._tracks: dict[str, TrackState] = {}  # the worker's own
         self._lines: list[Line] = []
         self._next_id = 1
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
+        self._closed = False
         self.error: str | None = None  # the last thing that went wrong, for the page
-        self.skipped = 0.0  # seconds of audio not transcribed to catch up
+        self.waiting = False  # for the GPU: a meeting is being processed
+        self._dropped = 0.0  # seconds let go before the worker took them (feed)
+        self._behind = 0.0  # seconds skipped to catch up (the worker)
+
+    @property
+    def skipped(self) -> float:
+        """Seconds of audio not transcribed, to keep up with the call."""
+        return self._dropped + self._behind
+
+    @property
+    def on(self) -> bool:
+        """Running, or about to: not stopped."""
+        return not self._done.is_set()
 
     # From the recorder --------------------------------------------------------------
 
     def feed(self, track: str, block: np.ndarray, rate: int, frame: int) -> None:
         """Audio as the recorder writes it: ``frame`` is where the block starts on the
-        recording's timeline, at ``rate``. Called from the writer threads, so it only
-        queues the audio."""
-        with self._lock:
-            state = self._tracks.get(track)
-            if state is None:
-                state = self._tracks[track] = TrackState(track, Resampler(rate))
-                state.offset = round(frame * RATE / rate)
-            state.pending.append(np.array(block, np.float32, copy=True))
+        recording's timeline, at ``rate``. Called from the writer threads, so it only queues
+        the audio, and never waits on the worker: at most BEHIND seconds of a track wait,
+        and the oldest goes first. Once stopped, nothing is kept."""
+        if self._done.is_set():
+            return
+        audio = np.array(block, np.float32, copy=True)
+        with self._feeding:
+            arriving = self._arriving.get(track)
+            if arriving is None:
+                arriving = self._arriving[track] = Arriving(rate)
+            arriving.blocks.append((frame, audio))
+            arriving.frames += len(audio)
+            while arriving.frames > BEHIND * arriving.rate and len(arriving.blocks) > 1:
+                _, gone = arriving.blocks.popleft()
+                arriving.frames -= len(gone)
+                self._dropped += len(gone) / arriving.rate
 
     # The worker -----------------------------------------------------------------------
 
@@ -149,10 +231,34 @@ class Live:
         self._thread.start()
 
     def stop(self) -> None:
-        """Ends the worker (after the line it's on) and frees the speech model."""
+        """Ends the worker after the line it's on; it frees the speech model as it goes.
+        Doesn't wait for it: called with the recording's lock held."""
         self._done.set()
+        if self._thread is None:  # never started
+            self._close()
+
+    def join(self, timeout: float | None = None) -> bool:
+        """Waits for the worker to end (tests). True once it has."""
         if self._thread is not None:
-            self._thread.join(timeout=15)
+            self._thread.join(timeout)
+            return not self._thread.is_alive()
+        return True
+
+    def _run(self) -> None:
+        try:
+            while not self._done.wait(TICK):
+                try:
+                    self.step()
+                except Exception as exc:  # the live transcript must never touch the recording
+                    self._went_wrong(exc)
+        finally:
+            self._close()
+
+    def _close(self) -> None:
+        """Frees the speech model (on the worker's thread, which alone uses it)."""
+        if self._closed:
+            return
+        self._closed = True
         close = getattr(self._transcribe, "close", None)
         if close is not None:
             try:
@@ -160,48 +266,73 @@ class Live:
             except Exception:
                 traceback.print_exc()
 
-    def _run(self) -> None:
-        while not self._done.wait(TICK):
-            try:
-                self.step()
-            except Exception as exc:  # the live transcript must never touch the recording
-                traceback.print_exc()
-                self.error = str(exc)
+    def _went_wrong(self, exc: Exception) -> None:
+        """Said on the panel; in the log once, not on every tick it happens again."""
+        if str(exc) != self.error:
+            traceback.print_exc()
+        self.error = str(exc)
 
     def step(self, final: bool = False) -> None:
         """Takes the audio that arrived and transcribes the speech that ended. ``final``:
         the recording stopped, so the speech still open is transcribed too."""
-        with self._lock:
-            arrived = {name: state.pending[:] for name, state in self._tracks.items()}
-            for state in self._tracks.values():
-                state.pending.clear()
-        for name, blocks in arrived.items():
-            state = self._tracks[name]
-            pieces = [state.resampler.push(block) for block in blocks]
-            if final:
-                pieces.append(state.resampler.flush())
-            if pieces:
-                state.audio = np.concatenate([state.audio, *pieces])
-        for state in list(self._tracks.values()):
-            if self._done.is_set() and not final:
-                return  # stopping: the rest isn't needed
+        with self._feeding:
+            arrived = {}
+            for name, arriving in self._arriving.items():
+                arrived[name] = (arriving.rate, list(arriving.blocks))
+                arriving.blocks.clear()
+                arriving.frames = 0
+        for name, (rate, blocks) in arrived.items():
+            state = self._tracks.get(name)
+            if state is None:
+                state = self._tracks[name] = TrackState(name, Resampler(rate))
+            if blocks or final:
+                self._take(state, blocks, final)
+        # Asked every tick, audio or not, so the GPU goes to a meeting as soon as one waits.
+        self._may_say(final)
+        # The call's first: a mic line that echoes it is then left out before it's ever read.
+        for state in sorted(self._tracks.values(), key=lambda state: state.name != "system"):
             self._look(state, final)
+
+    def _take(self, state: TrackState, blocks: list, final: bool) -> None:
+        """Adds what arrived to the track's 16 kHz audio, on the recording's timeline."""
+        pieces = [state.audio]
+        for frame, block in blocks:
+            if state.next_frame is None or frame != state.next_frame:
+                # The first audio of the track, or the first after some was let go (feed):
+                # it starts over there, without what was waiting from before the gap.
+                if state.next_frame is not None:
+                    self._behind += sum(len(piece) for piece in pieces) / RATE
+                state.resampler = Resampler(state.resampler.rate)
+                state.offset = round(frame * RATE / state.resampler.rate)
+                pieces = []
+            pieces.append(state.resampler.push(block))
+            state.next_frame = frame + len(block)
+        if final:
+            pieces.append(state.resampler.flush())
+        state.audio = np.concatenate(pieces) if pieces else np.zeros(0, np.float32)
 
     def _look(self, state: TrackState, final: bool) -> None:
         """Transcribes this track's speech that has ended (or gone on too long), and lets
         go of the audio before it."""
         if len(state.audio) > BEHIND * RATE:
-            # The GPU can't keep up (a laptop on battery): skip ahead rather than fall
-            # further behind; the meeting's own transcript still has every word.
+            # The GPU can't keep up (a laptop on battery), or a meeting has it: skip ahead
+            # rather than fall further behind; the meeting's own transcript has every word.
             behind = len(state.audio) - int(CAUGHT_UP * RATE)
             self._advance(state, behind)
-            self.skipped += behind / RATE
+            self._behind += behind / RATE
         while len(state.audio):
+            if not self._may_say(final):
+                return  # the audio waits: stopping, or the GPU is a meeting's for now
             window = state.audio[: int(SEARCH * RATE)]
+            # A full window may have more audio after it (a backlog, after waiting for the
+            # GPU): what it can't settle is looked at again with the audio that follows.
+            full = len(window) >= SEARCH * RATE
             spans = self._speech(window)
             if not spans:
                 # Nothing said: keep only the end, where speech may be starting.
-                self._advance(state, max(0, len(state.audio) - int(QUIET_KEPT * RATE)))
+                self._advance(state, max(0, len(window) - int(QUIET_KEPT * RATE)))
+                if full:
+                    continue
                 return
             first = spans[0][0]
             # Where what was said ends: the first quiet long enough to be someone stopping,
@@ -216,16 +347,27 @@ class Live:
             )
             last = cut if cut is not None else spans[-1][1]
             ended = cut is not None or len(window) - last >= END_SILENCE * RATE
-            too_long = last - first >= LONGEST * RATE or len(window) >= SEARCH * RATE
+            too_long = last - first >= LONGEST * RATE
             if not (ended or too_long or final):
                 if first > QUIET_KEPT * RATE:  # the quiet before it isn't needed
                     self._advance(state, first - int(QUIET_KEPT * RATE))
+                    if full:
+                        continue
                 return
             cut_short = too_long and not ended
             if cut_short:
                 last = min(last, first + int(LONGEST * RATE))
             self._say(state, first, last, pad_end=not cut_short)
             self._advance(state, last)
+
+    def _may_say(self, final: bool) -> bool:
+        """Whether to go on transcribing now: not once stopping (the rest isn't needed),
+        and not while the speech model can't (``ready()``)."""
+        if self._done.is_set() and not final:
+            return False
+        ready = getattr(self._transcribe, "ready", None)
+        self.waiting = ready is not None and not ready()
+        return not self.waiting
 
     def _advance(self, state: TrackState, samples: int) -> None:
         state.audio = state.audio[samples:]
@@ -238,8 +380,7 @@ class Live:
         try:
             text = self._transcribe(clip, state.name).strip()
         except Exception as exc:  # this line is lost; the next ones aren't
-            traceback.print_exc()
-            self.error = str(exc)
+            self._went_wrong(exc)
             return
         if not text:
             return
@@ -286,6 +427,12 @@ class Live:
                 if line.id > after and not line.echo
             ]
 
+    def dropped(self, upto: int) -> list[int]:
+        """The lines up to ``upto`` left out as echo. One can be found to be echo after the
+        panel read it (the call's line came after the mic's): the panel takes it away."""
+        with self._lock:
+            return [line.id for line in self._lines if line.echo and line.id <= upto]
+
     def text(self, me: str = "You", them: str = "Call") -> str:
         """The live transcript so far as plain lines ("[mm:ss] You: ..."), for the notes."""
         out = []
@@ -317,32 +464,70 @@ def find_speech(audio: np.ndarray) -> list[tuple[int, int]]:
 class Speech:
     """Whisper for the live transcript, loaded when the first speech needs it: the meeting
     model on the GPU, one pass without beam search (a second or less a line), or the small
-    dictation model on the CPU when there's no GPU."""
+    dictation model on the CPU when there's no GPU. Used by the live worker's thread only.
 
-    def __init__(self, language: str | None, hotwords: str | None) -> None:
+    On the GPU it takes its turn (``gpu``): while a meeting is being processed it lets go of
+    its model and waits (``ready()`` is False), and loads it again after."""
+
+    def __init__(
+        self, language: str | None, hotwords: str | None, gpu: GpuTurns | None = None
+    ) -> None:
         self.language = language
         self.hotwords = hotwords or None
+        self.gpu = gpu
         self.device: str | None = None
         self._model = None
+        self._turn = False  # holds the GPU's turn
+        self._failed: str | None = None  # why the model didn't load: not tried again
+        self._closed = False
+
+    def ready(self) -> bool:
+        if self._closed:
+            return False
+        if self.device is None:
+            try:
+                self.device = "cuda" if cuda.prepare() else "cpu"
+            except Exception:  # a broken CUDA install: the CPU, then
+                traceback.print_exc()
+                self.device = "cpu"
+        if self.device == "cpu" or self.gpu is None:
+            return True
+        if self.gpu.wanted():
+            self._let_go()  # a meeting is waiting for the GPU
+            return False
+        if not self._turn:
+            self._turn = self.gpu.take()
+        return self._turn
 
     def _load(self):
-        from faster_whisper import WhisperModel
+        from . import asr, cpu, dictation, models
 
-        from . import asr, cuda, dictation
-
-        if cuda.prepare():
-            self.device = "cuda"
-            self._model = WhisperModel(
-                asr.DEFAULT_MODEL, device="cuda", compute_type="int8_float16"
-            )
-        else:
-            self.device = "cpu"
-            self._model = WhisperModel(
-                dictation.model_for(self.language), device="cpu", compute_type="int8"
-            )
+        if self._failed is not None:  # one failed load a recording, not one a line
+            raise RuntimeError(self._failed)
+        try:
+            if self.device == "cuda":
+                self._model = models.whisper(
+                    asr.DEFAULT_MODEL, device="cuda", compute_type="int8_float16"
+                )
+            else:
+                # Half the cores: the call app and the recorder run on the rest, and the call
+                # matters more than its live transcript.
+                self._model = models.whisper(
+                    dictation.model_for(self.language),
+                    device="cpu",
+                    compute_type="int8",
+                    cpu_threads=max(1, cpu.physical_cores() // 2),
+                )
+        except Exception as exc:
+            self._failed = f"The live transcript's speech model didn't load: {exc}"
+            raise
         return self._model
 
     def __call__(self, audio: np.ndarray, track: str) -> str:
+        if self._closed:
+            raise RuntimeError("The live transcript has stopped")
+        if self.device is None and not self.ready():
+            raise RuntimeError("The GPU is busy with a meeting")
         model = self._model or self._load()
         segments, _ = model.transcribe(
             audio,
@@ -355,7 +540,17 @@ class Speech:
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
 
+    def _let_go(self) -> None:
+        """Frees the model, and the GPU's turn with it."""
+        if self._model is not None:
+            self._model = None
+            gc.collect()
+        if self._turn:
+            self._turn = False
+            self.gpu.give_back()
+
     def close(self) -> None:
-        """Frees the GPU for the meeting's own transcript, which starts next."""
-        self._model = None
-        gc.collect()
+        """Frees the GPU for the meeting's own transcript, which starts next. Never loads
+        again after this."""
+        self._closed = True
+        self._let_go()
