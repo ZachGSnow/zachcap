@@ -760,11 +760,18 @@ def _tidy(said) -> str:
     return " ".join(" ".join(_entries(said, str)).split())
 
 
+# A time on its own, or with the name of the field it belongs in: no sentence.
+STRAY_TIME = re.compile(
+    r"(?i)[\W_]*(?:(?:said[ _]?)?at|time|start)?[\W_]*\d{1,2}(?::\d{2}){1,2}\W*"
+)
+
+
 def _sentences(said) -> list[str]:
     """Each sentence once, tidied, in the order they came."""
     found: dict[str, str] = {}
     for sentence in _entries(said, str):
-        if tidy := _tidy(sentence):
+        tidy = _tidy(sentence)
+        if tidy and not STRAY_TIME.fullmatch(tidy):
             found.setdefault(tidy.casefold(), tidy)
     return list(found.values())
 

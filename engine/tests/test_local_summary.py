@@ -1325,6 +1325,26 @@ def test_an_answers_times_are_lines_times_and_the_rest_is_as_written():
         assert local_summary.cited(text, said) == right
 
 
+def test_a_time_on_its_own_is_no_decision():
+    """As a small model wrote one after the decision it belonged to."""
+    part = [Line(s, s + 3, who, text) for s, who, text in SHORT]
+    said = [
+        "The cutover is on Friday at 8:00.",
+        "said_at: 00:19",
+        "Said at 1:00:19.",
+        "[00:19]",
+        "at 00:19",
+        "8:00 stays.",
+        "Start at 8:00",
+    ]
+    answer = {"decisions": said, "open_questions": ["time: 00:03", "Who calls?"]}
+    kept = local_summary.held(answer, part, ["Dana"], ("decisions", "open_questions"))
+    assert kept == {
+        "decisions": ["The cutover is on Friday at 8:00.", "8:00 stays.", "Start at 8:00"],
+        "open_questions": ["Who calls?"],
+    }
+
+
 # Through the API ----------------------------------------------------------------------------
 
 
