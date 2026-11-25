@@ -87,6 +87,7 @@ type SettingsChange = Partial<{
   local_model: string;
   language: string;
   faster_speakers: boolean;
+  leave_out_brief: number;
   mic_device: string;
   output_device: string;
   vocabulary: string;
@@ -281,6 +282,13 @@ const KEEP_AUDIO = [
   { value: "30", label: "30 days" },
   { value: "90", label: "90 days" },
   { value: "365", label: "1 year" },
+];
+
+const LEAVE_OUT_BRIEF = [
+  { value: "0", label: "Off" },
+  { value: "2", label: "Under 2% of the talk" },
+  { value: "5", label: "Under 5% of the talk" },
+  { value: "10", label: "Under 10% of the talk" },
 ];
 
 /** Rough tokens for an hour-long meeting summary, for the cost hint. */
@@ -984,6 +992,17 @@ export function SettingsView() {
               aria-label="Faster speaker separation"
               checked={settings?.faster_speakers ?? false}
               onCheckedChange={(on) => void save({ faster_speakers: on })}
+            />
+          </Row>
+          <Row
+            label="Leave out brief voices"
+            help="A voice ZachCap can't name that has less than this of a call's talk (background chatter, a stray word) isn't listed as a speaker, and you aren't asked who it is. What it said stays in the transcript, as Unknown. A meeting's Speakers tab lists the voices left out, to name one after all. Changing this updates every meeting."
+          >
+            <Select
+              label="Leave out brief voices"
+              value={String(settings?.leave_out_brief ?? 5)}
+              onChange={(value) => void save({ leave_out_brief: Number(value) })}
+              options={LEAVE_OUT_BRIEF}
             />
           </Row>
           <WordsToKnow

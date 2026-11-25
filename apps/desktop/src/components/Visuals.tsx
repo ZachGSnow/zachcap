@@ -255,7 +255,7 @@ const MEANING = {
   talkedOver:
     "How often they started while someone on the other side of the call was still talking. It can be told between your mic and the call, not between two people on the call.",
   longestStretch: "The longest anyone talked in one go. Click to play it from its start.",
-  questionsAsked: "Lines that end with a question mark, whoever said them.",
+  questionsAsked: "Lines that end with a question mark, by everyone listed here.",
 };
 
 /** How the conversation went: who held the floor longest, pace, questions, interruptions. */

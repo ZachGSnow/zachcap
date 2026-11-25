@@ -159,6 +159,39 @@ def test_a_short_meeting_is_written_in_one_call(store, model):
     )
 
 
+def test_someone_heard_only_briefly_is_given_no_name(store, model):
+    meeting = add_meeting(store, SHORT)
+    brief_one = store.add_speaker(
+        meeting, "system", "Speaker 3", None, 0.5, None, Match(None, 0.0, "left_out")
+    )
+    said = [(brief_one, "I'll call them."), (None, "Me too.")]
+    for at, (voice, text) in enumerate(said):
+        store.add_segments(meeting, [(voice, "system", 80.0 + at, 80.5 + at, text, 0.9)])
+    item = {"owner": "Unknown", "task": "call them", "due": None, "kind": "commitment"}
+    points = [{"speaker": "Unknown", "points": ["Calls them."]}]
+    model.answer = lambda call: {**ANSWER, "action_items": [item], "who_said_what": points}
+
+    content = local_summary.summary(store, meeting, "small:4b")
+
+    [call] = model.calls
+    assert "[01:20] Unknown: I'll call them." in call.user  # what they said is read
+    shapes = call.shape["properties"]
+    owners = shapes["action_items"]["items"]["properties"]["owner"]["enum"]
+    speakers = shapes["who_said_what"]["items"]["properties"]["speaker"]["enum"]
+    assert owners == ["Sam", "Dana", "Unassigned"] and speakers == ["Sam", "Dana"]
+    assert [item["owner"] for item in content["action_items"]] == ["Unassigned"]
+    assert content["who_said_what"] == []
+
+
+def test_a_meeting_of_lines_with_no_voice_still_has_a_name_to_give(store, model):
+    meeting = add_meeting(store, [])
+    store.add_segments(meeting, [(None, "system", 3.0, 6.0, "I'll call them.", 0.9)])
+    model.answer = lambda call: {**ANSWER, "who_said_what": []}
+    local_summary.summary(store, meeting, "small:4b")
+    speakers = model.calls[0].shape["properties"]["who_said_what"]["items"]["properties"]["speaker"]
+    assert speakers["enum"] == ["Unknown"]
+
+
 def test_answers_are_held_to_the_meeting(store, model):
     part = [Line(s, s + 3, who, text) for s, who, text in SHORT]
     answer = {

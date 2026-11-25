@@ -48,7 +48,7 @@ def _show(store: Store, meeting_id: int) -> None:
     if speakers:
         print("\nSpeakers")
         for s in speakers:
-            detail = s["status"]
+            detail = s["status"].replace("_", " ")
             if s["status"] in ("auto", "suggested") and s["person_name"]:
                 detail += f" {s['person_name']} ({s['match_score']:.2f})"
             print(

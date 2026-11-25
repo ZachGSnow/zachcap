@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { clock, hours, initials, levelPercent, minutes, toSeconds } from "./format";
+import { clock, colorMap, hours, initials, levelPercent, minutes, personColor, toSeconds } from "./format";
 
 describe("times", () => {
   it("are written the way the app shows them", () => {
@@ -20,6 +20,28 @@ describe("times", () => {
     expect(toSeconds("[1:02:05]")).toBe(3725);
     expect(toSeconds("soon")).toBeNull();
     expect(toSeconds(undefined)).toBeNull();
+  });
+});
+
+describe("a person's color", () => {
+  it("is their usual one, unless somebody before them in the meeting has it", () => {
+    const colorOf = colorMap(["Dana", "Priya", "You", "Dana"], "You");
+    expect(colorOf("Dana")).toBe(personColor("Dana"));
+    expect(colorOf("Priya")).not.toBe(colorOf("Dana"));
+    expect(colorOf("You")).toBe(personColor("You", true));
+    expect(colorOf("Marcus")).toBe(personColor("Marcus")); // only named in it
+  });
+
+  it("is never Unknown's, who is nobody, with a lane or without", () => {
+    const nobody = colorMap([], "You")(null);
+    expect(personColor("Unknown")).toBe(nobody);
+    expect(colorMap(["Dana"], "You")("Unknown")).toBe(nobody);
+    expect(colorMap(["Dana", "Unknown"], "You")("Unknown")).toBe(nobody);
+    // So with a lane for each color, one more for Unknown takes none of them.
+    const names = ["Ann", "Ben", "Cy", "Di", "Ed", "Flo", "Gus", "Hal"];
+    const dots = (listed: string[]) => names.map((name) => colorMap(listed, "You")(name).dot);
+    expect(dots(["Unknown", ...names])).toEqual(dots(names));
+    expect(new Set(dots(names)).size).toBe(names.length);
   });
 });
 

@@ -3,11 +3,12 @@
 Worked out from the transcript alone. Lines by the same person less than STRETCH_GAP apart
 count as one stretch. An interruption is a line that starts while someone else's line on
 the other side of the call is still going (each side is one track, so overlaps only show up
-between your mic and the call audio).
+between your mic and the call audio). Only for the speakers that are listed (see brief.py).
 """
 
 from __future__ import annotations
 
+from . import brief
 from .store import Store
 
 STRETCH_GAP = 2.0  # seconds of silence that still counts as the same stretch of talking
@@ -16,7 +17,7 @@ MIN_PACE_SECONDS = 20  # too little speech gives a meaningless words-per-minute
 
 
 def meeting_insights(store: Store, meeting_id: int) -> dict:
-    rows = store.transcript(meeting_id)
+    rows = brief.listed_lines(store, meeting_id)
     people: dict[str, dict] = {}
     for row in rows:
         stats = people.setdefault(

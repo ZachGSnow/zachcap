@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-from . import clients
+from . import brief, clients
 from .store import Store
 
 PICKED = "auto"  # meetings.template_source: the kind was picked on its own (else chosen)
@@ -41,10 +41,10 @@ def from_title(title: str | None) -> str | None:
 def you_and_one_other(store: Store, meeting_id: int) -> bool:
     """Whether every line was said by you or by one other person, both named for sure. A
     voice not named yet (or only suggested), "Call audio" (several people not told apart) or
-    a line with no voice makes it unclear."""
+    lines with no voice make it unclear, unless they are too brief to be listed (brief.py)."""
     voices = {speaker["id"]: speaker for speaker in store.speakers(meeting_id)}
     people = set()
-    for line in store.transcript(meeting_id):
+    for line in brief.listed_lines(store, meeting_id):
         voice = voices.get(line["meeting_speaker_id"])
         if voice is None or voice["person_id"] is None or voice["status"] not in COUNTS:
             return False
