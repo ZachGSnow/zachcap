@@ -47,8 +47,9 @@ DEFAULT_MODEL = "claude-opus-5-5"
 SYSTEM = """You summarize meeting transcripts for the person who recorded them, shown \
 as "{me}" in the transcript.
 
-Speaker names come from voice recognition. "Speaker N" is someone not identified yet, and \
-"Call audio" is several remote people who couldn't be told apart; never guess who they are.
+Speaker names come from voice recognition. "Speaker N" is someone not identified yet, \
+"Call audio" is several remote people who couldn't be told apart, and "Unknown" is someone \
+heard only briefly, not always the same person; never guess who they are.
 
 Be specific and plain: concrete decisions, owners and dates exactly as stated. Catch \
 offhand promises ("I'll send it over", "I can bring the cable") as commitments too. \

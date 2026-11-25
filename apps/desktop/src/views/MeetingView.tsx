@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AskPanel } from "@/components/AskPanel";
+import { BriefVoices } from "@/components/BriefVoices";
 import { NotesPanel } from "@/components/NotesPanel";
 import { PlayerBar, type PlayerState } from "@/components/PlayerBar";
 import { PrivateNote } from "@/components/PrivateNote";
@@ -69,6 +70,7 @@ import { announce, attempt, copyText, reason } from "@/lib/feedback";
 import { clock, colorMap, day, minutes, when } from "@/lib/format";
 import { kindShown, pickAfterSummary } from "@/lib/kinds";
 import { relatedKey } from "@/lib/related";
+import { isBy, leftOut, listedVoices, voiceName } from "@/lib/voices";
 import { modelLabel, writerFor, type Writer } from "@/lib/writer";
 import { isHere, outcome, type Asked } from "@/lib/writing";
 import { StatusBadge } from "@/views/MeetingsView";
@@ -191,9 +193,15 @@ export function MeetingView({
 
   // Audio isolation: play the soloed person's own track and skip everyone else's lines.
   const soloSegments = useMemo(
-    () => (solo ? (data?.segments ?? []).filter((s) => s.speaker === solo) : []),
+    () => (solo ? (data?.segments ?? []).filter((s) => isBy(s, solo)) : []),
     [solo, data?.segments],
   );
+  // What the lanes show: the lines of the speakers that are listed.
+  const lanes = useMemo(
+    () => (data?.segments ?? []).filter((s) => s.speaker_status !== "left_out"),
+    [data?.segments],
+  );
+  const brief = useMemo(() => leftOut(data?.speakers ?? [], data?.segments ?? []), [data?.speakers, data?.segments]);
   const spans = useMemo(() => speechSpans(data?.segments ?? []), [data?.segments]);
   const track: Track = useMemo(() => {
     if (!solo || soloSegments.length === 0) return "mix";
@@ -493,10 +501,10 @@ export function MeetingView({
   };
 
   const nameSpeaker = async (speaker: Speaker, name: string) => {
-    const named = await attempt(`Couldn't name ${speaker.display_name}`, () =>
+    const named = await attempt(`Couldn't name ${voiceName(speaker)}`, () =>
       api(`/api/meetings/${id}/speakers/${speaker.id}/name`, { method: "POST", json: { name } }),
     );
-    if (named) toast.success(`${speaker.display_name} is now ${name}`);
+    if (named) toast.success(`${voiceName(speaker)} is now ${name}`);
     refreshAll();
   };
 
@@ -711,7 +719,7 @@ export function MeetingView({
 
           {data.segments.length > 0 && (
             <SpeakerLanes
-              segments={data.segments}
+              segments={lanes}
               talk={data.talk_time}
               duration={player.duration || duration}
               colorOf={colorOf}
@@ -858,8 +866,7 @@ export function MeetingView({
                     </Button>
                   </div>
                   <div className="divide-y overflow-hidden rounded-xl border">
-                    {data.speakers
-                      .filter((s) => s.status !== "minor" || (s.speech_seconds ?? 0) > 0)
+                    {listedVoices(data.speakers)
                       .map((speaker, index, list) => {
                         // Diarization can split one person into two voices; say so instead of repeating the name.
                         const nth = list.slice(0, index).filter((s) => s.display_name === speaker.display_name).length;
@@ -884,6 +891,7 @@ export function MeetingView({
                         </div>
                       ))}
                   </div>
+                  <BriefVoices meetingId={id} voices={brief} playable={!meeting.audio_removed_at} onName={setRenaming} />
                   <p className="mt-2 text-xs text-muted-foreground">
                     Naming a voice teaches ZachCap what they sound like; it is recognized in later meetings.
                   </p>

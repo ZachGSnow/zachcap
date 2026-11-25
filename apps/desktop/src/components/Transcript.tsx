@@ -23,8 +23,42 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { api, mediaUrl, type Mention, type Person, type Segment, type Speaker, type TopicFound } from "@/lib/engine";
 import { attempt } from "@/lib/feedback";
-import { clock, minutes, type SpeakerColor } from "@/lib/format";
+import { clock, minutes, UNKNOWN, type SpeakerColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { isBy } from "@/lib/voices";
+
+/** Plays a voice's sample. */
+export function PlaySample({ meetingId, voice, className }: { meetingId: number; voice: Speaker; className?: string }) {
+  const sample = useRef<HTMLAudioElement>(null);
+  return (
+    <>
+      <Button
+        size="icon"
+        variant="outline"
+        className={cn("size-8 shrink-0 rounded-full", className)}
+        disabled={voice.sample_start == null}
+        title={voice.sample_start == null ? "No sample left to play (it was redacted)" : undefined}
+        onClick={() => {
+          if (!sample.current) return;
+          sample.current.currentTime = 0;
+          void sample.current.play();
+        }}
+        aria-label={`Play a sample of ${voice.label}`}
+      >
+        <Play className="size-3.5" />
+      </Button>
+      {voice.sample_start != null && (
+        // The sample's time is part of the address, so a sample moved by a redaction is
+        // never played from the browser's cache.
+        <audio
+          ref={sample}
+          src={mediaUrl(`/api/meetings/${meetingId}/speakers/${voice.id}/sample?at=${voice.sample_start}`)}
+          preload="none"
+        />
+      )}
+    </>
+  );
+}
 
 export function WhoIsThis({
   meetingId,
@@ -39,7 +73,6 @@ export function WhoIsThis({
 }) {
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
-  const sample = useRef<HTMLAudioElement>(null);
 
   const save = async (value: string) => {
     if (!value.trim()) return;
@@ -60,30 +93,7 @@ export function WhoIsThis({
 
   return (
     <div className="flex items-center gap-3 rounded-xl border bg-card px-3 py-2.5">
-      <Button
-        size="icon"
-        variant="outline"
-        className="size-8 shrink-0 rounded-full"
-        disabled={speaker.sample_start == null}
-        title={speaker.sample_start == null ? "No sample left to play (it was redacted)" : undefined}
-        onClick={() => {
-          if (!sample.current) return;
-          sample.current.currentTime = 0;
-          void sample.current.play();
-        }}
-        aria-label={`Play a sample of ${speaker.label}`}
-      >
-        <Play className="size-3.5" />
-      </Button>
-      {speaker.sample_start != null && (
-        // The sample's time is part of the address, so a sample moved by a redaction is
-        // never played from the browser's cache.
-        <audio
-          ref={sample}
-          src={mediaUrl(`/api/meetings/${meetingId}/speakers/${speaker.id}/sample?at=${speaker.sample_start}`)}
-          preload="none"
-        />
-      )}
+      <PlaySample meetingId={meetingId} voice={speaker} />
       <div className="w-32 shrink-0">
         <div className="text-sm font-medium">{speaker.label}</div>
         <div className="text-xs text-muted-foreground">
@@ -279,7 +289,8 @@ const TranscriptRow = memo(function TranscriptRow({
   onSaveText: (segment: Segment, text: string) => Promise<boolean>;
   onCancelEdit: () => void;
 }) {
-  const unsure = segment.speaker_status === "suggested" || segment.speaker_status === "unknown";
+  const unsure =
+    segment.speaker === UNKNOWN || segment.speaker_status === "suggested" || segment.speaker_status === "unknown";
   const redacted = segment.text === REDACTED;
   return (
     <div
@@ -435,7 +446,7 @@ export const Transcript = memo(function Transcript({
     return segments.filter(
       (s) =>
         (!needle || s.text.toLowerCase().includes(needle) || s.speaker.toLowerCase().includes(needle)) &&
-        (!solo || s.speaker === solo) &&
+        (!solo || isBy(s, solo)) &&
         (!onlyMentions || mentioned.has(s.id)) &&
         (!onlyTopic || topicLines.has(s.id)),
     );
@@ -516,11 +527,11 @@ export const Transcript = memo(function Transcript({
   };
 
   // Voices of this meeting by id, so picking "Speaker 2" never invents a person called
-  // that; then everyone else ZachCap knows, by name.
+  // that (not those left out: nobody to pick); then everyone else ZachCap knows, by name.
   const voices = useMemo(() => {
     const seen = new Set<string>();
     return speakers.flatMap((s) => {
-      if (seen.has(s.display_name)) return [];
+      if (s.status === "left_out" || seen.has(s.display_name)) return [];
       seen.add(s.display_name);
       return [{ label: s.display_name, speakerId: s.id, personId: s.person_id }];
     });

@@ -132,6 +132,21 @@ def test_summary_sends_named_text_and_stores_cost_and_action_items(meeting, monk
     )
 
 
+def test_claude_is_told_who_unknown_is(meeting, monkeypatch):
+    store, meeting_id = meeting
+    voice = store.add_speaker(
+        meeting_id, "system", "Speaker 2", None, 0.5, None, Match(None, 0.0, "left_out")
+    )
+    store.add_segments(meeting_id, [(voice, "system", 65.0, 65.5, "Thanks.", 0.9)])
+    calls = fake_claude(monkeypatch, sample_summary())
+
+    summarize.summarize(store, meeting_id)
+
+    assert "[01:05] Unknown: Thanks." in calls["messages"][0]["content"]
+    told = " ".join(calls["system"].split())
+    assert '"Unknown" is someone heard only briefly, not always the same person; never' in told
+
+
 def test_regenerating_keeps_items_already_marked_done(meeting, monkeypatch):
     store, meeting_id = meeting
     fake_claude(monkeypatch, sample_summary())

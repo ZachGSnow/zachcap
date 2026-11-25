@@ -1,7 +1,7 @@
 """Turn a recorded meeting folder into a speaker-labeled transcript in the database.
 
 Steps: load both tracks -> Whisper words -> pyannote speaker turns -> utterances
--> drop mic echo -> match speakers to known voices -> store.
+-> drop mic echo -> match speakers to known voices -> leave out brief ones -> store.
 Models load one at a time and are freed before the next (the GPU has 4 GB).
 """
 
@@ -13,8 +13,8 @@ from pathlib import Path
 
 import numpy as np
 
-from . import apikeys, audio, echo, transcript, vocabulary, voiceprint
-from .store import Store
+from . import apikeys, audio, brief, echo, transcript, vocabulary, voiceprint
+from .store import CALL_AUDIO, Store
 
 MIN_SPEAKER_SECONDS = 1.5  # shorter clusters are usually noise or cross-talk
 SILENT_TRACK_DBFS = -65.0
@@ -71,6 +71,7 @@ def process(store: Store, meeting_id: int, log: Log = print) -> str:
             else:
                 _store_unseparated(store, meeting_id, utterances, fix)
             store.update_meeting(meeting_id, duration=round(duration, 3))
+            brief.mark(store, meeting_id)
             status = store.refresh_status(meeting_id)
         done = f"done in {time.perf_counter() - started:.0f} s"
         log(done if separated else f"{done}; add a Hugging Face token, then Reprocess for names")
@@ -79,6 +80,7 @@ def process(store: Store, meeting_id: int, log: Log = print) -> str:
         if store.meeting(meeting_id) is not None:
             keep = had_results and previous in ("ready", "needs_names")
             store.update_meeting(meeting_id, status=previous if keep else "failed")
+            brief.apply(store, meeting_id)  # the setting may have changed meanwhile
         raise
 
 
@@ -221,7 +223,7 @@ def _store_unseparated(
             label = me["name"]
         else:
             match = voiceprint.Match(None, 0.0, "minor")
-            label = "Call audio"
+            label = CALL_AUDIO
         speaker_id = store.add_speaker(meeting_id, track, label, None, seconds, None, match)
         rows += [
             (
@@ -317,7 +319,11 @@ def _store_results(
         for track, utts in utterances.items()
         for u in utts
     ]
-    store.add_segments(meeting_id, merge_same_person(sorted(rows, key=lambda r: r[2]), who))
+    rows = sorted(rows, key=lambda r: r[2])
+    if brief.percent(store):  # the pieces of sentences that brief voices got go back
+        said = brief.talk_of(merge_same_person(rows, who))
+        rows = brief.whole_sentences(rows, {None, *brief.left_out(store, meeting_id, said)})
+    store.add_segments(meeting_id, merge_same_person(rows, who))
 
 
 def merge_same_person(rows: list[tuple], who: dict, max_gap: float = 1.5) -> list[tuple]:

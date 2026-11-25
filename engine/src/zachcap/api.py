@@ -40,6 +40,7 @@ from . import (
     attachments,
     audio,
     autorecord,
+    brief,
     clients,
     decode_child,
     diarize,
@@ -221,6 +222,7 @@ class SettingsBody(BaseModel):
     local_model: str | None = None  # the model on this PC, by Ollama's name; "" for none
     language: str | None = None
     faster_speakers: bool | None = None  # separate speakers faster (see diarize.SETTING)
+    leave_out_brief: int | None = None  # voices under this percent of the talk; 0 for none
     mic_device: str | None = None
     output_device: str | None = None
     vocabulary: str | None = None
@@ -897,6 +899,25 @@ def create_app(token: str) -> FastAPI:
 
         threading.Thread(target=run, name="zachcap-export", daemon=True).start()
 
+    # Held by the one thread going through the meetings: one for a change meanwhile waits.
+    brief_lock = threading.Lock()
+
+    def leave_out_brief() -> None:
+        """Has the meetings follow the setting "Leave out brief voices", if they don't yet, and
+        brings the copies of the ones that changed up to date. On a thread of its own: when the
+        setting is changed, and as the engine starts (the meetings may be from before it)."""
+        with brief_lock:
+            store = Store()
+            try:
+                if brief.pending(store):
+                    export_soon(store, brief.apply_all(store))
+            except Exception:  # the next start has another go
+                traceback.print_exc()
+            finally:
+                store.close()
+
+    app.state.leave_out_brief = leave_out_brief
+
     def meeting_or_404(store: Store, meeting_id: int):
         meeting = store.meeting(meeting_id)
         if meeting is None:
@@ -1153,7 +1174,9 @@ def create_app(token: str) -> FastAPI:
             ],
             "notes": [dict(row) for row in store.notes(meeting_id)],
             "insights": insights.meeting_insights(store, meeting_id),
-            "talk_time": [dict(row) for row in store.talk_time(meeting_id)],
+            "talk_time": [
+                dict(row) for row in store.talk_time(meeting_id, brief.unlisted(store, meeting_id))
+            ],
             "action_items": [dict(row) for row in store.action_items(meeting_id=meeting_id)],
             "me": store.me()["name"],
             # Other people's lines that say your name.
@@ -1820,6 +1843,8 @@ def create_app(token: str) -> FastAPI:
         with store.transaction():
             clients.keep_history(store, person_id)  # their meetings keep the client they had
             store.delete_person(person_id)
+            for meeting_id in meetings:  # nobody is known to be their voice now
+                brief.apply(store, meeting_id)
         export_soon(store, meetings)
         return {"ok": True}
 
@@ -2250,6 +2275,9 @@ def create_app(token: str) -> FastAPI:
                 "recipes": prompts.choices(store, "recipe"),
                 "language": store.setting("language", "en"),
                 "faster_speakers": store.setting(diarize.SETTING) == "1",
+                # Voices nobody is known to be aren't listed as speakers under this percent of
+                # a meeting's talk (0: all are).
+                "leave_out_brief": brief.percent(store),
                 "languages": [{"id": k, "label": v} for k, v in LANGUAGES.items()],
                 "mic_device": store.setting("mic_device", ""),
                 "output_device": store.setting("output_device", ""),
@@ -2387,6 +2415,14 @@ def create_app(token: str) -> FastAPI:
             store.set_setting("language", body.language)
         if body.faster_speakers is not None:
             store.set_setting(diarize.SETTING, "1" if body.faster_speakers else "0")
+        if body.leave_out_brief is not None:
+            if body.leave_out_brief not in brief.CHOICES:
+                raise HTTPException(
+                    status_code=400, detail="Leave out voices under 0, 2, 5 or 10% of the talk"
+                )
+            store.set_setting(brief.SETTING, str(body.leave_out_brief))
+            if brief.pending(store):  # every meeting follows it
+                threading.Thread(target=leave_out_brief, name="zachcap-brief", daemon=True).start()
         for key in ("mic_device", "output_device"):
             value = getattr(body, key)
             if value is not None:
@@ -2470,8 +2506,9 @@ def serve(port: int, token: str) -> None:
             daemon=True,
         ).start()
     # Recordings saved in the watch folder import themselves (off until a folder is chosen),
-    # calls are recorded on their own, and the GPU is looked for (the live transcript's
-    # default). Started here rather than in create_app, so tests never leave one running.
+    # calls are recorded on their own, the GPU is looked for (the live transcript's default),
+    # and meetings from before an update follow "Leave out brief voices" too. Started here
+    # rather than in create_app, so tests never leave one running.
     threading.Thread(
         target=app.state.folder_watch.run_forever,
         name="zachcap-watch-folder",
@@ -2482,6 +2519,7 @@ def serve(port: int, token: str) -> None:
     ).start()
     threading.Thread(target=app.state.look_for_gpu, name="zachcap-gpu-check", daemon=True).start()
     threading.Thread(target=app.state.process_left, name="zachcap-left", daemon=True).start()
+    threading.Thread(target=app.state.leave_out_brief, name="zachcap-brief", daemon=True).start()
     # Audio a decode left in the temp folder when the PC went off, or an older ZachCap stopped.
     threading.Thread(target=decode_child.tidy, name="zachcap-tidy", daemon=True).start()
     sock = listen_on(port)

@@ -45,7 +45,8 @@ export type TicketFound = {
   count: number;
 };
 
-export type SpeakerStatus = "auto" | "suggested" | "confirmed" | "unknown" | "minor";
+/** left_out: heard only briefly, and nobody is known to be it (see voices.ts). */
+export type SpeakerStatus = "auto" | "suggested" | "confirmed" | "unknown" | "minor" | "left_out";
 
 export type Speaker = {
   id: number;
@@ -383,6 +384,9 @@ export type Settings = {
   auto_record_choices: string[];
   /** Separate speakers faster (less time without a GPU), a little less exactly. */
   faster_speakers: boolean;
+  /** Voices nobody is known to be aren't listed as speakers under this percent of a meeting's
+   * talk (0: all are). */
+  leave_out_brief: number;
   /** A live transcript in a small panel over the call while recording. Unless turned on or
    * off here, on only with a CUDA GPU. */
   live_transcript: boolean;

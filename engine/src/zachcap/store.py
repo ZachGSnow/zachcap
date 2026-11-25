@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import date, timedelta
 from difflib import SequenceMatcher
@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS meeting_speakers (
     track           TEXT NOT NULL,                  -- mic|system
     label           TEXT NOT NULL,                  -- "Speaker 1", shown until named
     person_id       INTEGER REFERENCES people(id) ON DELETE SET NULL,
-    status          TEXT NOT NULL,                  -- auto|suggested|confirmed|unknown|minor
+    -- auto|suggested|confirmed|unknown|minor|left_out (see brief.py)
+    status          TEXT NOT NULL,
     match_score     REAL,
     embedding       BLOB,
     speech_seconds  REAL,
@@ -203,6 +204,10 @@ END;
 
 # What a redacted line says instead.
 REDACTED = "[redacted]"
+# Everyone on the call, when the speakers couldn't be separated: the label of that "voice".
+CALL_AUDIO = "Call audio"
+# The name of a line with no voice, and of a voice that is left out (see brief.py).
+UNKNOWN = "Unknown"
 _by_lines: dict = {}  # (library, name) -> (lines version, value): see Store.by_lines
 _by_lines_lock = threading.Lock()
 LAST_MEETING_ID = "last_meeting_id"  # the highest meeting id ever given out
@@ -212,10 +217,11 @@ LAST_NOTE_ID = "last_note_id"  # the highest note id ever given out
 # reader that was started before an update (the MCP server) then refuses to.
 VERSION = 1
 
-# Suggestions show as "Speaker 2 (Dana?)" until confirmed.
+# Suggestions show as "Speaker 2 (Dana?)" until confirmed, voices left out as Unknown.
 SPEAKER_NAME = (
     "CASE WHEN ms.status = 'suggested' THEN ms.label || ' (' || p.name || '?)' "
-    "ELSE COALESCE(p.name, ms.label, 'Unknown') END"
+    f"WHEN ms.status = 'left_out' THEN '{UNKNOWN}' "
+    f"ELSE COALESCE(p.name, ms.label, '{UNKNOWN}') END"
 )
 # A person Claude may know of: you, and anyone named or recognized in a meeting that isn't
 # private. A suggestion of anyone else would be a name from a private meeting.
@@ -227,7 +233,8 @@ IN_SHARED = (
 SHARED_NAME = (
     f"CASE WHEN ms.status = 'suggested' AND {IN_SHARED} "
     "THEN ms.label || ' (' || p.name || '?)' WHEN ms.status = 'suggested' THEN ms.label "
-    "ELSE COALESCE(p.name, ms.label, 'Unknown') END"
+    f"WHEN ms.status = 'left_out' THEN '{UNKNOWN}' "
+    f"ELSE COALESCE(p.name, ms.label, '{UNKNOWN}') END"
 )
 
 
@@ -1004,14 +1011,20 @@ class Store:
             self.db.executemany("UPDATE people SET org = ? WHERE id = ?", people)
             self.db.executemany("UPDATE meetings SET client = ? WHERE id = ?", meetings)
 
-    def talk_time(self, meeting_id: int) -> list[sqlite3.Row]:
+    def talk_time(
+        self, meeting_id: int, unlisted: Collection[int | None] = ()
+    ) -> list[sqlite3.Row]:
+        """How long each speaker talked, the longest first, but for the voices ``unlisted`` (see
+        brief.unlisted; None: the lines with no voice)."""
+        marks = ", ".join("?" * len(unlisted))
         return self.db.execute(
             f"SELECT {SPEAKER_NAME} AS speaker, ms.person_id, "
             "SUM(s.end - s.start) AS seconds, COUNT(*) AS turns FROM segments s "
             "LEFT JOIN meeting_speakers ms ON ms.id = s.meeting_speaker_id "
             "LEFT JOIN people p ON p.id = ms.person_id "
-            "WHERE s.meeting_id = ? GROUP BY speaker ORDER BY seconds DESC",
-            (meeting_id,),
+            f"WHERE s.meeting_id = ? AND COALESCE(s.meeting_speaker_id, 0) NOT IN ({marks}) "
+            "GROUP BY speaker ORDER BY seconds DESC",
+            (meeting_id, *(voice or 0 for voice in unlisted)),
         ).fetchall()
 
     def people_stats(self, private: bool = True) -> list[sqlite3.Row]:

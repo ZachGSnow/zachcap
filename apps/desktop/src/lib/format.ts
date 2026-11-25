@@ -71,6 +71,9 @@ const PALETTE = [
 const ME = { dot: "bg-foreground", soft: "bg-foreground/10", text: "text-foreground" };
 const NOBODY = { dot: "bg-muted-foreground/40", soft: "bg-muted", text: "text-muted-foreground" };
 
+/** The name of a line with no voice, and of a voice that is left out (see voices.ts). */
+export const UNKNOWN = "Unknown";
+
 export type SpeakerColor = (typeof PALETTE)[number];
 
 function nameSlot(name: string): number {
@@ -79,8 +82,10 @@ function nameSlot(name: string): number {
   return Math.abs(hash) % PALETTE.length;
 }
 
-/** A person's color everywhere (meetings, actions, search, people); you are the dark one. */
+/** A person's color everywhere (meetings, actions, search, people); you are the dark one, and
+ * Unknown is nobody. */
 export function personColor(name: string, isMe = false): SpeakerColor {
+  if (name === UNKNOWN) return NOBODY;
   return isMe ? ME : PALETTE[nameSlot(name)];
 }
 
@@ -92,7 +97,7 @@ export function colorMap(names: string[], me: string): (name: string | null | un
   const map = new Map<string, SpeakerColor>();
   const used = new Set<number>();
   for (const name of names) {
-    if (map.has(name)) continue;
+    if (map.has(name) || name === UNKNOWN) continue;
     if (name === me) {
       map.set(name, ME);
       continue;

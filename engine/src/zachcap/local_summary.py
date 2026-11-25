@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterable
 from typing import NamedTuple
 
 from . import attachments, autokind, ollama, prompts, summarize, vocabulary
-from .store import Store
+from .store import UNKNOWN, Store
 from .summarize import Summary, quoted, to_seconds, transcript_block
 
 MODEL = "local_model"  # the setting: Ollama's name of the model to write with
@@ -433,6 +433,7 @@ def written(
     words = spellings(store)
     heading = summarize.heading(meeting)
     names = list(dict.fromkeys(line.speaker for line in lines))
+    names = [name for name in names if name != UNKNOWN] or names  # not somebody's name
     answers: list[dict] = []
 
     def asked(first: int, after: int, fields: tuple[str, ...], task: str, which: str) -> None:
