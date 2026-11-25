@@ -1501,6 +1501,134 @@ fn watch_engine(app: &AppHandle, revival: &mut Revival) {
     }
 }
 
+/// How often a page that went is put back within REVIVE_WITHIN: one that keeps going is left.
+#[cfg(windows)]
+const PAGE_TRIES: usize = 3;
+
+/// Notices when the main window's page is gone (page_there), and says when to put it back.
+#[cfg(windows)]
+#[derive(Default)]
+struct PageWatch {
+    /// It has been there: one still being made isn't one that went.
+    seen: bool,
+    /// Looks in a row without it.
+    missing: u32,
+    /// When it was put back.
+    tries: Vec<std::time::Instant>,
+}
+
+#[cfg(windows)]
+impl PageWatch {
+    /// Once a second, with whether the page is there (None: can't tell): whether it's to be
+    /// put back now.
+    fn look(&mut self, there: Option<bool>, now: std::time::Instant) -> bool {
+        match there {
+            Some(true) => {
+                self.seen = true;
+                self.missing = 0;
+            }
+            Some(false) if self.seen => self.missing += 1,
+            _ => {}
+        }
+        if self.missing < 2 {
+            return false;
+        }
+        self.missing = 0;
+        self.tries
+            .retain(|&tried| now.duration_since(tried) < REVIVE_WITHIN);
+        if self.tries.len() >= PAGE_TRIES {
+            return false;
+        }
+        self.tries.push(now);
+        true
+    }
+}
+
+/// Whether a window's page is there: WebView2's own window, inside the one wry makes for it.
+/// WebView2 takes that along when its process crashes or is ended. It doesn't come back by
+/// itself, so ZachCap's window stays empty. None when wry's isn't found.
+#[cfg(windows)]
+fn page_there(window: &tauri::WebviewWindow) -> Option<bool> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowExW, GW_CHILD, GetWindow};
+    let window = window.hwnd().ok()?.0;
+    let class: Vec<u16> = "WRY_WEBVIEW\0".encode_utf16().collect();
+    // SAFETY: a stale handle finds nothing, and the class name ends in a zero.
+    unsafe {
+        let host = FindWindowExW(
+            window,
+            std::ptr::null_mut(),
+            class.as_ptr(),
+            std::ptr::null(),
+        );
+        (!host.is_null()).then(|| !GetWindow(host, GW_CHILD).is_null())
+    }
+}
+
+/// Once a second: puts the main window's page back when it's gone. The engine isn't part of it,
+/// so a recording goes on meanwhile.
+#[cfg(windows)]
+fn watch_page(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut watch = PageWatch::default();
+        while !EXITING.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_secs(1));
+            let there = match app.get_webview_window("main") {
+                Some(window) => page_there(&window),
+                None => Some(false), // a new one couldn't be made
+            };
+            if watch.look(there, std::time::Instant::now()) && !EXITING.load(Ordering::Relaxed) {
+                rebuild_windows(&app);
+            }
+        }
+    });
+}
+
+/// Puts a new main window in the old one's place: shown, minimized or in the tray as that was.
+/// A webview whose process is gone can't be used again. The live panel's has gone with it.
+#[cfg(windows)]
+fn rebuild_windows(app: &AppHandle) {
+    let live = app.get_webview_window(LIVE).is_some();
+    close_live_panel(app);
+    let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else {
+        return;
+    };
+    let Ok(mut builder) = tauri::WebviewWindowBuilder::from_config(app, config) else {
+        return;
+    };
+    let (mut minimized, mut place) = (false, None);
+    if let Some(old) = app.get_webview_window("main") {
+        minimized = old.is_minimized().unwrap_or(false);
+        let maximized = old.is_maximized().unwrap_or(false);
+        if !minimized && !maximized {
+            place = old.outer_position().ok().zip(old.inner_size().ok());
+        }
+        builder = builder
+            .visible(old.is_visible().unwrap_or(false) && !minimized)
+            .focused(old.is_focused().unwrap_or(false))
+            .maximized(maximized);
+        let _ = old.destroy();
+        // Its name is free once it's gone.
+        for _ in 0..100 {
+            if app.get_webview_window("main").is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    if let Ok(window) = builder.build() {
+        if let Some((position, size)) = place {
+            let _ = window.set_size(size);
+            let _ = window.set_position(position);
+        }
+        if minimized {
+            let _ = window.minimize();
+        }
+    }
+    if live {
+        open_live_panel(app);
+    }
+}
+
 /// A Windows notification about the engine, when the main window isn't in front to show it.
 fn tell_about_engine(app: &AppHandle, title: &str, body: &str) {
     if main_in_front(app) {
@@ -1600,6 +1728,9 @@ pub fn run() {
                     }
                 }
             });
+
+            #[cfg(windows)]
+            watch_page(app.handle().clone());
 
             // The global shortcuts (see KeyState): start or stop recording from anywhere;
             // while recording, bookmark the moment and snapshot the call; hold to dictate.
@@ -1726,10 +1857,15 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building ZachCap")
-        .run(|app, event| {
-            if let RunEvent::Exit = event
-                && let Some(engine) = app.try_state::<Engine>()
-            {
+        .run(|app, event| match event {
+            // Only Quit ends ZachCap, not a moment without a window (rebuild_windows).
+            RunEvent::ExitRequested {
+                code: None, api, ..
+            } => api.prevent_exit(),
+            RunEvent::Exit => {
+                let Some(engine) = app.try_state::<Engine>() else {
+                    return;
+                };
                 EXITING.store(true, Ordering::Relaxed);
                 if let Some(info) = engine.info.lock().unwrap().clone() {
                     stop_recording(&info);
@@ -1738,6 +1874,7 @@ pub fn run() {
                     let _ = child.kill();
                 }
             }
+            _ => {}
         });
 }
 
@@ -1997,6 +2134,51 @@ mod tests {
         for _ in 0..40 {
             assert_eq!(watched.look(true, true, false, true), Found::Nothing);
         }
+    }
+
+    #[test]
+    fn a_page_that_went_is_put_back_a_few_times() {
+        let start = std::time::Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        let mut watch = PageWatch::default();
+        // Not there yet while it's made, and it may not be told.
+        for (second, there) in [
+            (0, Some(false)),
+            (1, Some(false)),
+            (2, None),
+            (3, Some(false)),
+        ] {
+            assert!(!watch.look(there, at(second)));
+        }
+        assert!(!watch.look(Some(true), at(4)));
+        // Gone for one look may be a moment between two; for two it's gone.
+        assert!(!watch.look(Some(false), at(5)));
+        assert!(!watch.look(Some(true), at(6)));
+        assert!(!watch.look(Some(false), at(7)));
+        assert!(watch.look(Some(false), at(8)));
+        // Made again, and gone again: three times, then it's left.
+        for second in [10, 20] {
+            assert!(!watch.look(Some(true), at(second)));
+            assert!(!watch.look(Some(false), at(second + 1)));
+            assert!(watch.look(Some(false), at(second + 2)));
+        }
+        assert!(!watch.look(Some(true), at(30)));
+        for second in 31..60 {
+            assert!(!watch.look(Some(false), at(second)));
+        }
+        // Until an hour has gone by since the first.
+        assert!((3700..3703).any(|second| watch.look(Some(false), at(second))));
+    }
+
+    #[test]
+    fn a_new_window_that_couldnt_be_made_is_tried_again() {
+        let start = std::time::Instant::now();
+        let mut watch = PageWatch::default();
+        assert!(!watch.look(Some(true), start));
+        let tries = (1..20)
+            .filter(|&second| watch.look(Some(false), start + Duration::from_secs(second)))
+            .count();
+        assert_eq!(tries, PAGE_TRIES);
     }
 
     #[test]
