@@ -13,7 +13,11 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "installerHooks": "windows/installer-hooks.nsh"
+        "template": "windows/installer.nsi",
+        "installerHooks": "windows/installer-hooks.nsh",
+        "customLanguageFiles": { "English": "windows/installer-english.nsh" },
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
       }
     }
   }

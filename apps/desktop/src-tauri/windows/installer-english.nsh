@@ -1,0 +1,13 @@
+; The installer's texts that Tauri's template shows itself (the pages' are in installer-theme.nsh).
+LangString appRunning ${LANG_ENGLISH} "{{product_name}} is open. Close it (Quit, in its tray icon's menu) and try again."
+LangString noPermissionToCloseApp ${LANG_ENGLISH} "{{product_name}} was started as administrator, so it can't be closed from here. Close it and try again."
+LangString appRunningOkKill ${LANG_ENGLISH} "{{product_name}} is open, and closes now. A recording in progress is saved."
+LangString failedToKillApp ${LANG_ENGLISH} "{{product_name}} couldn't be closed. Close it (Quit, in its tray icon's menu) and try again."
+LangString installingWebview2 ${LANG_ENGLISH} "Installing WebView2, which shows ZachCap's window..."
+LangString silentDowngrades ${LANG_ENGLISH} "A newer version is installed, and this installer doesn't replace it without asking.$\n"
+LangString webview2AbortError ${LANG_ENGLISH} "WebView2 couldn't be installed, and ZachCap needs it. Try the installer again."
+LangString webview2DownloadError ${LANG_ENGLISH} "WebView2 couldn't be downloaded: $0"
+LangString webview2DownloadSuccess ${LANG_ENGLISH} "WebView2's installer is downloaded"
+LangString webview2Downloading ${LANG_ENGLISH} "Downloading WebView2's installer..."
+LangString webview2InstallError ${LANG_ENGLISH} "Installing WebView2 ended with code $1"
+LangString webview2InstallSuccess ${LANG_ENGLISH} "WebView2 is installed"

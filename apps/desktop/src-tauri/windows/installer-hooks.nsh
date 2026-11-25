@@ -1,4 +1,7 @@
-; Hooks for the NSIS installer (tauri.installer.conf.json).
+; Hooks for the NSIS installer (tauri.installer.conf.json), and where the rest of it is for
+; installer.nsi: this folder, and the pictures build-installer.ps1 stages.
+!define ZC_WINDOWS "${__FILEDIR__}"
+!define ZC_ART "${ZC_WINDOWS}\..\installer\art"
 
 ; A per-user install goes to %LOCALAPPDATA%\ZachCap by default, which is where ZachCap keeps
 ; its meetings and database. The program goes to %LOCALAPPDATA%\Programs\ZachCap instead, so
@@ -8,9 +11,17 @@
     StrCpy $INSTDIR "$LOCALAPPDATA\Programs\${PRODUCTNAME}"
     SetOutPath $INSTDIR
   ${EndIf}
-  ; An update that doesn't uninstall first would leave the older version's wheel beside the
-  ; new one; the engine is set up from the new one only (wheel_for in lib.rs).
-  Delete "$INSTDIR\engine\wheel\*.whl"
+!macroend
+
+; Once ZachCap is closed, before anything is copied. An update doesn't uninstall the version
+; that is there, so its wheel would stay beside the new one (the engine is set up from the new
+; one only: wheel_for in lib.rs), and so would the source files this one no longer has, which
+; the uninstaller wouldn't know of.
+!macro ZC_HOOK_BEFORE_FILES
+  ${If} ${FileExists} "$INSTDIR\engine\BUILD"
+    Delete "$INSTDIR\engine\wheel\*.whl"
+    RMDir /r "$INSTDIR\engine\src"
+  ${EndIf}
 !macroend
 
 ; The engine's venv is set up on first launch (a few GB) next to the program, so uninstalling
