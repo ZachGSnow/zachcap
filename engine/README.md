@@ -17,7 +17,7 @@ uv run zachcap keys status
 
 The speech models (Whisper and pyannote) download from Hugging Face on first use, each at the commit pinned in `src/zachcap/models.py`; to move one on, put the `sha` from `https://huggingface.co/api/models/<repo>/revision/main` there.
 
-## Phase 0 probes
+## Probes
 
 ```powershell
 # Generate a synthetic two-track meeting with Windows TTS voices
