@@ -22,7 +22,7 @@ from .summarize import Summary, quoted, to_seconds, transcript_block
 
 MODEL = "local_model"  # the setting: Ollama's name of the model to write with
 WRITER = "writer"  # the setting: who writes unless asked otherwise, "claude" or "local"
-SUGGESTED = "qwen3.5:4b"  # what did best of the small ones tried (docs/PLAN.md section 18)
+SUGGESTED = "qwen3.5:4b"  # what did best of the small ones tried (docs/ARCHITECTURE.md)
 PREFIX = "ollama/"  # before the model's name, in what is saved of a summary
 
 # A part is about ten minutes of talk: 3,500 tokens with the instructions. That, and an answer
