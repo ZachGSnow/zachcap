@@ -2,18 +2,24 @@
 
 What's new in each version of ZachCap, newest first. It's in the app as well, under **About**. The releases themselves are on [GitHub](https://github.com/ZachGSnow/zachcap/releases).
 
-## Unreleased
+## 0.5.0 - 2026-11-24
 
 Tidier meetings, and a better way in.
 
 ### New
 
+- **Brief voices are left out.** A voice ZachCap can't name that has less than 5% of a call's talk (background chatter, a stray word) isn't listed as a speaker, and you aren't asked who it is. What it said stays in the transcript, as Unknown, and the Speakers tab lists the voices left out, to name one after all. The share is in Settings (2%, 5%, 10% or off), and meetings you already have follow it too.
 - **About.** At the bottom of the left menu: the version and build, what stays on this PC, what ZachCap is built on, and this list of changes.
 - **A new installer** in ZachCap's own look: one page to install or update, the progress, and one at the end. An update replaces the program where it is, without asking whether to uninstall first, so the speech engine stays set up.
 
 ### Improved
 
 - **Conversation stats** have room between their columns, and each heading explains itself when you point at it.
+- **Pieces of a sentence stay together.** When a word in the middle of someone's sentence was heard as another, unknown voice, it goes back to them in meetings processed from now on.
+
+### Fixed
+
+- ZachCap's window no longer stays empty when WebView2, which shows it, crashes or is ended: it's put back, and a recording goes on meanwhile.
 
 ## 0.4.0 - 2026-11-24
 
