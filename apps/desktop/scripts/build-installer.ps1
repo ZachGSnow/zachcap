@@ -13,6 +13,10 @@
     the installed app sets its engine up again whenever the stamp changes. A tree with
     uncommitted changes is refused unless -AllowDirty is given (for a test build).
 
+    The installer's own pages are in src-tauri\windows: Tauri's template with them
+    (installer.nsi), so another version of the Tauri CLI than it was made from is refused,
+    and their pictures (art), which are made into bitmaps here.
+
     ZachCap's own code goes in as a wheel built here with that uv, so the installed app only
     installs pinned, hash-checked files and never fetches a build tool. The tools that build
     it here are pinned with hashes as well (build-constraints.txt).
@@ -23,6 +27,7 @@ param([switch]$AllowDirty)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+$TauriCli = '2.12.6'
 $UvVersion = '0.13.9'
 $UvZipSha256 = 'edd61f7f5728a56cc62455386661860bdfc7bab65872f39b0c25bdcc1d8e1beb'
 $UvLicenses = @{
@@ -45,6 +50,12 @@ function Get-Download([string]$Url, [string]$Path, [string]$Sha256) {
         Remove-Item $Path -Force
         throw "$Url has SHA-256 $actual, expected $Sha256"
     }
+}
+
+# The template is this CLI's, with ZachCap's pages (its header says how to bring it to another).
+$cli = (Get-Content (Join-Path $desktop 'node_modules\@tauri-apps\cli\package.json') -Raw | ConvertFrom-Json).version
+if ($cli -ne $TauriCli) {
+    throw "The installer's template (src-tauri\windows\installer.nsi) was made from Tauri CLI $TauriCli, and node_modules has ${cli}: run 'npm ci' in apps\desktop, or bring the template up to $cli (its header says how)"
 }
 
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
@@ -96,7 +107,21 @@ if ($built -ne $wheel) {
     throw "The app installs $wheel (the version in src-tauri\tauri.conf.json), but uv built '$built' (the one in engine\pyproject.toml): give both the same version, run 'uv lock' in engine and commit"
 }
 
-Write-Host "Staged engine ($(@($files).Count) files and its wheel, BUILD $stamp) and uv $UvVersion"
+# The pictures of the installer's pages as the bitmaps NSIS takes: 24 bits, nothing transparent.
+Add-Type -AssemblyName System.Drawing
+$art = New-Item -ItemType Directory -Force (Join-Path $stage 'art')
+$pictures = @(Get-ChildItem (Join-Path $tauri 'windows\art') -Filter '*.png')
+foreach ($file in $pictures) {
+    $picture = [Drawing.Image]::FromFile($file.FullName)
+    $bitmap = New-Object Drawing.Bitmap $picture.Width, $picture.Height, ([Drawing.Imaging.PixelFormat]::Format24bppRgb)
+    $canvas = [Drawing.Graphics]::FromImage($bitmap)
+    $canvas.Clear([Drawing.Color]::White)
+    $canvas.DrawImage($picture, 0, 0, $picture.Width, $picture.Height)
+    $bitmap.Save((Join-Path $art.FullName "$($file.BaseName).bmp"), [Drawing.Imaging.ImageFormat]::Bmp)
+    $canvas.Dispose(); $bitmap.Dispose(); $picture.Dispose()
+}
+
+Write-Host "Staged engine ($(@($files).Count) files and its wheel, BUILD $stamp), uv $UvVersion and $($pictures.Count) pictures"
 
 Push-Location $desktop
 try {
