@@ -1,6 +1,7 @@
 import { AtSign, Bookmark, Camera, Headphones } from "lucide-react";
 import { memo, useMemo, type ReactNode } from "react";
 
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Insights, Mention, Note, Segment, TalkTime } from "@/lib/engine";
 import { clock, initials, minutes, type SpeakerColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -232,6 +233,31 @@ export function SpeakerLanes({
   );
 }
 
+/** A word that says what it means when it's pointed at, or reached with Tab. */
+function Explained({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger className="cursor-help rounded-sm underline decoration-muted-foreground/50 decoration-dotted underline-offset-4 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50">
+        {label}
+      </TooltipTrigger>
+      <TooltipContent sideOffset={6} className="max-w-64 text-left font-normal text-pretty">
+        {children}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** What the conversation's numbers mean (insights.py works them out). */
+const MEANING = {
+  pace: "How fast they talk: words per minute, counting only the time they were talking. A dash means too little talk to tell, under 20 seconds.",
+  longest: "The longest they talked in one go: nobody else in between, and no pause over two seconds.",
+  questions: "How many of their lines end with a question mark.",
+  talkedOver:
+    "How often they started while someone on the other side of the call was still talking. It can be told between your mic and the call, not between two people on the call.",
+  longestStretch: "The longest anyone talked in one go. Click to play it from its start.",
+  questionsAsked: "Lines that end with a question mark, whoever said them.",
+};
+
 /** How the conversation went: who held the floor longest, pace, questions, interruptions. */
 export function ConversationStats({
   insights,
@@ -248,54 +274,66 @@ export function ConversationStats({
     <div>
       <div className="mb-3 flex flex-wrap gap-2 text-xs">
         {longest && (
-          <button
-            onClick={() => onSeek(longest.at)}
-            className="rounded-lg border px-2.5 py-1.5 text-left hover:bg-muted"
-            title="Play from the start of it"
-          >
-            <span className="text-muted-foreground">Longest stretch </span>
-            <span className="font-medium">
-              {longest.speaker}, {minutes(longest.seconds)}
-            </span>
-            <span className="ml-1 font-mono text-muted-foreground">at {clock(longest.at)}</span>
-          </button>
+          <Tooltip>
+            <TooltipTrigger
+              onClick={() => onSeek(longest.at)}
+              className="rounded-lg border px-2.5 py-1.5 text-left outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50"
+            >
+              <span className="text-muted-foreground">Longest stretch </span>
+              <span className="font-medium">
+                {longest.speaker}, {minutes(longest.seconds)}
+              </span>
+              <span className="ml-1 font-mono text-muted-foreground">at {clock(longest.at)}</span>
+            </TooltipTrigger>
+            <TooltipContent sideOffset={6} className="max-w-64 text-pretty">
+              {MEANING.longestStretch}
+            </TooltipContent>
+          </Tooltip>
         )}
-        <span className="rounded-lg border px-2.5 py-1.5">
-          <span className="text-muted-foreground">Questions asked </span>
-          <span className="font-medium tabular-nums">{insights.questions}</span>
+        <span className="rounded-lg border px-2.5 py-1.5 text-muted-foreground">
+          <Explained label="Questions asked">{MEANING.questionsAsked}</Explained>{" "}
+          <span className="font-medium text-foreground tabular-nums">{insights.questions}</span>
         </span>
       </div>
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-xs text-muted-foreground">
-            <th className="pb-1.5 font-normal">Speaker</th>
-            <th className="pb-1.5 text-right font-normal" title="Words per minute while talking">
-              Pace
-            </th>
-            <th className="pb-1.5 text-right font-normal">Longest</th>
-            <th className="pb-1.5 text-right font-normal">Questions</th>
-            <th className="pb-1.5 text-right font-normal" title="Started while the other side of the call was still talking">
-              Talked over
-            </th>
-          </tr>
-        </thead>
-        <tbody className="tabular-nums">
-          {insights.speakers.map((s) => (
-            <tr key={s.speaker} className="border-t">
-              <td className="py-1.5">
-                <span className="flex items-center gap-2">
-                  <span className={cn("size-2 shrink-0 rounded-full", colorOf(s.speaker).dot)} />
-                  <span className="truncate">{s.speaker}</span>
-                </span>
-              </td>
-              <td className="py-1.5 text-right">{s.words_per_minute ? `${s.words_per_minute} wpm` : "-"}</td>
-              <td className="py-1.5 text-right">{minutes(s.longest)}</td>
-              <td className="py-1.5 text-right">{s.questions}</td>
-              <td className="py-1.5 text-right">{s.interruptions}</td>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-xs whitespace-nowrap text-muted-foreground">
+              <th className="w-full pb-2 text-left font-normal">Speaker</th>
+              {(
+                [
+                  ["Pace", MEANING.pace],
+                  ["Longest", MEANING.longest],
+                  ["Questions", MEANING.questions],
+                  ["Talked over", MEANING.talkedOver],
+                ] as const
+              ).map(([label, meaning]) => (
+                <th key={label} className="pb-2 pl-10 text-right font-normal">
+                  <Explained label={label}>{meaning}</Explained>
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody className="tabular-nums">
+            {insights.speakers.map((s) => (
+              <tr key={s.speaker} className="border-t">
+                <td className="max-w-0 py-2">
+                  <span className="flex items-center gap-2">
+                    <span className={cn("size-2 shrink-0 rounded-full", colorOf(s.speaker).dot)} />
+                    <span className="truncate">{s.speaker}</span>
+                  </span>
+                </td>
+                <td className="py-2 pl-10 text-right whitespace-nowrap">
+                  {s.words_per_minute ? `${s.words_per_minute} wpm` : "-"}
+                </td>
+                <td className="py-2 pl-10 text-right whitespace-nowrap">{minutes(s.longest)}</td>
+                <td className="py-2 pl-10 text-right">{s.questions}</td>
+                <td className="py-2 pl-10 text-right">{s.interruptions}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

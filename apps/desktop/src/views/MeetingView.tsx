@@ -844,20 +844,10 @@ export function MeetingView({
             </TabsContent>
 
             <TabsContent value="speakers">
-              <div className="grid gap-5 lg:grid-cols-[1fr_1.2fr]">
-                <div className="space-y-5">
-                  <div className="rounded-xl border bg-card p-4">
-                    <h3 className="mb-3 text-xs font-medium tracking-wide text-muted-foreground uppercase">Talk time</h3>
-                    <TalkTimeBars talk={data.talk_time} colorOf={colorOf} />
-                  </div>
-                  {data.insights.speakers.length > 0 && (
-                    <div className="rounded-xl border bg-card p-4">
-                      <h3 className="mb-3 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                        Conversation
-                      </h3>
-                      <ConversationStats insights={data.insights} colorOf={colorOf} onSeek={seek} />
-                    </div>
-                  )}
+              <div className="grid items-start gap-5 lg:grid-cols-[1fr_1.2fr]">
+                <div className="rounded-xl border bg-card p-4">
+                  <h3 className="mb-3 text-xs font-medium tracking-wide text-muted-foreground uppercase">Talk time</h3>
+                  <TalkTimeBars talk={data.talk_time} colorOf={colorOf} />
                 </div>
                 <div>
                   <div className="mb-2 flex items-center justify-between">
@@ -898,6 +888,14 @@ export function MeetingView({
                     Naming a voice teaches ZachCap what they sound like; it is recognized in later meetings.
                   </p>
                 </div>
+                {data.insights.speakers.length > 0 && (
+                  <div className="rounded-xl border bg-card p-4 lg:col-span-2">
+                    <h3 className="mb-3 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                      Conversation
+                    </h3>
+                    <ConversationStats insights={data.insights} colorOf={colorOf} onSeek={seek} />
+                  </div>
+                )}
               </div>
             </TabsContent>
           </Tabs>
