@@ -1022,4 +1022,5 @@ def test_a_library_from_before_opens_as_it_is(tmp_path):
     assert brief.apply_all(store) == [meeting]
     store.close()
     tables = {row.split()[2].strip('"') for row in set(dump()) ^ set(before) if "INSERT" in row}
-    assert tables == {"changes", "meeting_speakers", "meetings", "settings"}
+    # ("sends" holds the meeting's revision: what would be sent changed.)
+    assert tables == {"changes", "meeting_speakers", "meetings", "sends", "settings"}
