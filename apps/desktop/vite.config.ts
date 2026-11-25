@@ -29,6 +29,10 @@ export default defineConfig(() => ({
           port: 1421,
         }
       : undefined,
+    // The About page shows these two, which are the repo's.
+    fs: {
+      allow: [".", "../../CHANGELOG.md", "../../LICENSE"].map((path) => fileURLToPath(new URL(path, import.meta.url))),
+    },
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
