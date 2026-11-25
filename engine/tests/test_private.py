@@ -220,6 +220,9 @@ def test_a_library_from_before_meetings_could_be_private(library, tmp_path: Path
     store, shared, private = library
     store.close()
     old = sqlite3.connect(tmp_path / "zachcap.db")
+    triggers = "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'outbox_%'"
+    for (name,) in old.execute(triggers).fetchall():  # nor had it these
+        old.execute(f"DROP TRIGGER {name}")
     old.execute("ALTER TABLE meetings DROP COLUMN private")
     old.commit()
     old.close()

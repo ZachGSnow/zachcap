@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import paths
+from . import outbox, paths
 from .voiceprint import Match, from_blob, to_blob
 
 SCHEMA = """
@@ -285,6 +285,7 @@ class Store:
         if "edited" not in columns:
             self.db.execute("ALTER TABLE segments ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
             self.db.commit()
+        outbox.migrate(self.db)
         if self.version() < VERSION:
             self.db.execute(f"PRAGMA user_version = {VERSION}")
             self.db.commit()
@@ -748,20 +749,31 @@ class Store:
 
     def replace_action_items(self, meeting_id: int, items: list[dict]) -> None:
         """Store a meeting's action items after a (re)summary without losing what was ticked
-        off: a new item that matches a done one (the same task, perhaps reworded or now with
-        a real name as owner) stays done, and done items the new summary left out are kept."""
-        done = [
+        off, or which is which: a new item that matches one before (the same task, perhaps
+        reworded or now with a real name as owner) keeps its uid, and stays done if it was.
+        Done items the new summary left out are kept. One that went and is said again (after
+        a redaction, which takes them all) keeps its uid too."""
+        before = [
             dict(row)
             for row in self.db.execute(
-                "SELECT * FROM action_items WHERE meeting_id = ? AND status = 'done'",
+                "SELECT * FROM action_items WHERE meeting_id = ?", (meeting_id,)
+            )
+        ]
+        matches = _same_items(items, before)
+        kept = {match["uid"] for match in matches if match is not None}
+        left = [item for item in before if item["uid"] not in kept]
+        gone = [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT g.* FROM items_gone g JOIN meetings m ON m.uid = g.meeting_uid "
+                "WHERE m.id = ? AND g.said_at IS NOT NULL",
                 (meeting_id,),
             )
         ]
         rows = []
-        for item in items:
-            match = _same_task(item["task"], done)
-            if match is not None:
-                done.remove(match)
+        for item, match in zip(items, matches, strict=True):
+            uid = match["uid"] if match else _said_again(item, gone)
+            done = match is not None and match["status"] == "done"
             rows.append(
                 (
                     meeting_id,
@@ -770,19 +782,20 @@ class Store:
                     item.get("due"),
                     item.get("said_at"),
                     item.get("kind", "action"),
-                    "done" if match else "open",
-                    match["done_at"] if match else None,
+                    "done" if done else "open",
+                    match["done_at"] if done else None,
+                    uid,
                 )
             )
         rows += [
             (meeting_id, d["owner"], d["task"], d["due"], d["said_at"], d["kind"], "done",
-             d["done_at"])
-            for d in done
+             d["done_at"], d["uid"])
+            for d in left if d["status"] == "done"
         ]  # fmt: skip
         self.db.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
         self.db.executemany(
             "INSERT INTO action_items (meeting_id, owner, task, due, said_at, kind, status, "
-            "done_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "done_at, uid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         self._commit()
@@ -1257,12 +1270,48 @@ def _normalized(text: str) -> str:
     return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
 
 
-def _same_task(task: str, candidates: list[dict], threshold: float = 0.8) -> dict | None:
-    """The candidate describing the same task, allowing for rewording by a new summary."""
-    wanted = _normalized(task)
-    best, best_ratio = None, threshold
-    for candidate in candidates:
-        ratio = SequenceMatcher(None, wanted, _normalized(candidate["task"])).ratio()
-        if ratio >= best_ratio:
-            best, best_ratio = candidate, ratio
-    return best
+SAME = 0.8  # two wordings this alike are the same task
+NEARLY = 0.45  # ... and this alike, said at the same moment
+MOMENT = 15.0  # seconds apart, at most, for "the same moment"
+AGAIN = 2.0  # ... and for one that went and is said again, of which only that is known
+
+
+def _alike(one: str, other: str) -> float:
+    """How alike two wordings of a task are, 0 to 1: letter by letter, or by the words of the
+    shorter one that are in the longer ("Send the plan", "Send the plan to Dana")."""
+    a, b = _normalized(one), _normalized(other)
+    words = sorted((set(a.split()), set(b.split())), key=len)
+    shared = len(words[0] & words[1]) / len(words[0]) if len(words[0]) >= 3 else 0.0
+    return max(SequenceMatcher(None, a, b).ratio(), 0.99 * shared)
+
+
+def _near(one: float | None, other: float | None, most: float) -> bool:
+    return one is not None and other is not None and abs(one - other) <= most
+
+
+def _same_items(items: list[dict], before: list[dict]) -> list[dict | None]:
+    """For each of a new summary's action items the one before that it is, allowing for
+    rewording, the surest pairs first (a done one before an open one), each used once."""
+    pairs = []
+    for n, item in enumerate(items):
+        for o, old in enumerate(before):
+            alike = _alike(item["task"], old["task"])
+            moment = _near(item.get("said_at"), old["said_at"], MOMENT)
+            if alike >= SAME or (moment and alike >= NEARLY):
+                pairs.append((-alike - 0.1 * moment, old["status"] != "done", n, o))
+    found: list[dict | None] = [None] * len(items)
+    used: set[int] = set()
+    for _, _, n, o in sorted(pairs):
+        if found[n] is None and o not in used:
+            found[n] = before[o]
+            used.add(o)
+    return found
+
+
+def _said_again(item: dict, gone: list[dict]) -> str | None:
+    """The uid of an item that went, when this one is by the same person at the same moment."""
+    for old in gone:
+        if old["owner"] == item["owner"] and _near(item.get("said_at"), old["said_at"], AGAIN):
+            gone.remove(old)
+            return old["uid"]
+    return None

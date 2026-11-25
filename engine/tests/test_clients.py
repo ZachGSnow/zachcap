@@ -93,6 +93,9 @@ def test_the_client_goes_with_the_meeting(store: Store):
 def test_a_library_not_yet_opened_to_write_still_lists(store: Store, tmp_path: Path):
     """The MCP server reads without adding columns: a library from before tickets and
     clients still lists and shows its meetings."""
+    triggers = "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'outbox_%'"
+    for (name,) in store.db.execute(triggers).fetchall():  # nor had it these
+        store.db.execute(f"DROP TRIGGER {name}")
     for column in ("ticket", "client", "ticket_source"):
         store.db.execute(f"ALTER TABLE meetings DROP COLUMN {column}")
     store.db.commit()

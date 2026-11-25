@@ -16,7 +16,7 @@ from pathlib import Path
 
 import soundfile as sf
 
-from . import audio, pipeline, snapshot
+from . import audio, outbox, pipeline, snapshot
 from .store import REDACTED, Store
 
 TRACKS = ("mic", "system")
@@ -158,11 +158,15 @@ def redact(
             raise
         except Exception as exc:  # a damaged file: the words still leave the text
             audio_error = str(exc) or type(exc).__name__
-    removed, replaced = store.redact_lines(meeting_id, start, end)
-    derived = store.forget_derived(meeting_id, start, end)
+    # All of it or none, with what the server is to take out (outbox.py).
+    with store.transaction():
+        outbox.redacting(store.db, meeting_id, start, end)
+        removed, replaced = store.redact_lines(meeting_id, start, end)
+        derived = store.forget_derived(meeting_id, start, end)
+        outbox.redacted(store.db, meeting_id, start, end)
+        moved = _move_samples(store, meeting_id, start, end)
     for note_id in derived["snapshots"]:
         snapshot.remove_pictures(folder, note_id)
-    moved = _move_samples(store, meeting_id, start, end)
     scrubbed = store.scrub_deleted_text()
     return {
         "audio_files": files,
