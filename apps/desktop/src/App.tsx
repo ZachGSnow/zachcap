@@ -25,6 +25,7 @@ import { usePoll } from "@/hooks/usePoll";
 import { api, connect, isTauri, waitForEngine, type Meeting, type Stats } from "@/lib/engine";
 import { backText, stoppedText, type EngineExit } from "@/lib/engineStops";
 import { notify, reason } from "@/lib/feedback";
+import { AboutView } from "@/views/AboutView";
 import { ActionsView } from "@/views/ActionsView";
 import { AskView } from "@/views/AskView";
 import { MeetingView } from "@/views/MeetingView";
@@ -325,6 +326,7 @@ function Shell() {
               <TopicsView onOpen={openMeeting} onSettings={() => setView({ name: "settings" })} />
             )}
             {view.name === "settings" && <SettingsView />}
+            {view.name === "about" && <AboutView />}
           </ErrorBoundary>
         </main>
       </div>

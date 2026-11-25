@@ -63,6 +63,8 @@ Keys are stored in Windows Credential Manager. Your meetings, voices and setting
 
 Windows **Smart App Control**, when it is on, blocks parts of the speech libraries (they aren't signed by their makers), and the engine can't start. If the startup screen reports that, Smart App Control has to be turned off (Windows Security > App & browser control).
 
+What's new in each version is under **About** in the app, and in [CHANGELOG.md](CHANGELOG.md).
+
 ### Build from source
 
 Requirements: [uv](https://docs.astral.sh/uv/), Node.js LTS, and Rust with the Visual Studio C++ build tools.

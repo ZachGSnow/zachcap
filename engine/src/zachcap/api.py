@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import platform
 import re
 import secrets as pysecrets
 import shutil
@@ -34,6 +35,7 @@ from pydantic import BaseModel
 
 from . import (
     __version__,
+    about,
     apikeys,
     attachments,
     audio,
@@ -1078,6 +1080,22 @@ def create_app(token: str) -> FastAPI:
     @app.get("/api/health", dependencies=auth)
     def health():
         return {"ok": True, "version": __version__, "data": str(paths.home())}
+
+    @app.get("/api/about", dependencies=auth)
+    def about_zachcap(store: Store = Depends(db)):
+        """This installation, for the About page. Whether speech runs on a GPU: as this start
+        found, else as the last one did, else not known (null)."""
+        usable = gpu.known()
+        if usable is None:
+            usable = {"1": True, "0": False}.get(store.setting(live.GPU_SETTING))
+        return {
+            "version": __version__,
+            "build": about.build(),
+            "python": platform.python_version(),
+            "windows": about.windows(),
+            "gpu": usable,
+            "data": str(paths.home()),
+        }
 
     @app.get("/api/stats", dependencies=auth)
     def stats(store: Store = Depends(db)):

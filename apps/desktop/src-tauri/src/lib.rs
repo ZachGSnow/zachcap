@@ -491,6 +491,17 @@ fn open_data_folder() -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Opens ZachCap's releases on GitHub in the browser (from About). It takes no address, so the
+/// page can't ask it to open anything else.
+#[tauri::command]
+fn open_releases() -> Result<(), String> {
+    Command::new("explorer")
+        .arg("https://github.com/ZachGSnow/zachcap/releases")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// The Python engine: ZACHCAP_ENGINE_DIR when set, else the one installed with the app (the
 /// installer puts it and uv next to the exe), else the repo's `engine/` in development.
 fn launch_for(app: &AppHandle) -> Launch {
@@ -1848,6 +1859,7 @@ pub fn run() {
             engine_exited,
             restart_engine,
             open_data_folder,
+            open_releases,
             set_recording_indicator,
             set_dictation,
             set_shortcuts,

@@ -220,6 +220,18 @@ export type Stats = {
   by_day: { day: string; seconds: number }[];
 };
 
+/** This installation, for the About page. */
+export type About = {
+  version: string;
+  /** The installer's stamp, "0.4.0 480063a 2026-11-24T23:35:02Z"; null from source. */
+  build: string | null;
+  python: string;
+  windows: string;
+  /** Whether there's a CUDA GPU for the speech models; null while that isn't known. */
+  gpu: boolean | null;
+  data: string;
+};
+
 export type SearchHit = {
   meeting_id: number;
   title: string;
