@@ -6,6 +6,7 @@ import {
   listed,
   meetingLine,
   menuOf,
+  neverThereLine,
   sendsLine,
   statusLine,
   waitLine,
@@ -116,5 +117,12 @@ describe("ZachCore in words", () => {
     expect(menuOf({ ...MEETING, kept: "It is private", waiting: true })).toEqual({ send: false, takeBack: true });
     expect(menuOf({ ...MEETING, taking_back: true, there: true })).toEqual({ send: false, takeBack: false });
     expect(menuOf(null)).toEqual({ send: false, takeBack: false });
+  });
+});
+
+describe("neverThereLine", () => {
+  it("asks about what ZachCore still has of a client none of whose meetings go", () => {
+    expect(neverThereLine("Contoso", 1)).toBe("ZachCore still has 1 meeting of Contoso, none of whose meetings go: take them back?");
+    expect(neverThereLine("Contoso", 3)).toContain("3 meetings of Contoso");
   });
 });

@@ -254,3 +254,29 @@ def test_how_many_wait_and_why(client, store):
     store.db.commit()
     status = client.get("/api/zachcore", headers=AUTH).json()
     assert status["elsewhere"][0]["address"] == "https://old.example.com"
+
+
+def test_a_meeting_that_becomes_a_never_clients_after_it_went_is_asked_about(client, store):
+    """Only clients added to "never" were asked about; a meeting can become one's later (a
+    person's company, the meeting's client), and its copy stayed in ZachCore unasked."""
+    put(client, address=ADDRESS, key="zachcap.k", on=True)
+    m = call(store)
+    store.update_meeting(m, client="Northwind", client_source="user")  # Northwind's when it went
+    sent_to(store, "meeting-1", f"work {ADDRESS}")
+    put(client, never=["Contoso"])
+
+    def asked() -> dict:
+        return client.get("/api/zachcore", headers=AUTH).json()["never_there"]
+
+    assert asked() == {}
+    store.update_meeting(m, client="Contoso", client_source="user")  # now it is Contoso's
+    assert asked() == {"Contoso": 1}
+    kept = client.post("/api/zachcore/keep", headers=AUTH, json={"client": "contoso"})
+    assert kept.json() == {"kept": 1} and asked() == {}  # kept there, as chosen
+
+    other = call(store, "meeting-2")
+    store.update_meeting(other, client="Contoso", client_source="user")
+    sent_to(store, "meeting-2", f"work {ADDRESS}")
+    assert asked() == {"Contoso": 2}  # one more there since: asked again
+    client.post("/api/zachcore/take-back", headers=AUTH, json={"client": "Contoso"})
+    assert asked() == {}  # being taken back

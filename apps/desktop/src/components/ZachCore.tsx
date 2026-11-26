@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils";
 import {
   PARTS,
   host,
+  neverThereLine,
   sendsLine,
   statusLine,
   waitLine,
@@ -176,6 +177,13 @@ function Setup({ status, firstTime, onDone }: { status: ZachCoreStatus; firstTim
         toast.success(`${client}'s meetings are taken back from ZachCore`);
       } catch (error) {
         toast.error("Couldn't take them back", { description: reason(error) });
+      }
+    }
+    else {
+      try {
+        await api("/api/zachcore/keep", { method: "POST", json: { client } });
+      } catch (error) {
+        toast.error("Couldn't keep them there", { description: reason(error) });
       }
     }
     const left = neverThere.filter(([name]) => name !== client);
@@ -439,6 +447,17 @@ export function ZachCore() {
       toast.error("Couldn't change it", { description: reason(error) });
     }
   };
+  const answer = async (client: string, takeBack: boolean) => {
+    try {
+      if (takeBack) {
+        await api("/api/zachcore/take-back", { method: "POST", json: { client } });
+        toast.success(`${client}'s meetings are taken back from ZachCore`);
+      } else await api("/api/zachcore/keep", { method: "POST", json: { client } });
+      await refresh();
+    } catch (error) {
+      toast.error(takeBack ? "Couldn't take them back" : "Couldn't keep them there", { description: reason(error) });
+    }
+  };
   return (
     <>
       <div className="grid gap-1 px-4 py-3.5">
@@ -456,6 +475,17 @@ export function ZachCore() {
           <>
             <p className="text-xs text-muted-foreground">{waitLine(status)}</p>
             <p className="text-xs text-muted-foreground">{sendsLine(status)}</p>
+            {Object.entries(status.never_there ?? {}).map(([client, count]) => (
+              <div key={client} className="mt-1 flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2">
+                <span className="min-w-0 flex-1 text-xs">{neverThereLine(client, count)}</span>
+                <Button size="xs" variant="outline" onClick={() => void answer(client, false)}>
+                  Keep them there
+                </Button>
+                <Button size="xs" onClick={() => void answer(client, true)}>
+                  Take them back
+                </Button>
+              </div>
+            ))}
           </>
         ) : (
           <p className="text-xs text-muted-foreground">

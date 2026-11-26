@@ -130,6 +130,12 @@ export function whyText(why: ZachCoreWhy | null, now = new Date()): string | nul
 }
 
 /** The status line's first part: "On, work at notes.example.com". */
+/** ZachCore still has meetings of a client none of whose meetings go: the question. */
+export function neverThereLine(client: string, count: number): string {
+  const meetings = count === 1 ? "1 meeting" : `${count} meetings`;
+  return `ZachCore still has ${meetings} of ${client}, none of whose meetings go: take them back?`;
+}
+
 export function statusLine(status: ZachCoreStatus): string {
   if (!status.address) return "Not set up";
   return `${status.on ? "On" : "Off"}, ${status.space} at ${host(status.address)}`;

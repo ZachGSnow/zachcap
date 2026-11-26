@@ -169,6 +169,10 @@ class OlderBody(BaseModel):
     since: str | None = None  # YYYY-MM-DD: recorded from that day; all when not given
 
 
+class KeepBody(BaseModel):
+    client: str  # a client none of whose meetings go: what ZachCore has of it stays
+
+
 class TakeBackBody(BaseModel):
     client: str | None = None  # only that client's meetings; all of them when not given
 
@@ -284,6 +288,7 @@ class SettingsBody(BaseModel):
     watch_existing: bool = False  # with watch_folder: import the files already there too
 
 
+NEVER_KEPT = "zachcore_never_kept"  # {client, casefolded: how many ZachCore had when kept}
 KEEP_AUDIO_CHOICES = (privacy.UNTIL_PROCESSED, 0, 7, 30, 90, 365)
 WRITTEN_KEPT = 100  # documents and answers by the model on this PC, for the page
 NO_STORE = {"Cache-Control": "no-store"}
@@ -1258,6 +1263,37 @@ def create_app(token: str) -> FastAPI:
             if (name or "").casefold() == wanted
         ]
 
+    def still_there(store: Store) -> list[str]:
+        """Meetings ZachCore has, but for those being taken back now."""
+        going = {row[0] for row in store.db.execute("SELECT uid FROM outbox WHERE what = 'recall'")}
+        return [uid for uid in outbox.there(store.db) if uid not in going]
+
+    def never_there(store: Store) -> dict[str, int]:
+        """For each client none of whose meetings go: how many ZachCore still has, when that
+        is more than when you last chose to keep them there. A meeting can become a client's
+        after it went (a person's company, the meeting's client), and nothing asked then."""
+        names = zachcore.never(store)
+        uids = still_there(store) if names else []
+        if not uids:
+            return {}
+        kept = never_kept(store)
+        clients_of = zachcore_clients(store, uids)
+        found = {}
+        for name in names:
+            count = sum((c or "").casefold() == name.casefold() for c in clients_of.values())
+            if count > kept.get(name.casefold(), 0):
+                found[name] = count
+        return found
+
+    def never_kept(store: Store) -> dict[str, int]:
+        try:
+            kept = json.loads(store.setting(NEVER_KEPT) or "{}")
+        except ValueError:
+            return {}
+        if not isinstance(kept, dict):
+            return {}
+        return {str(k): v for k, v in kept.items() if type(v) is int}
+
     def older(store: Store, since: str | None) -> list[str]:
         """Meetings recorded before sending was turned on that may go now: processed, not
         private, not taken back by hand, of no client none of whose meetings go."""
@@ -1274,7 +1310,16 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/zachcore", dependencies=auth)
     def zachcore_status(store: Store = Depends(db)):
-        return sender.status(store)
+        return {**sender.status(store), "never_there": never_there(store)}
+
+    @app.post("/api/zachcore/keep", dependencies=auth)
+    def zachcore_keep(body: KeepBody, store: Store = Depends(db)):
+        """What ZachCore has of a client none of whose meetings go stays there, as you chose:
+        asked again only when it has more of them."""
+        kept = never_kept(store)
+        kept[body.client.casefold()] = len(of_client(store, still_there(store), body.client))
+        store.set_setting(NEVER_KEPT, json.dumps(kept))
+        return {"kept": kept[body.client.casefold()]}
 
     @app.put("/api/zachcore", dependencies=auth)
     def zachcore_change(body: ZachCoreChange, store: Store = Depends(db)):
