@@ -1,12 +1,11 @@
 """A small ZachCore for the tests, on 127.0.0.1: it answers the sender as ZachCore's own server
-does (server/src/intake.ts and host.ts at its commit 6c1fceb), and keeps what it was sent.
+does (server/src/intake.ts and host.ts at its commit 1eb45f6), and keeps what it was sent.
 
 It knows one app key and the spaces work and home. A message older than the one it has is 409,
 the same revision again is 200 with "same"; what a message says replaces what is there, even
-empty, and what it leaves out stays (as ZachCore does since its change of 2026-11-25); recall
-and redact are remembered, so nothing older gets in behind them; a transcript read before one,
-or of a meeting taken back, is 409; paused, messages and transcripts are 423; out of writing,
-all of it is 503 with Retry-After.
+empty, and what it leaves out stays; recall and redact are remembered, so nothing older gets in
+behind them; a transcript read before one, or of a meeting taken back, is 409; paused, messages
+and transcripts are 423; out of writing, all of it is 503 with Retry-After.
 
 It can be made to fail: answer one status next (``answer``), take a request in and close the
 connection without answering (``lose``: done, ``late``: kept, to be done later), not be there at
