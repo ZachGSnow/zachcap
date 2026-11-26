@@ -19,6 +19,7 @@ What's new in each version of ZachCap, newest first. It's in the app as well, un
 
 ### Fixed
 
+- **A meeting that becomes a never client's after it went to ZachCore** is asked about in Settings, Keep them there or Take them back, as a client set to never is. Its copy stayed there unasked.
 - **A summary written on this PC of a meeting that isn't private** no longer reads a voice as someone known only from private meetings ("Speaker 3 (Dana?)"), as Claude's summaries never did: what it writes can go to Claude and ZachCore.
 - **A meeting left on a ZachCore server you moved away from** is taken back from there too when it is made private, deleted or redacted later. Only the new server's copy was.
 - **A ZachCore server that is gone, refuses or answers wrongly** holds back only what goes to it: a take-back waiting for an old server no longer stops meetings going to the new one, two servers that refuse the key wait instead of being asked again and again, and an answer that can't be read, or one that never ends, no longer stops sending.
