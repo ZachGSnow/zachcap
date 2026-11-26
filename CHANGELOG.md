@@ -7,6 +7,7 @@ What's new in each version of ZachCap, newest first. It's in the app as well, un
 ### Fixed
 
 - **What leaves the PC** is said right in About and the README now that meetings can go to ZachCore: a summary written on this PC goes there too while sending is on.
+- **An action item follows its voice.** Once you name the voice that promised it, or ZachCap recognizes it, the item shows that person, as ZachCore does, and one your own voice promised counts as yours. It kept the name the summary wrote, like Speaker 2, until the next summary.
 
 ## 0.6.0 - 2026-11-25
 

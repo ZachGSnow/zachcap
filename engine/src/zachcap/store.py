@@ -868,6 +868,10 @@ class Store:
     def action_items(
         self, status: str | None = None, meeting_id: int | None = None
     ) -> list[sqlite3.Row]:
+        """Action items with their meeting's title and start. `owner` is whom it is now: the
+        person its voice is, once that voice is named or recognized (a suggestion isn't), as
+        ZachCore gets it; else the name the summary wrote, which `owner_written` always is.
+        Every column of the table is listed by name (a test holds this to the table)."""
         clauses, params = [], []
         if status in ("open", "done"):
             clauses.append("a.status = ?")
@@ -877,8 +881,14 @@ class Store:
             params.append(meeting_id)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.db.execute(
-            "SELECT a.*, m.title AS meeting_title, m.started_at AS meeting_started_at "
-            f"FROM action_items a JOIN meetings m ON m.id = a.meeting_id {where} "
+            "SELECT a.id, a.meeting_id, CASE WHEN v.status IN ('auto', 'confirmed') "
+            "AND p.name IS NOT NULL THEN p.name ELSE a.owner END AS owner, "
+            "a.owner AS owner_written, a.task, a.due, a.said_at, a.kind, a.status, "
+            "a.created_at, a.done_at, a.uid, a.voice_id, a.quote, "
+            "m.title AS meeting_title, m.started_at AS meeting_started_at "
+            "FROM action_items a JOIN meetings m ON m.id = a.meeting_id "
+            "LEFT JOIN meeting_speakers v ON v.id = a.voice_id "
+            f"LEFT JOIN people p ON p.id = v.person_id {where} "
             "ORDER BY a.status = 'done', m.started_at DESC, a.id",
             params,
         ).fetchall()
