@@ -11,6 +11,7 @@ import {
   Lock,
   MonitorCheck,
   Scale,
+  Send,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
@@ -189,7 +190,7 @@ export function AboutView() {
         </p>
 
         <Heading icon={<ShieldCheck className="size-3.5" />}>What stays where</Heading>
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Where icon={<HardDrive className="size-4" />} title="On this PC">
             Recordings, transcripts, voices, notes and the search index. Audio and voiceprints never leave it.
           </Where>
@@ -197,8 +198,13 @@ export function AboutView() {
             If you add an API key: the words of a meeting to summarize or answer from, with your notes and files. Never a
             private meeting.
           </Where>
+          <Where icon={<Send className="size-4" />} title="In your ZachCore">
+            If you turn it on in Settings: each meeting's summary, tasks and facts, and its transcript if you choose,
+            sent to your own server. Never audio, and never a private meeting.
+          </Where>
           <Where icon={<Lock className="size-4" />} title="Or nothing at all">
-            With a model in Ollama, summaries and documents are written on this PC as well, and nothing is sent.
+            With a model in Ollama, summaries and documents are written on this PC as well. With ZachCore off too, nothing
+            is sent.
           </Where>
         </div>
 

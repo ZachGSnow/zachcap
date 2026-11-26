@@ -2,6 +2,12 @@
 
 What's new in each version of ZachCap, newest first. It's in the app as well, under **About**. The releases themselves are on [GitHub](https://github.com/ZachGSnow/zachcap/releases).
 
+## Unreleased
+
+### Fixed
+
+- **What leaves the PC** is said right in About and the README now that meetings can go to ZachCore: a summary written on this PC goes there too while sending is on.
+
 ## 0.6.0 - 2026-11-25
 
 Your meetings in ZachCore.
