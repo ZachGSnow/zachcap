@@ -20,6 +20,7 @@ import { api, type ActionItem, type RecipeResult, type Summary, type Writing } f
 import { attempt, copyText, reason } from "@/lib/feedback";
 import { clock, toSeconds, type SpeakerColor } from "@/lib/format";
 import { summaryMarkdown } from "@/lib/markdown";
+import { factAbout, factsOf, quoted, secondOf } from "@/lib/said";
 import { cn } from "@/lib/utils";
 import { costLabel, modelLabel, writingLabel, type Writer } from "@/lib/writer";
 import { earlier, isHere, outcome, tell, type Asked } from "@/lib/writing";
@@ -33,6 +34,19 @@ function Section({ title, count, children }: { title: string; count?: number; ch
       </h3>
       {children}
     </section>
+  );
+}
+
+/** When something was said, one click from playing it (nothing when the summary kept no time). */
+function SaidAt({ seconds, onSeek }: { seconds: number | null; onSeek?: (seconds: number) => void }) {
+  if (seconds == null || !onSeek) return null;
+  return (
+    <button
+      onClick={() => onSeek(seconds)}
+      className="ml-2 font-mono text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:underline"
+    >
+      said at {clock(seconds)}
+    </button>
   );
 }
 
@@ -70,6 +84,7 @@ export function ActionRow({
       </button>
       <div className="min-w-0 flex-1">
         <div className={cn("text-sm", done && "text-muted-foreground line-through")}>{item.task}</div>
+        {item.quote && <div className="mt-0.5 text-xs text-muted-foreground italic">{quoted(item.quote)}</div>}
         <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
           <span className={cn("inline-flex items-center gap-1 rounded-full px-2 py-px font-medium", color.soft, color.text)}>
             {item.owner}
@@ -524,6 +539,7 @@ export function SummaryPanel({
   }
 
   const c = summary.content;
+  const facts = factsOf(c.facts);
   const open = items.filter((i) => i.status === "open").length;
 
   return (
@@ -626,7 +642,10 @@ export function SummaryPanel({
             {c.decisions.map((decision, index) => (
               <li key={index} className="flex gap-2">
                 <Check className="mt-0.5 size-4 shrink-0 text-emerald-600" />
-                {decision}
+                <span>
+                  {decision}
+                  <SaidAt seconds={secondOf(c.decisions_said_at, index)} onSeek={onSeek} />
+                </span>
               </li>
             ))}
           </ul>
@@ -660,7 +679,30 @@ export function SummaryPanel({
         <Section title="Open questions" count={c.open_questions.length}>
           <ul className="list-disc space-y-1 pl-5 text-sm">
             {c.open_questions.map((question, index) => (
-              <li key={index}>{question}</li>
+              <li key={index}>
+                {question}
+                <SaidAt seconds={secondOf(c.open_questions_said_at, index)} onSeek={onSeek} />
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
+
+      {facts.length > 0 && (
+        <Section title="Facts" count={facts.length}>
+          <p className="-mt-1 mb-2.5 text-xs text-muted-foreground">
+            Lasting facts heard in this meeting, each with the words it came from.
+          </p>
+          <ul className="space-y-2 text-sm">
+            {facts.map((fact, index) => (
+              <li key={index}>
+                <span className="font-medium">{factAbout(fact.about)}</span>{" "}
+                <span className="text-muted-foreground">{fact.name}:</span> {fact.value}
+                <SaidAt seconds={secondOf([fact.said_at], 0)} onSeek={onSeek} />
+                {fact.quote && (
+                  <div className="mt-0.5 text-xs text-muted-foreground italic">{quoted(fact.quote)}</div>
+                )}
+              </li>
             ))}
           </ul>
         </Section>
