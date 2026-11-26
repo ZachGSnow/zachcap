@@ -85,6 +85,7 @@ const KEYS = [
 
 type SettingsChange = Partial<{
   summary_model: string;
+  summary_language: string;
   writer: Writer;
   local_model: string;
   language: string;
@@ -1025,6 +1026,20 @@ export function SettingsView() {
                 value: m.id,
                 label: `${m.label} (about $${((HOUR_INPUT_TOKENS * m.input_usd + HOUR_OUTPUT_TOKENS * m.output_usd) / 1e6).toFixed(2)})`,
               }))}
+            />
+          </Row>
+          <Row
+            label="Write summaries in"
+            help="Summaries and documents, by Claude or on this PC: in the language the meeting was held in, or always in one you pick."
+          >
+            <Select
+              label="Write summaries in"
+              value={settings?.summary_language ?? "meeting"}
+              onChange={(value) => void save({ summary_language: value })}
+              options={[
+                { value: "meeting", label: "The meeting's language" },
+                ...(settings?.summary_languages ?? []).map((name) => ({ value: name, label: name })),
+              ]}
             />
           </Row>
           <LocalModel chosen={settings?.local_model ?? ""} onChoose={(name) => void save({ local_model: name })} />

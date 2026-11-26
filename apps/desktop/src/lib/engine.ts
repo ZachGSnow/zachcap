@@ -360,6 +360,8 @@ export type RefusedFolder = { folder: string; reason: string };
 
 export type Settings = {
   summary_model: string;
+  summary_language?: string;
+  summary_languages?: string[];
   /** Who writes summaries and documents unless asked otherwise. */
   writer: "claude" | "local";
   /** The model on this PC, by Ollama's name; "" for none. */

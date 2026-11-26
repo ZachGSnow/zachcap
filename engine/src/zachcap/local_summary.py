@@ -441,7 +441,7 @@ def written(
 ) -> dict:
     """The summary of a meeting: in one call, or part by part and then put together."""
     me = store.me()["name"]
-    words = spellings(store)
+    words = spellings(store) + summarize.language_line(store)
     heading = summarize.heading(meeting)
     names = list(dict.fromkeys(line.speaker for line in lines))
     names = [name for name in names if name != UNKNOWN] or names  # not somebody's name
@@ -1028,7 +1028,7 @@ def document(
             f"Rewrite it: {change}\n\nKeep what the edits added. Otherwise use only facts from "
             "the meeting. Answer with the whole new version and nothing else."
         )
-    told = summarize.RECIPE_SYSTEM.format(me=me) + spellings(store)
+    told = summarize.RECIPE_SYSTEM.format(me=me) + spellings(store) + summarize.language_line(store)
     text, by = plain(model, cancel, told, context, ask, DOCUMENT, SUMMARY_CHARS)
     if not text:
         raise ollama.Failed(f"{by} didn't write that.")

@@ -713,7 +713,7 @@ def test_a_pick_that_doesnt_work_out_is_general(meeting, monkeypatch, answer, st
     summarize.summarize(store, meeting_id)
 
     assert len(calls["picks"]) == 1  # never asked twice
-    assert calls["system"] == summarize.SYSTEM.format(me="You")  # General: no focus
+    assert calls["system"] == summarize.SYSTEM.format(me="You") + summarize.language_line(store)
     saved = store.meeting(meeting_id)
     assert (saved["template"], saved["template_source"]) == ("general", "auto")
     assert store.summary(meeting_id)["cost_usd"] == pytest.approx(SUMMARY_COST + PICK_COST)
@@ -727,7 +727,7 @@ def test_a_pick_that_fails_is_general_for_now_and_picked_the_next_time(meeting, 
     summarize.summarize(store, meeting_id)
 
     assert len(calls["picks"]) == 1
-    assert calls["system"] == summarize.SYSTEM.format(me="You")  # General: no focus
+    assert calls["system"] == summarize.SYSTEM.format(me="You") + summarize.language_line(store)
     summary = store.summary(meeting_id)
     assert summary["content"]["template"] == "general"
     assert summary["cost_usd"] == pytest.approx(SUMMARY_COST)
@@ -788,3 +788,19 @@ def test_a_library_that_chose_a_usual_kind_keeps_it(meeting, monkeypatch):
     store.set_setting("summary_template", mine["id"])
     prompts.delete(store, mine["id"])
     assert summarize.meeting_template(store, {"template": None}) == "general"
+
+
+def test_summaries_and_documents_say_what_language_to_write_in(meeting, monkeypatch):
+    store, meeting_id = meeting
+    calls = fake_claude(monkeypatch, sample_summary())
+    summarize.summarize(store, meeting_id)
+    assert calls["system"].endswith("Write in the language the meeting was held in.")
+
+    store.set_setting(summarize.SUMMARY_LANGUAGE, "Spanish")
+    summarize.summarize(store, meeting_id)
+    assert calls["system"].endswith("Write in Spanish, whatever language the meeting was held in.")
+    summarize.recipe(store, meeting_id, "email")
+    assert calls["system"].endswith("Write in Spanish, whatever language the meeting was held in.")
+
+    store.set_setting(summarize.SUMMARY_LANGUAGE, "Klingon")  # none of them: the meeting's own
+    assert summarize.language_line(store).endswith("Write in the language the meeting was held in.")
