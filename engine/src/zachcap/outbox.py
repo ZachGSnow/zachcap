@@ -397,10 +397,7 @@ def move(db: sqlite3.Connection, old: str, take_back_first: bool) -> int:
             continue  # gone, private, taken back, not to be sent, or to be redacted there
         if take_back_first:
             db.execute(_RECALL, (uid,))  # its message waits for it, then goes to the new one
-        else:
-            # A recall of a meeting that is neither private, deleted nor taken back by hand is
-            # one this asked for: it is left there instead.
-            db.execute("DELETE FROM outbox WHERE uid = ? AND what = 'recall'", (uid,))
+        else:  # a recall this asked for before is dropped: nothing is where it was now
             db.execute(
                 "UPDATE sends SET target = NULL, sent_hash = NULL, lines_hash = NULL WHERE uid = ?",
                 (uid,),

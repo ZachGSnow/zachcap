@@ -147,7 +147,9 @@ export function waitLine(status: ZachCoreStatus, now = new Date()): string {
     const why = whyText(status.taking_back_why, now);
     said.push(`${meetings(status.taking_back)} to be taken back${why ? `: ${why}` : ""}.`);
   }
-  if (!status.waiting && !status.taking_back) said.push(status.there ? `${meetings(status.there)} in ZachCore.` : "Nothing sent yet.");
+  if (!status.waiting && !status.taking_back) {
+    said.push(status.there ? `${meetings(status.there)} in ZachCore.` : status.last_sent ? "None in ZachCore now." : "Nothing sent yet.");
+  }
   return said.join(" ");
 }
 

@@ -745,12 +745,16 @@ def test_taking_back_refused_waits_too_until_put_right(store, fake, send, clock)
 
 
 def test_a_client_set_to_never_after_it_went_sends_nothing_more(store, fake, send, clock):
+    store.set_setting(outbox.TRANSCRIPTS, "1")
     m = meeting(store, clock)
+    ready(store, m)
     drain(send, clock)
+    asked = len(fake.requests)  # its message and its transcript
     store.set_setting(zachcore.NEVER, '["contoso"]')
     store.update_meeting(m, title="Changed after")
+    store.edit_segment(store.transcript(m)[0]["id"], "Other words")
     drain(send, clock)
-    assert len(fake.requests) == 1 and waiting(store) == []  # it stays as it was there
+    assert len(fake.requests) == asked and waiting(store) == []  # it stays as it was there
 
 
 def test_send_now_goes_at_once_and_take_back_takes_it_out(store, fake, send, clock):
@@ -771,6 +775,17 @@ def test_send_now_goes_at_once_and_take_back_takes_it_out(store, fake, send, clo
         outbox.send_now(store.db, m)
     drain(send, clock)
     assert body(fake)["title"] == "Changed while taken back" and len(fake.stored) == 2
+    store.update_meeting(m, title="And it goes on going")  # no longer taken back
+    drain(send, clock)
+    assert body(fake)["title"] == "And it goes on going"
+
+
+def test_send_now_never_takes_a_private_meeting(store, fake, send, clock):
+    m = meeting(store, clock)
+    store.update_meeting(m, private=1)
+    with pytest.raises(ValueError), store.transaction():
+        outbox.send_now(store.db, m)
+    assert waiting(store) == [] and drain(send, clock) == 0
 
 
 @pytest.mark.parametrize("first", [True, False])
@@ -791,6 +806,25 @@ def test_another_server_gets_the_meetings_as_new(store, fake, send, clock, keys,
         store.update_meeting(m, private=1)
         drain(send, clock)
         assert other.messages["meeting-1"]["result"] == "private"  # taken back where it is now
+    finally:
+        other.close()
+
+
+def test_a_redaction_for_the_old_server_goes_there_whatever_is_chosen(
+    store, fake, send, clock, keys
+):
+    m = meeting(store, clock)
+    drain(send, clock)
+    old = sender.place(store).target
+    redact.redact(store, m, 250.0, 300.0, with_audio=False)
+    other = Fake()
+    keys[other.address] = other.key
+    try:
+        store.set_setting(sender.ADDRESS, other.address)
+        with store.transaction():
+            assert outbox.move(store.db, old, False) == 0  # it stays where it is, to be redacted
+        drain(send, clock)
+        assert "in/redact" in paths(fake) and other.requests == []
     finally:
         other.close()
 

@@ -95,7 +95,7 @@ function Never({ never, onChange }: { never: string[]; onChange: (never: string[
           add();
         }}
       >
-        <Input list="zachcore-clients" placeholder="A client none of whose meetings go" value={typed} onChange={(event) => setTyped(event.target.value)} className="h-8" />
+        <Input list="zachcore-clients" placeholder="A client none of whose meetings go" value={typed} onChange={(event) => setTyped(event.target.value)} className="h-8 text-foreground" />
         <datalist id="zachcore-clients">
           {known.map((name) => (
             <option key={name} value={name} />
@@ -187,7 +187,7 @@ function Setup({ status, firstTime, onDone }: { status: ZachCoreStatus; firstTim
     <Part title="Connect" key="connect">
       <label className="grid gap-1 text-xs text-muted-foreground">
         The server's address
-        <Input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="https://notes.example.com" className="h-8" />
+        <Input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="https://notes.example.com" className="h-8 text-foreground" />
       </label>
       <label className="grid gap-1 text-xs text-muted-foreground">
         <span className="flex items-center gap-2">
@@ -204,7 +204,7 @@ function Setup({ status, firstTime, onDone }: { status: ZachCoreStatus; firstTim
           value={key}
           onChange={(event) => setKey(event.target.value)}
           placeholder={status.key && address.trim() === status.address ? "Saved in Windows Credential Manager; paste another to replace it" : "Paste the key"}
-          className="h-8"
+          className="h-8 text-foreground"
         />
       </label>
       <label className="grid gap-1 text-xs text-muted-foreground">
@@ -370,7 +370,7 @@ function Older({ onDone }: { onDone: () => void }) {
         </DialogHeader>
         <label className="grid gap-1 text-xs text-muted-foreground">
           Recorded from (empty: all of them)
-          <Input type="date" value={since} onChange={(event) => setSince(event.target.value)} className="h-8" />
+          <Input type="date" value={since} onChange={(event) => setSince(event.target.value)} className="h-8 text-foreground" />
         </label>
         <DialogFooter>
           <Button disabled={!data?.count || busy} onClick={() => void send()}>

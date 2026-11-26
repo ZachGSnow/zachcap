@@ -75,6 +75,8 @@ describe("ZachCore in words", () => {
     expect(waitLine(paused, NOW)).toMatch(/^Last sent 2:14\s?PM\. 3 wait: paused in ZachCore\.$/);
     expect(waitLine({ ...STATUS, waiting: 1, why: { kind: "off" } }, NOW)).toBe("1 waits: sending is off.");
     expect(waitLine({ ...STATUS, there: 2 }, NOW)).toBe("2 meetings in ZachCore.");
+    const allTakenBack = { ...STATUS, last_sent: new Date(TODAY * 1000).toISOString() };
+    expect(waitLine(allTakenBack, NOW)).toMatch(/^Last sent 2:14\s?PM\. None in ZachCore now\.$/);
     const back = { ...STATUS, taking_back: 1, taking_back_why: { kind: "no_key", address: "https://old.example.com" } as const };
     expect(waitLine(back, NOW)).toBe("1 meeting to be taken back: no key is saved for old.example.com.");
   });

@@ -1259,7 +1259,7 @@ def create_app(token: str) -> FastAPI:
             raise HTTPException(status_code=400, detail="since is a day, like 2026-11-01")
         rows = store.db.execute(
             "SELECT m.* FROM meetings m JOIN sends s ON s.uid = m.uid "
-            "WHERE s.wanted = 0 AND s.taken = 0 AND m.private = 0 "
+            "WHERE s.wanted = 0 AND s.taken = 0 "
             "AND m.status NOT IN ('recording', 'recorded', 'processing') "
             "AND (? IS NULL OR substr(m.started_at, 1, 10) >= ?)",
             (since, since),
