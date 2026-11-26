@@ -1851,3 +1851,26 @@ def test_a_summary_on_this_pc_sends_its_seconds_to_zachcore(store, model):
     sent = zachcore.message(store, meeting)
     assert [d["sec"] for d in sent["decisions"]] == [3]
     assert [q["sec"] for q in sent["questions"]] == [61]
+
+
+def test_a_name_known_only_from_private_meetings_isnt_written_from(store, model):
+    """As for Claude (#92): what the model writes of a meeting that isn't private can go to
+    Claude and ZachCore, so it never reads a suggestion of someone only private meetings know."""
+    hidden = add_meeting(store, [(1.0, "Priya Shah", "Only said in private.")], title="Private")
+    store.update_meeting(hidden, private=1)
+    shared = add_meeting(store, SHORT)
+    priya = store.person_id("Priya Shah")
+    voice = store.add_speaker(
+        shared, "system", "Speaker 3", None, 9.0, None, Match(priya, 0.7, "suggested")
+    )
+    store.add_segments(shared, [(voice, "system", 90.0, 93.0, "I can look at it.", 0.9)])
+
+    local_summary.summary(store, shared, "small:4b")
+    [call] = model.calls
+    assert "Speaker 3: I can look at it." in call.user
+    assert "Priya" not in call.user and "Priya" not in json.dumps(call.shape)
+
+    # In a private meeting the suggestion shows: nothing written of it leaves the PC.
+    store.update_meeting(shared, private=1)
+    local_summary.summary(store, shared, "small:4b")
+    assert "Speaker 3 (Priya Shah?): I can look at it." in model.calls[-1].user
