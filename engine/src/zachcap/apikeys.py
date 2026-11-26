@@ -47,3 +47,21 @@ def delete(name: str) -> None:
         keyring.delete_password(SERVICE, name)
     except PasswordDeleteError:
         pass
+
+
+# ZachCore's keys: one per server address, so a test server never gets the real key, and an
+# address typed differently never gets one meant for another. No environment variable.
+def zachcore_name(address: str) -> str:
+    return f"zachcore {address}"
+
+
+def zachcore(address: str) -> str | None:
+    return keyring.get_password(SERVICE, zachcore_name(address)) or None
+
+
+def store_zachcore(address: str, key: str) -> None:
+    keyring.set_password(SERVICE, zachcore_name(address), key)
+
+
+def delete_zachcore(address: str) -> None:
+    delete(zachcore_name(address))

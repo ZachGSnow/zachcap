@@ -16,7 +16,7 @@ from pathlib import Path
 
 import soundfile as sf
 
-from . import audio, outbox, pipeline, snapshot
+from . import audio, outbox, pipeline, snapshot, zachcore
 from .store import REDACTED, Store
 
 TRACKS = ("mic", "system")
@@ -160,11 +160,15 @@ def redact(
             audio_error = str(exc) or type(exc).__name__
     # All of it or none, with what the server is to take out (outbox.py).
     with store.transaction():
-        outbox.redacting(store.db, meeting_id, start, end)
+        row = outbox.redacting(store.db, meeting_id, start, end)
+        before = zachcore.digest(zachcore.transcript(store, meeting_id)) if row else None
         removed, replaced = store.redact_lines(meeting_id, start, end)
         derived = store.forget_derived(meeting_id, start, end)
         outbox.redacted(store.db, meeting_id, start, end)
         moved = _move_samples(store, meeting_id, start, end)
+        if row:
+            after = zachcore.digest(zachcore.transcript(store, meeting_id))
+            outbox.lines_around(store.db, row, before, after)
     for note_id in derived["snapshots"]:
         snapshot.remove_pictures(folder, note_id)
     scrubbed = store.scrub_deleted_text()

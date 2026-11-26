@@ -116,7 +116,7 @@ def heard(store: Store, title: str, who: int, private: bool = False) -> None:
     store.update_meeting(meeting, private=int(private))
 
 
-def call(store: Store) -> int:
+def call(store: Store, uid: str = "meeting-1") -> int:
     """A 15-minute call, processed: you; Dana, recognized; a voice nobody named; Tom, only
     suggested; somebody suggested who is known only from a private meeting; a voice left out;
     one too short to tell; lines with no voice. With notes, a snapshot, a file and a ticket."""
@@ -129,8 +129,8 @@ def call(store: Store) -> int:
         duration=900.0, source_app="Teams",
     )  # fmt: skip
     old = store.meeting(meeting)["uid"]
-    store.db.execute("UPDATE meetings SET uid = 'meeting-1' WHERE id = ?", (meeting,))
-    store.db.execute("UPDATE sends SET uid = 'meeting-1' WHERE uid = ?", (old,))
+    store.db.execute("UPDATE meetings SET uid = ? WHERE id = ?", (uid, meeting))
+    store.db.execute("UPDATE sends SET uid = ? WHERE uid = ?", (uid, old))
     store.db.commit()
     matches = {
         "You": Match(me, 0.9, "auto"),

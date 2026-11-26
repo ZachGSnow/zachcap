@@ -24,6 +24,7 @@ ticket sends it as null, which takes off one it had.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import sqlite3
@@ -119,6 +120,22 @@ def message(store: Store, meeting_id: int, said: Collection[str] = PARTS) -> dic
     head["ticket"] = meeting["ticket"] or None
     head.update(_talk(store, meeting_id, voices, named))
     return {**head, **body}
+
+
+def transcript(store: Store, meeting_id: int) -> list[dict]:
+    """What was said, line by line, as ZachCore keeps it: when, in seconds into the meeting;
+    who, as Claude is shown them (never a suggestion of somebody known only from private
+    meetings; a voice left out is Unknown); and the words ("[redacted]" where they went)."""
+    return [
+        {"sec": round(line["start"], 2), "label": line["speaker"], "text": line["text"]}
+        for line in store.transcript(meeting_id, private=False)
+    ]
+
+
+def digest(value) -> str:
+    """A hash of what a request says, to tell whether it changed since it was sent."""
+    text = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _voices(store: Store, meeting_id: int) -> dict[int, sqlite3.Row]:
