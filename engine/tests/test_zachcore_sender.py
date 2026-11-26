@@ -778,6 +778,8 @@ def test_send_now_goes_at_once_and_take_back_takes_it_out(store, fake, send, clo
     store.db.commit()
     with store.transaction():
         outbox.send_now(store.db, m)
+    # Due now by the library's clock, in whole seconds: the test's may be a moment behind it.
+    clock.now = max(clock.now, time.time())
     assert send.step() and len(fake.stored) == 1  # at once, no half minute
     with store.transaction():
         outbox.take_back(store.db, "meeting-1")
