@@ -12,6 +12,9 @@ updates:
       # resolve PyPI's newest version there. Bump both by hand together with that index.
       - dependency-name: torch
       - dependency-name: torchaudio
+      # torch 2.11 holds setuptools below 82, so Dependabot can only reach a newer one by
+      # moving torch back (#122). It moves with torch.
+      - dependency-name: setuptools
     commit-message:
       prefix: build
   - package-ecosystem: npm
