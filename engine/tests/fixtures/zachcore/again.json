@@ -74,6 +74,7 @@
       "ref": "task-1",
       "title": "Send the rollback steps to Dana",
       "owner": "p-me",
+      "due": "2026-12-01",
       "done": false,
       "sec": 452
     },
@@ -81,6 +82,7 @@
       "ref": "task-6",
       "title": "Tell the help desk",
       "owner": "nobody",
+      "due": "2026-11-27",
       "done": false,
       "sec": 512
     },
@@ -90,7 +92,8 @@
       "owner": "person-maya-chen",
       "due": "2026-11-27",
       "done": true,
-      "sec": 620
+      "sec": 620,
+      "quote": "I will book the room"
     },
     {
       "ref": "task-4",

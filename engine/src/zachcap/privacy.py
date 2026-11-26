@@ -85,6 +85,14 @@ def mask(text: str) -> str:
     return PHONE.sub("[phone]", text)
 
 
+MASKS = ("[email]", "[phone]", "[card number]")  # what mask() writes instead
+
+
+def masked(text: str | None) -> bool:
+    """Whether a text has words that mask() took out."""
+    return any(mask_ in (text or "") for mask_ in MASKS)
+
+
 def outgoing(store: Store, text: str) -> str:
     """Text about to be sent to Claude, masked if the user turned that on."""
     return mask(text) if store.setting("mask_before_claude") == "1" else text

@@ -28,7 +28,7 @@ def meeting(tmp_path: Path):
 
 def fake_claude(
     monkeypatch,
-    result: summarize.Summary,
+    result: summarize.Written,
     model: str = "claude-opus-5-5",
     usage=None,
     written_usage=None,
@@ -90,24 +90,150 @@ def fake_claude(
     return calls
 
 
-def sample_summary() -> summarize.Summary:
-    return summarize.Summary(
+def sample_summary() -> summarize.Written:
+    return summarize.Written(
         title="Cutover sync",
         overview="Dana will send the change notice.",
-        decisions=["Cutover is Friday evening."],
+        decisions=[summarize.Point(text="Cutover is Friday evening.", said_at="01:01")],
         action_items=[
-            summarize.ActionItem(
+            summarize.AskedItem(
                 owner="Dana",
                 task="Send the change notice",
                 due="Tuesday",
                 kind="commitment",
                 said_at="01:01",
+                quote="I'll send the change notice Tuesday",
             )
         ],
         who_said_what=[summarize.SpeakerPoints(speaker="Dana", points=["Owns the notice"])],
         open_questions=[],
         topics=[summarize.Topic(title="Change notice", start="01:01")],
+        facts=[],
     )
+
+
+def test_claude_is_asked_for_seconds_quotes_and_facts(meeting, monkeypatch):
+    store, meeting_id = meeting
+    calls = fake_claude(monkeypatch, sample_summary())
+    summarize.summarize(store, meeting_id)
+    assert calls["output_format"] is summarize.Written
+    assert "Never an opinion, and nothing about health, family or money" in calls["system"]
+
+
+def test_decisions_and_questions_are_kept_as_text_with_their_seconds_beside(meeting, monkeypatch):
+    """As the page, exports and older versions read them."""
+    store, meeting_id = meeting
+    written = sample_summary()
+    written.open_questions = [
+        summarize.Point(text="Who tells support?", said_at="01:02"),
+        summarize.Point(text="When is the next one?", said_at="soon"),
+    ]
+    fake_claude(monkeypatch, written)
+    summarize.summarize(store, meeting_id)
+    content = store.summary(meeting_id)["content"]
+    assert content["decisions"] == ["Cutover is Friday evening."]
+    assert content["decisions_said_at"] == [61.0]
+    assert content["open_questions"] == ["Who tells support?", "When is the next one?"]
+    assert content["open_questions_said_at"] == [62.0, None]
+
+
+@pytest.mark.parametrize(
+    ("quote", "said_at", "kept"),
+    [
+        ("I'll send the change notice Tuesday", "01:01", True),
+        ("i\u2019ll send the CHANGE notice,  Tuesday.", "01:01", True),  # capitals, marks
+        ("send the change notice", "01:01", True),  # some of the line
+        ("I'll send the notice Tuesday", "01:01", False),  # not what was said
+        ("I'll send ... Tuesday", "01:01", False),  # some left out
+        ("notice Tues", "01:01", False),  # half a word
+        ("I'll send the change notice Tuesday", "01:30", False),  # not that line
+        ("I'll send the change notice Tuesday", "soon", False),  # no line at all
+        ("", "01:01", False),
+        (None, "01:01", False),
+    ],
+)
+def test_an_action_items_words_are_kept_only_when_its_line_says_them(
+    meeting, monkeypatch, quote, said_at, kept
+):
+    store, meeting_id = meeting
+    written = sample_summary()
+    written.action_items[0].quote = quote
+    written.action_items[0].said_at = said_at
+    fake_claude(monkeypatch, written)
+    summarize.summarize(store, meeting_id)
+    [item] = store.action_items(meeting_id=meeting_id)
+    assert item["quote"] == (" ".join(quote.split()) if kept else None)
+
+
+def test_a_fact_is_kept_only_with_its_words_in_the_line_it_names(meeting, monkeypatch):
+    store, meeting_id = meeting
+    store.set_setting("mask_before_claude", "1")
+    [voice] = store.speakers(meeting_id)
+    store.add_segments(
+        meeting_id,
+        [
+            (voice["id"], "system", 70.0, 75.0, "I run IT for the 120 people here.", 0.9),
+            (voice["id"], "system", 80.0, 84.0, "Call me on 555 201 3344 anytime.", 0.9),
+        ],
+    )
+    fact = summarize.Fact
+    written = sample_summary()
+    written.facts = [
+        fact(about="Dana", name="Role", value="Runs IT", said_at="01:10", quote="I run IT"),
+        fact(about="client", name="Headcount", value="120 people", said_at="01:10",
+             quote="for the 120 people here"),
+        fact(about="Dana", name="Title", value="CTO", said_at="01:10", quote="I am the CTO"),
+        fact(about="Dana", name="Role", value="Runs IT", said_at="01:01", quote="I run IT"),
+        fact(about="Dana", name="Salary", value="High", said_at="01:10", quote="I run IT"),
+        fact(about="Dana", name="Phone", value="[phone]", said_at="01:20",
+             quote="Call me on [phone]"),
+    ]  # fmt: skip
+    fake_claude(monkeypatch, written)
+    summarize.summarize(store, meeting_id)
+    facts = store.summary(meeting_id)["content"]["facts"]
+    assert facts == [
+        {"about": "Dana", "voice": voice["id"], "name": "Role", "value": "Runs IT",
+         "said_at": 70.0, "quote": "I run IT"},
+        {"about": "client", "voice": None, "name": "Headcount", "value": "120 people",
+         "said_at": 70.0, "quote": "for the 120 people here"},
+    ]  # fmt: skip
+
+
+def test_what_masking_took_out_goes_in_no_quote_and_no_fact(meeting, monkeypatch):
+    """Contact details masked for Claude never get to ZachCore through a summary either."""
+    store, meeting_id = meeting
+    store.set_setting("mask_before_claude", "1")
+    [voice] = store.speakers(meeting_id)
+    line = "Mail it to dana@contoso.example and call me on 555 201 3344."
+    store.add_segments(meeting_id, [(voice["id"], "system", 90.0, 95.0, line, 0.9)])
+    written = sample_summary()
+    written.action_items[0].quote = "Mail it to [email]"
+    written.action_items[0].said_at = "01:30"
+    written.facts = [
+        summarize.Fact(about="Dana", name="Phone", value="[phone]", said_at="01:30",
+                       quote="and call me on"),
+    ]  # fmt: skip
+    fake_claude(monkeypatch, written)
+    summarize.summarize(store, meeting_id)
+    [item] = store.action_items(meeting_id=meeting_id)
+    assert item["quote"] is None and store.summary(meeting_id)["content"]["facts"] == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Salary", "Pay", "Budget", "Health", "Medical history", "Family", "Kids", "Wife's name",
+     "Politics", "Opinion of the plan"],
+)  # fmt: skip
+def test_what_isnt_a_fact_about_somebody_never_is(name):
+    assert summarize.NOT_FACTS.search(name)
+
+
+@pytest.mark.parametrize(
+    "name", ["Title", "Role", "Headcount", "Renewal date", "Firewall", "Contact person",
+             "Partner level", "Preferred contact time"],
+)  # fmt: skip
+def test_what_a_fact_is_about_can_be(name):
+    assert not summarize.NOT_FACTS.search(name)
 
 
 def test_summary_sends_named_text_and_stores_cost_and_action_items(meeting, monkeypatch):

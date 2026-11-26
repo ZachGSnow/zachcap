@@ -32,7 +32,7 @@ ITEMS = [
     {"owner": "You", "task": "Send Dana the rollback steps", "due": "Tuesday",
      "kind": "commitment", "said_at": 450.0},
     {"owner": "Dana Lee", "task": "Book the server room", "due": "2026-11-27",
-     "kind": "commitment", "said_at": 620.0},
+     "kind": "commitment", "said_at": 620.0, "quote": "I will book the room"},
     {"owner": "Speaker 2", "task": "Check the firewall rules", "due": None,
      "kind": "action", "said_at": 300.0},
     {"owner": "Speaker 3 (Tom Avery?)", "task": "Share the floor plan", "due": None,
@@ -232,6 +232,13 @@ def test_the_files_say_what_this_test_is_about():
     assert owners["Check the firewall rules"] == people["Speaker 2"]["ref"]
     assert owners["Order the new cables"] == "Priya"
     assert owners["Call back about the badge"] == "Unknown"
+    # Due days worked out from the words and the meeting's day (Wednesday 25 November);
+    # the words with them, where the summary found them in the line.
+    tasks = {task["title"]: task for task in whole["tasks"]}
+    assert tasks["Send Dana the rollback steps"]["due"] == "2026-12-01"  # "Tuesday"
+    assert tasks["Tell the help desk"]["due"] == "2026-11-27"  # "Friday"
+    assert "due" not in tasks["Check the firewall rules"]
+    assert tasks["Book the server room"]["quote"] == "I will book the room"
     # A note's lines and a bookmark under My notes; no snapshot, no file.
     assert bare["overview"].startswith(zachcore.MY_NOTES)
     assert "0x80070005" not in json.dumps(whole) and "cutover.log" not in json.dumps(whole)

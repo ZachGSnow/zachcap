@@ -288,19 +288,11 @@ class Store:
         outbox.migrate(self.db)
         # The voice an action item's owner is, so it follows when the voice is named or named
         # again. Gone with the voice (a meeting processed again): then its owner's name counts.
-        if not self._has_column("action_items", "voice_id"):
-            self.db.execute("BEGIN IMMEDIATE")
-            try:
-                # Under the write lock: another process may have added it meanwhile.
-                if not self._has_column("action_items", "voice_id"):
-                    self.db.execute(
-                        "ALTER TABLE action_items ADD COLUMN voice_id INTEGER "
-                        "REFERENCES meeting_speakers(id) ON DELETE SET NULL"
-                    )
-                self.db.commit()
-            except BaseException:
-                self.db.rollback()
-                raise
+        self._add_column(
+            "action_items", "voice_id", "INTEGER REFERENCES meeting_speakers(id) ON DELETE SET NULL"
+        )
+        # The words of the line it was agreed in, as the summary quoted them (checked there).
+        self._add_column("action_items", "quote", "TEXT")
         if self.version() < VERSION:
             self.db.execute(f"PRAGMA user_version = {VERSION}")
             self.db.commit()
@@ -312,6 +304,20 @@ class Store:
 
     def version(self) -> int:
         return self.db.execute("PRAGMA user_version").fetchone()[0]
+
+    def _add_column(self, table: str, column: str, kind: str) -> None:
+        """A column added, in one transaction holding the write lock: another process may be
+        adding it at the same time."""
+        if self._has_column(table, column):
+            return
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            if not self._has_column(table, column):
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
 
     def _has_column(self, table: str, column: str) -> bool:
         return any(row["name"] == column for row in self.db.execute(f"PRAGMA table_info({table})"))
@@ -843,17 +849,18 @@ class Store:
                     match["done_at"] if done else None,
                     uid,
                     self.voice_named(meeting_id, item["owner"]),
+                    item.get("quote"),
                 )
             )
         rows += [
             (meeting_id, d["owner"], d["task"], d["due"], d["said_at"], d["kind"], "done",
-             d["done_at"], d["uid"], d["voice_id"])
+             d["done_at"], d["uid"], d["voice_id"], d["quote"])
             for d in left if d["status"] == "done"
         ]  # fmt: skip
         self.db.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
         self.db.executemany(
             "INSERT INTO action_items (meeting_id, owner, task, due, said_at, kind, status, "
-            "done_at, uid, voice_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "done_at, uid, voice_id, quote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         self._commit()
