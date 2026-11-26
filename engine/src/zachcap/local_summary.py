@@ -20,7 +20,7 @@ import re
 from collections.abc import Callable, Iterable
 from typing import NamedTuple
 
-from . import attachments, autokind, ollama, prompts, summarize, vocabulary
+from . import attachments, autokind, ollama, privacy, prompts, summarize, vocabulary
 from .store import UNKNOWN, Store
 from .summarize import Summary, quoted, to_seconds, transcript_block
 
@@ -170,7 +170,12 @@ class Line(NamedTuple):
 
 
 def lines_of(store: Store, meeting_id: int) -> list[Line]:
-    rows = store.transcript(meeting_id)
+    """A meeting's lines as the model reads them. Unless the meeting is private, with the names
+    Claude may be told (no voice suggested to be someone known only from private meetings):
+    what is written from them goes to Claude and ZachCore as Claude's own summaries do."""
+    meeting = store.meeting(meeting_id)
+    private = meeting is not None and privacy.is_private(store, meeting)
+    rows = store.transcript(meeting_id, private=private)
     lines = [Line(row["start"], row["end"], row["speaker"], row["text"]) for row in rows]
     return sorted((piece for line in lines for piece in line.pieces()), key=lambda p: p.start)
 
