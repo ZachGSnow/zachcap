@@ -116,7 +116,7 @@ The engine also has a command line (`uv run zachcap --help`). To build the insta
 
 ```powershell
 cd engine
-uv run pytest -q             # over 1,300 tests
+uv run pytest -q             # over 1,500 tests
 cd ..\apps\desktop
 npm test                     # the page's own logic
 npx tsc --noEmit; npx vite build
