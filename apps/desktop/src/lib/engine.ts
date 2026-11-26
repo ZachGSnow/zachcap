@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { Fact } from "@/lib/said";
 import type { ShortcutAction } from "@/lib/shortcuts";
 import type { MeetingZachCore } from "@/lib/zachcore";
 
@@ -87,6 +88,10 @@ export type SummaryContent = {
   open_questions: string[];
   topics: { title: string; start: string }[];
   template?: string;
+  /** Seconds beside the decisions and questions (null where not said); from 0.6.0, by Claude. */
+  decisions_said_at?: (number | null)[];
+  open_questions_said_at?: (number | null)[];
+  facts?: Fact[];
 };
 
 export type Summary = {
@@ -105,6 +110,8 @@ export type ActionItem = {
   task: string;
   due: string | null;
   said_at: number | null;
+  /** The words it was agreed in, as the summary quoted them (checked against the line). */
+  quote?: string | null;
   kind: ActionKind;
   status: "open" | "done";
   meeting_title: string;

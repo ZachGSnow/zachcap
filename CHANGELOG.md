@@ -4,6 +4,10 @@ What's new in each version of ZachCap, newest first. It's in the app as well, un
 
 ## Unreleased
 
+### Improved
+
+- **Summaries show where.** In a summary by Claude, each decision and open question has its moment one click away, as action items have; each action item shows the words it was agreed in, and the lasting facts Claude noticed are listed, each with its words and moment. Since 0.6.0 these went only to ZachCore.
+
 ### Fixed
 
 - **What leaves the PC** is said right in About and the README now that meetings can go to ZachCore: a summary written on this PC goes there too while sending is on.
