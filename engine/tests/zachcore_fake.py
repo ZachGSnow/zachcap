@@ -2,9 +2,11 @@
 does (server/src/intake.ts and host.ts at its commit 6c1fceb), and keeps what it was sent.
 
 It knows one app key and the spaces work and home. A message older than the one it has is 409,
-the same revision again is 200 with "same"; recall and redact are remembered, so nothing older
-gets in behind them; a transcript read before one, or of a meeting taken back, is 409; paused,
-messages and transcripts are 423; out of writing, all of it is 503 with Retry-After.
+the same revision again is 200 with "same"; what a message says replaces what is there, even
+empty, and what it leaves out stays (as ZachCore does since its change of 2026-11-25); recall
+and redact are remembered, so nothing older gets in behind them; a transcript read before one,
+or of a meeting taken back, is 409; paused, messages and transcripts are 423; out of writing,
+all of it is 503 with Retry-After.
 
 It can be made to fail: answer one status next (``answer``), take a request in and close the
 connection without answering (``lose``: done, ``late``: kept, to be done later), not be there at
@@ -19,6 +21,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 PART = 2000
+KEPT_RECALLED = ("ref", "title", "started", "seconds")
+KEPT_REDACTED = ("ref", "started", "seconds", "app", "client", "ticket", "people")
 
 
 class Fake:
@@ -90,7 +94,10 @@ class Fake:
             return 409, {"error": "An older one than is here."}, {}
         if last and rev == last["rev"]:
             return 200, {"same": True}, {}
-        self.messages[ref] = {"rev": rev, "result": "stored", "body": msg}
+        # What it says replaces what is here, even empty; what it leaves out stays as it is.
+        here = {**(last or {}).get("body", {}), **msg}
+        here.pop("gone", None)  # what to do, not what there is
+        self.messages[ref] = {"rev": rev, "result": "stored", "body": here}
         self.stored.append((ref, rev))
         tasks = self.tasks.setdefault(ref, {})
         for task in msg.get("tasks", []):
@@ -116,8 +123,13 @@ class Fake:
             del lines[n]
         for task in self.tasks.get(ref, {}).values():
             task["gone"] = True
-        title = (last or {}).get("body", {}).get("title")
-        body = {"title": "(redacted)" if redact else title}
+        # A recall leaves its time and title; a redaction its people, client and ticket, and the
+        # title says "(redacted)" until the next message. All that was made from the words goes.
+        was = (last or {}).get("body", {})
+        stays = KEPT_REDACTED if redact else KEPT_RECALLED
+        body = {key: value for key, value in was.items() if key in stays}
+        if redact:
+            body["title"] = "(redacted)"
         self.messages[ref] = {
             "rev": rev,
             "result": "redacted" if redact else "private",

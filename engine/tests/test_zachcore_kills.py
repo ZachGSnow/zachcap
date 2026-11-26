@@ -155,9 +155,11 @@ def test_killed_at_any_moment_it_goes_on_and_the_server_has_each_meeting_once(tm
                 assert there is None or there["result"] == "private"
                 assert not fake.lines.get(uid)
                 continue
-            message = dict(there["body"])
+            message = dict(there["body"])  # what the server has of it, put together
             assert message.pop("rev") == there["rev"]
-            assert message == zachcore.message(store, m), uid
+            now = zachcore.message(store, m)
+            now.pop("gone", None)  # what was to be done, not what is there
+            assert message == now, uid
             said = [fake.lines[uid][n] for n in sorted(fake.lines.get(uid, {}))]
             here = zachcore.transcript(store, m)
             # The server took out what was redacted; the lines around it weren't sent again.

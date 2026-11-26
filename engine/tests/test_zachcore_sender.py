@@ -281,7 +281,7 @@ def test_an_item_a_new_summary_leaves_out_goes(store, fake, send, clock):
     store.replace_action_items(m, AGAIN)
     drain(send, clock)
     gone = {task for task, said in fake.tasks["meeting-1"].items() if said.get("gone")}
-    assert set(body(fake)["gone"]) == gone and "task-7" in gone and "task-1" not in gone
+    assert set(sent(fake)[-1]["gone"]) == gone and "task-7" in gone and "task-1" not in gone
 
 
 def test_a_voice_named_after_the_first_message_is_one_new_message(store, fake, send, clock):
@@ -299,13 +299,25 @@ def test_a_voice_named_after_the_first_message_is_one_new_message(store, fake, s
     assert owners["task-3"] == erin and "Speaker 2" not in [p["name"] for p in now["people"]]
 
 
-def test_a_client_or_ticket_taken_off_is_left_out_of_the_next_message(store, fake, send, clock):
+def test_a_client_or_ticket_taken_off_comes_off_with_the_next_message(store, fake, send, clock):
     m = meeting(store, clock)
     drain(send, clock)
     assert body(fake)["ticket"] == "T-20931" and body(fake)["client"] == "Contoso"
     store.update_meeting(m, client=None, client_source="user", ticket=None)
     drain(send, clock)
-    assert "client" not in body(fake) and "ticket" not in body(fake)
+    assert body(fake)["client"] is None and body(fake)["ticket"] is None
+    assert sent(fake)[-1]["client"] is None  # sent as null: left out, it would stay there
+
+
+def test_a_switch_turned_off_takes_nothing_out_of_zachcore(store, fake, send, clock):
+    m = meeting(store, clock)
+    drain(send, clock)
+    decisions = body(fake)["decisions"]
+    store.set_setting(zachcore.setting("summaries"), "0")
+    store.update_meeting(m, title="Sent without its summary")
+    drain(send, clock)
+    assert "decisions" not in sent(fake)[-1] and "overview" not in sent(fake)[-1]
+    assert body(fake)["decisions"] == decisions  # still there
 
 
 def test_made_private_while_its_message_waits_it_never_goes(store, fake, send, clock):
