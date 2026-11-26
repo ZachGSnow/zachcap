@@ -47,7 +47,7 @@ export function WhatLeaves() {
         is taken back from ZachCore, also while sending is off. Turning sending off stops what goes and takes nothing back: Take
         back does that, on a meeting or for all of them.
       </p>
-      <p>A summary written on this PC sends no facts, no quotes and no times of its decisions and questions.</p>
+      <p>A summary written on this PC sends no facts and no quotes.</p>
     </div>
   );
 }

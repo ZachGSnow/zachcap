@@ -7,6 +7,7 @@ What's new in each version of ZachCap, newest first. It's in the app as well, un
 ### Improved
 
 - **Summaries show where.** In a summary by Claude, each decision and open question has its moment one click away, as action items have; each action item shows the words it was agreed in, and the lasting facts Claude noticed are listed, each with its words and moment. Since 0.6.0 these went only to ZachCore.
+- **Summaries written on this PC say when too.** Their decisions and open questions have the moment they were said, one click away and sent to ZachCore with them, as Claude's have. They still note no facts or quotes.
 
 ### Fixed
 

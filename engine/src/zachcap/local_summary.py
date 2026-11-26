@@ -7,8 +7,9 @@ it. What it noted in each is put together here, and a last call writes the overv
 answers is held to the meeting: an owner or a speaker is someone who spoke in it, a time is one
 of its lines', and a due date was said in it.
 
-It writes no facts, no quotes and no seconds of its decisions and questions, which a summary by
-Claude has (summarize.kept_from): what such a summary sends to ZachCore has none of them.
+Its decisions and open questions have the second they were said, held to the lines as its
+action items' times are. It writes no facts and no quotes, which a summary by Claude has
+(summarize.kept_from): what such a summary sends to ZachCore has none of them.
 """
 
 from __future__ import annotations
@@ -55,7 +56,8 @@ PART = ("topics", "action_items", "decisions", "open_questions", "who_said_what"
 LATER_PART = (*PART, "settled")
 TOGETHER = ("overview", "title")
 # The lists of a summary that go along with a document or a question, the least needed first.
-LEAST_NEEDED = ("topics", "open_questions", "action_items", "decisions")
+LEAST_NEEDED = ("facts", "topics", "open_questions", "action_items", "decisions")
+SAID_AT = ("decisions", "open_questions")  # each kept with the second it was said
 
 SMALL_WORDS = frozenset(
     "a an and at be by for from in into it its of on or that the their them this to will with"
@@ -84,9 +86,10 @@ FIELDS = {
     'morning"), or null when no time was said. kind: "commitment" when the owner offered or '
     'promised it, "action" when somebody else asked for it. said_at: the time of the line '
     "where it was agreed, like 03:51.",
-    "decisions": "what was agreed, one sentence each, with the time that was agreed. Not what "
-    "single people will do: those are action items.",
-    "open_questions": "what was asked and not answered, or left open, one sentence each.",
+    "decisions": "what was agreed. text: one sentence each. said_at: the time of the line where "
+    "it was agreed, like 03:51. Not what single people will do: those are action items.",
+    "open_questions": "what was asked and not answered, or left open. text: one sentence each. "
+    "said_at: the time of the line where it was asked, like 03:51.",
     "who_said_what": "for each person who spoke, 1 to 4 short sentences with their main points.",
     "settled": "the numbers, like D1 or Q3, of the earlier decisions that this part changes or "
     "takes back (the same thing at another time, say), and of the earlier questions that this "
@@ -214,8 +217,8 @@ def schema(fields: Iterable[str], names: list[str], numbers: Iterable[str] = ())
                 "said_at": stamp,
             },
         ),
-        "decisions": {"type": "array", "maxItems": 12, "items": text},
-        "open_questions": {"type": "array", "maxItems": 10, "items": text},
+        "decisions": _list(12, {"text": text, "said_at": stamp}),
+        "open_questions": _list(10, {"text": text, "said_at": stamp}),
         "who_said_what": _list(
             12,
             {
@@ -496,7 +499,8 @@ def written(
     if len(pieces) == 1:
         asked(0, len(lines), WHOLE, TASK_WHOLE, "Transcript")
         if len(answers) == 1:
-            return {field: answers[0][field] for field in WHOLE}
+            only = answers[0]
+            return {field: only[field] for field in (*WHOLE, *(f"{f}_said_at" for f in SAID_AT))}
     else:
         first = 0
         for number, part in enumerate(pieces, 1):
@@ -509,7 +513,9 @@ def written(
     return {
         **together(),
         "decisions": _still(answers, "D"),
+        "decisions_said_at": _still_at(answers, "D"),
         "open_questions": _still(answers, "Q"),
+        "open_questions_said_at": _still_at(answers, "Q"),
         "who_said_what": _points(answers, names),
         "topics": _topics(answers),
         "action_items": _action_items(answers),
@@ -625,6 +631,31 @@ def outline(answers: list[dict]) -> dict:
 
 def _still(answers: list[dict], letter: str) -> list[str]:
     """The decisions or open questions that hold at the end of the meeting, each once."""
+    return [said for said, _ in _holding_still(answers, letter)]
+
+
+def _still_at(answers: list[dict], letter: str) -> list[float | None]:
+    """The second each of those was said, the last time it was (as its words are)."""
+    at = _numbered_at(answers)
+    return [at.get(number) for _, number in _holding_still(answers, letter)]
+
+
+def _numbered_at(answers: list[dict]) -> dict[str, float | None]:
+    """The second each numbered decision and question was said (as numbered() numbers them),
+    where its part kept one."""
+    found: dict[str, float | None] = {}
+    for letter, field in (("D", "decisions"), ("Q", "open_questions")):
+        said = [
+            at
+            for answer in answers
+            for at in answer.get(f"{field}_said_at") or [None] * len(answer[field])
+        ]
+        found.update({f"{letter}{i}": at for i, at in enumerate(said, 1)})
+    return found
+
+
+def _holding_still(answers: list[dict], letter: str) -> list[tuple[str, str]]:
+    """Those, with the number each had the last time it was said."""
     changed = {number for answer in answers for number in answer["changed"]}
     kept: list[list[str]] = []  # with the number it had the last time it was said
     for number, said in holding(answers).items():
@@ -635,7 +666,7 @@ def _still(answers: list[dict], letter: str) -> list[str]:
             kept.append([said, number])
         else:
             same[:] = _last_said(same[0], said), number
-    return [said + " (Changed later.)" * (number in changed) for said, number in kept]
+    return [(said + " (Changed later.)" * (number in changed), number) for said, number in kept]
 
 
 def _evenly(listed: list, most: int) -> list:
@@ -737,10 +768,15 @@ def _same_subject(one: str, other: str) -> bool:
 
 
 def held(answer: dict, part: list[Line], names: list[str], fields: Iterable[str]) -> dict:
-    """The fields of an answer, held to the part of the meeting it is about. Ollama keeps an
-    answer to the schema; one that isn't is an error."""
+    """The fields of an answer, held to the part of the meeting it is about, and the second
+    each decision and question was said beside them. Ollama keeps an answer to the schema; one
+    that isn't is an error."""
     try:
-        return {field: HELD[field](answer.get(field), part, names) for field in fields}
+        kept = {field: HELD[field](answer.get(field), part, names) for field in fields}
+        for field in SAID_AT:
+            if field in kept:
+                kept[f"{field}_said_at"] = [at for _, at in _said(answer.get(field), part)]
+        return kept
     except (AttributeError, TypeError) as exc:
         raise Malformed("The model didn't answer as asked. Try another one.") from exc
 
@@ -778,6 +814,28 @@ def _sentences(said) -> list[str]:
         if tidy and not STRAY_TIME.fullmatch(tidy):
             found.setdefault(tidy.casefold(), tidy)
     return list(found.values())
+
+
+def _said(said, part: list[Line]) -> list[tuple[str, float | None]]:
+    """Decisions or questions: each sentence once (as it came first), with the second of the
+    part's line nearest to the time the model gave. One that came as a plain sentence (the
+    shape asked for before) has none."""
+    found: dict[str, tuple[str, float | None]] = {}
+    for entry in _listed(said, (dict, str)):
+        text = _tidy(entry.get("text") if isinstance(entry, dict) else entry)
+        if not text or STRAY_TIME.fullmatch(text):
+            continue
+        at = _second(entry.get("said_at"), part) if isinstance(entry, dict) else None
+        found.setdefault(text.casefold(), (text, at))
+    return list(found.values())
+
+
+def _second(stamp, part: list[Line]) -> float | None:
+    """The second of the part's line nearest to a time the model gave; none without one."""
+    at = to_seconds(stamp) if isinstance(stamp, str) else None
+    if at is None or not part:
+        return None
+    return float(min(part, key=lambda line: abs(int(line.start) - at)).start)
 
 
 def _time(stamp, part: list[Line]) -> str:
@@ -838,8 +896,8 @@ def _held_points(entries, part: list[Line], names: list[str]) -> list[dict]:
 HELD: dict[str, Callable] = {
     "topics": _held_topics,
     "action_items": _held_items,
-    "decisions": lambda said, part, names: _sentences(_listed(said, str)),
-    "open_questions": lambda said, part, names: _sentences(_listed(said, str)),
+    "decisions": lambda said, part, names: [text for text, _ in _said(said, part)],
+    "open_questions": lambda said, part, names: [text for text, _ in _said(said, part)],
     "who_said_what": _held_points,
     "overview": lambda said, part, names: _tidy(said),
     "title": lambda said, part, names: _tidy(said),
@@ -867,10 +925,21 @@ def shortened(content: dict, most: int) -> dict:
         ]
     for field in LEAST_NEEDED:
         listed = kept.get(field) or []
+        seconds = kept.get(f"{field}_said_at")
+        if isinstance(seconds, list) and len(seconds) == len(listed):
+            listed = list(zip(listed, seconds, strict=True))  # cut together
+        else:
+            kept.pop(f"{field}_said_at", None)  # nothing to keep them beside
+            seconds = None
         for count in reversed(range(len(listed))):
             if fits():
                 return kept
-            kept[field] = _evenly(listed, count)
+            some = _evenly(listed, count)
+            if seconds is None:
+                kept[field] = some
+            else:
+                kept[field] = [item for item, _ in some]
+                kept[f"{field}_said_at"] = [at for _, at in some]
     return kept
 
 
