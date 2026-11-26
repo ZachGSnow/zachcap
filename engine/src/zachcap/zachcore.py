@@ -47,6 +47,29 @@ def setting(part: str) -> str:
     return f"zachcore_{part}"
 
 
+NEVER = "zachcore_never"  # the clients none of whose meetings go: a JSON list
+
+
+def never(store: Store) -> list[str]:
+    """The clients none of whose meetings go, as they were typed."""
+    try:
+        found = json.loads(store.setting(NEVER) or "[]")
+    except ValueError:
+        return []
+    return [name for name in found if isinstance(name, str)] if isinstance(found, list) else []
+
+
+def kept_from_zachcore(store: Store, meeting) -> str | None:
+    """Why a meeting doesn't go, whatever is asked: it is private, or its client is one none of
+    whose meetings go. None when it may."""
+    if meeting is None or privacy.is_private(store, meeting):
+        return "It is private"
+    client = clients.of_meeting(store, meeting)["client"]
+    if client and client.casefold() in {name.casefold() for name in never(store)}:
+        return f"Nothing of {client} goes"
+    return None
+
+
 def parts(store: Store) -> set[str]:
     """The switches that are on."""
     return {part for part in PARTS if store.setting(setting(part), "1") == "1"}
@@ -54,10 +77,10 @@ def parts(store: Store) -> set[str]:
 
 def message(store: Store, meeting_id: int, said: Collection[str] = PARTS) -> dict | None:
     """A meeting's message as it would go now, without its revision (each body sent gets its
-    own), saying what the switches in ``said`` allow. None for a meeting that is private or
-    not there."""
+    own), saying what the switches in ``said`` allow. None for a meeting that is private, of
+    a client none of whose meetings go, or not there."""
     meeting = store.meeting(meeting_id)
-    if meeting is None or privacy.is_private(store, meeting) or not meeting["uid"]:
+    if meeting is None or not meeting["uid"] or kept_from_zachcore(store, meeting):
         return None
     voices = _voices(store, meeting_id)
     me = {"you", "me", _folded(store.me()["name"])}

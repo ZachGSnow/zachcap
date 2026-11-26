@@ -251,6 +251,10 @@ class Sender:
                 with _writing(store):
                     _done(store, row, row["version"])  # gone, or private: taken back
                 return True
+            if zachcore.kept_from_zachcore(store, store.meeting(row["meeting"])):
+                with _writing(store):
+                    _done(store, row, row["version"])  # nothing of its client goes
+                return True
             if row["status"] in BUSY or not (key := key_of(here)):
                 continue
             if row["what"] == "send":
@@ -588,3 +592,144 @@ def _started(started_at: str | None) -> float:
         return datetime.fromisoformat(started_at or "").timestamp()
     except ValueError:
         return 0.0
+
+
+# What Settings and a meeting say ------------------------------------------------------
+
+
+def status(store: Store, now: float | None = None) -> dict:
+    """Sending as Settings shows it: on or not, where to, what goes, how many meetings wait and
+    why, how many are being taken back, and when the server last took one. Never the key:
+    only whether one is saved. ``why`` is the first thing that holds them all up, or what
+    holds up most of them."""
+    now = time.time() if now is None else now
+    here = place(store)
+    halted = stopped(store)
+    key = bool(here and apikeys.zachcore(here.address))
+    on = store.setting(outbox.ON) == "1"
+    rows = store.db.execute(
+        "SELECT o.uid, o.what, o.state, o.reason, o.retry_at, o.quiet_until, s.target, "
+        "m.status FROM outbox o JOIN sends s ON s.uid = o.uid LEFT JOIN meetings m ON m.uid = o.uid"
+    ).fetchall()
+    going = [row for row in rows if row["what"] not in TAKE_BACK and row["status"] is not None]
+    taking = [row for row in rows if row["what"] in TAKE_BACK]
+    full, paused = _seconds(store.setting(FULL)), _seconds(store.setting(PAUSED))
+
+    def why(waits: list, back: bool = False) -> dict | None:
+        if not waits:
+            return None
+        if halted and here and halted.get("place") == here.target and not back:
+            return {"kind": "refused", "status": halted.get("status")}
+        if here is None and not back:
+            return {"kind": "no_server"}
+        if back:
+            places = {Place.of(row["target"]) for row in waits if row["target"]}
+            without = sorted(
+                where.address for where in places if not apikeys.zachcore(where.address)
+            )
+            if without:
+                return {"kind": "no_key", "address": without[0]}
+        elif not key:
+            return {"kind": "no_key", "address": here.address}
+        if not on and not back:
+            return {"kind": "off"}
+        if now < full:
+            return {"kind": "full", "until": full}
+        if now < paused and not back:
+            return {"kind": "paused", "until": paused}
+        late = [row["retry_at"] for row in waits if row["retry_at"] > now and row["reason"]]
+        if late:
+            return {"kind": "no_answer", "until": min(late)}
+        refused = [row for row in waits if row["state"] == "stopped"]
+        if refused:
+            return {"kind": "refused_one", "count": len({row["uid"] for row in refused})}
+        if not back:
+            elsewhere = [row for row in waits if row["target"] not in (None, here.target)]
+            if elsewhere:
+                return {"kind": "elsewhere", "count": len({row["uid"] for row in elsewhere})}
+            if any(row["status"] in BUSY for row in waits):
+                return {"kind": "busy"}
+            if any(row["what"] == "transcript" and row["status"] != "ready" for row in waits):
+                return {"kind": "names"}
+            if any(row["quiet_until"] > now for row in waits):
+                return {"kind": "quiet"}
+        return {"kind": "soon"}
+
+    targets = store.db.execute(
+        "SELECT target, COUNT(*) AS count FROM sends WHERE target IS NOT NULL GROUP BY target"
+    ).fetchall()
+    return {
+        "on": on,
+        "address": here.address if here else None,
+        "space": here.space if here else WORK,
+        "key": key,
+        "parts": {
+            **{part: part in zachcore.parts(store) for part in zachcore.PARTS},
+            "transcripts": store.setting(outbox.TRANSCRIPTS) == "1",
+        },
+        "never": zachcore.never(store),
+        "waiting": len({row["uid"] for row in going}),
+        "why": why(going),
+        "taking_back": len({row["uid"] for row in taking}),
+        "taking_back_why": why(taking, back=True),
+        "there": sum(row["count"] for row in targets),
+        "elsewhere": [
+            {**_where(row["target"]), "count": row["count"]}
+            for row in targets
+            if not here or row["target"] != here.target
+        ],
+        "last_sent": store.db.execute("SELECT MAX(sent_at) FROM sends").fetchone()[0],
+    }
+
+
+def meeting_status(store: Store, meeting_id: int) -> dict | None:
+    """What a meeting says of ZachCore: whether the server may have it and since when, whether
+    something of it waits to go or to be taken back, and why it doesn't go, if it doesn't."""
+    meeting = store.meeting(meeting_id)
+    if meeting is None or not store.column(meeting, "uid"):
+        return None
+    sent = _sends(store, meeting["uid"])
+    if sent is None:  # a library from before ZachCap sent anything
+        return None
+    whats = {row["what"] for row in store.db.execute(
+        "SELECT what FROM outbox WHERE uid = ?", (meeting["uid"],)
+    )}  # fmt: skip
+    target = sent["target"]
+    return {
+        "there": target is not None,
+        "place": _where(target) if target else None,
+        "sent_at": sent["sent_at"],
+        "waiting": bool(whats & {"send", "transcript"}),
+        "taking_back": bool(whats & set(TAKE_BACK)),
+        "can_take_back": bool(target and apikeys.zachcore(Place.of(target).address)),
+        "taken": bool(sent["taken"]),
+        "wanted": bool(sent["wanted"]),
+        "on": store.setting(outbox.ON) == "1",
+        "kept": zachcore.kept_from_zachcore(store, meeting),
+    }
+
+
+def _where(target: str) -> dict:
+    where = Place.of(target)
+    return {"place": target, "address": where.address, "space": where.space}
+
+
+def check(where: Place, key: str) -> dict:
+    """Whether a server takes this key for this space: it is asked what it has (nothing is
+    written). The answer says how it went, never with the key in it."""
+    answer = request(where, key, "in/state")
+    if answer.status == 200:
+        return {"ok": True, "status": 200}
+    words = {
+        401: "ZachCore doesn't know this key",
+        403: "This key may not send to this space, or its app was removed",
+        404: "ZachCore has no such space there",
+        503: "ZachCore is out of writing for today; the key is fine",
+        None: "No answer from that address",
+    }
+    status = answer.status
+    return {
+        "ok": False,
+        "status": status,
+        "error": words.get(status, f"ZachCore answered {status}"),
+    }

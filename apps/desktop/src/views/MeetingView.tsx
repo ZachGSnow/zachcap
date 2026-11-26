@@ -11,8 +11,10 @@ import {
   MoreHorizontal,
   Pencil,
   RotateCw,
+  Send,
   Sparkles,
   Trash2,
+  Undo2,
   UserRoundSearch,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -28,6 +30,7 @@ import { Related } from "@/components/Related";
 import { SummaryPanel } from "@/components/SummaryPanel";
 import { ClientField } from "@/components/Client";
 import { TicketControl } from "@/components/Ticket";
+import { meetingLine, menuOf } from "@/lib/zachcore";
 import { NamePrompt, REDACTED, Transcript, WhoIsThis } from "@/components/Transcript";
 import { AvatarStack, ConversationStats, SpeakerLanes, TalkTimeBars } from "@/components/Visuals";
 import { Badge } from "@/components/ui/badge";
@@ -167,6 +170,8 @@ export function MeetingView({
   const stalled = !processing && (meeting?.status === "processing" || meeting?.status === "recorded");
   const writing = data?.writing ?? null;
   const writer = writerFor(writerPicked, meeting?.private ?? false, settings);
+  const zachLine = meetingLine(data?.zachcore);
+  const zachMenu = menuOf(data?.zachcore);
   const picked = meeting?.private ? null : writerPicked; // what it was before is no longer a choice
   const followed = processing || writing !== null;
   useEffect(() => setBusy(followed), [followed]);
@@ -388,6 +393,28 @@ export function MeetingView({
     if (saved) await refresh();
   };
 
+  /** Sends a meeting to ZachCore now, also one from before sending was on or taken back. */
+  const sendToZachCore = async () => {
+    const sent = await attempt("Couldn't send it to ZachCore", () =>
+      api(`/api/meetings/${id}/zachcore/send`, { method: "POST" }),
+    );
+    if (!sent) return;
+    await refresh();
+    toast.success("It goes to ZachCore now", { description: "And with each change to it, until you take it back." });
+  };
+
+  /** Takes a meeting back from ZachCore: nothing more of it goes until Send now. */
+  const takeBackFromZachCore = async () => {
+    const taken = await attempt("Couldn't take it back", () =>
+      api(`/api/meetings/${id}/zachcore/take-back`, { method: "POST" }),
+    );
+    if (!taken) return;
+    await refresh();
+    toast.success("Taken back from ZachCore", {
+      description: "ZachCore keeps its time and title, and what you changed there yourself.",
+    });
+  };
+
   /** Keeps the meeting from Claude, or lets Claude read it. */
   const savePrivate = async (on: boolean) => {
     const saved = await attempt(on ? "Couldn't make the meeting private" : "Couldn't change the meeting", () =>
@@ -397,7 +424,9 @@ export function MeetingView({
     await refresh();
     toast.success(on ? "Kept from Claude" : "Claude can read it", {
       description: on
-        ? "Nothing in this meeting is sent to Claude from now on. A summary it already has stays."
+        ? `Nothing in this meeting is sent to Claude from now on. A summary it already has stays.${
+            data?.zachcore?.there ? " What ZachCore has of it is taken back." : ""
+          }`
         : "Summaries, documents, Ask and the MCP server can use this meeting.",
     });
   };
@@ -623,6 +652,7 @@ export function MeetingView({
               suggestions={data.ticket_suggestions ?? []}
               onSave={saveTicket}
             />
+            {zachLine && <span className="text-xs text-muted-foreground">{zachLine}</span>}
           </div>
         </div>
         {meeting.private && (
@@ -657,6 +687,18 @@ export function MeetingView({
               {meeting.private ? <LockOpen className="size-4" /> : <Lock className="size-4" />}
               {meeting.private ? "Let Claude read it" : "Keep from Claude"}
             </DropdownMenuItem>
+            {zachMenu.send && (
+              <DropdownMenuItem onSelect={() => void sendToZachCore()}>
+                <Send className="size-4" />
+                Send to ZachCore now
+              </DropdownMenuItem>
+            )}
+            {zachMenu.takeBack && (
+              <DropdownMenuItem onSelect={() => void takeBackFromZachCore()}>
+                <Undo2 className="size-4" />
+                Take back from ZachCore
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void exportAs("md")}>
               <FileDown className="size-4" />

@@ -324,3 +324,95 @@ def redacted(db: sqlite3.Connection, meeting_id: int, start: float, end: float) 
         "AND meeting_uid = (SELECT uid FROM meetings WHERE id = ?)",
         (start, end, meeting_id),
     )
+
+
+# By hand (Settings and a meeting's menu) ------------------------------------------------
+
+# A meeting put in the outbox now, whatever waits there for it: to go at once.
+_NOW = f"""
+    INSERT INTO outbox (uid, what, quiet_until) VALUES (?, ?, {NOW})
+    ON CONFLICT(uid, what) WHERE what <> 'redact' DO UPDATE SET
+        quiet_until = excluded.quiet_until, retry_at = 0, tries = 0, reason = NULL,
+        state = 'waiting'"""
+_RECALL = f"""
+    INSERT INTO outbox (uid, what, quiet_until)
+        SELECT uid, 'recall', {NOW} FROM sends WHERE uid = ? AND target IS NOT NULL
+    ON CONFLICT(uid, what) WHERE what <> 'redact' DO UPDATE SET quiet_until = quiet_until"""
+
+
+def _uid(db: sqlite3.Connection, meeting_id: int) -> str | None:
+    row = db.execute("SELECT uid FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+    return row[0] if row else None
+
+
+def _going(db: sqlite3.Connection, uid: str) -> None:
+    """A meeting that goes now: its message, and its transcript when transcripts go."""
+    db.execute(_NOW, (uid, "send"))
+    if db.execute(f"SELECT 1 FROM settings WHERE key = '{TRANSCRIPTS}' AND value = '1'").fetchone():
+        db.execute(_NOW, (uid, "transcript"))
+
+
+def send_now(db: sqlite3.Connection, meeting_id: int) -> None:
+    """Send now: a meeting goes at once, also one recorded before sending was turned on or
+    taken back by hand, and goes on going with each change. Never a private one."""
+    uid = _uid(db, meeting_id)
+    if (
+        uid is None
+        or db.execute("SELECT private FROM meetings WHERE uid = ?", (uid,)).fetchone()[0]
+    ):
+        raise ValueError("A private meeting never goes to ZachCore")
+    db.execute("UPDATE sends SET wanted = 1, taken = 0, rev = rev + 1 WHERE uid = ?", (uid,))
+    _going(db, uid)
+
+
+def take_back(db: sqlite3.Connection, uid: str) -> bool:
+    """Take back: nothing more of a meeting goes until Send now, and what the server may have
+    of it goes back out (never dropped). Returns whether anything of it may be there."""
+    db.execute("UPDATE sends SET taken = 1, rev = rev + 1 WHERE uid = ?", (uid,))
+    db.execute("DELETE FROM outbox WHERE uid = ? AND what IN ('send', 'transcript')", (uid,))
+    return db.execute(_RECALL, (uid,)).rowcount > 0
+
+
+def there(db: sqlite3.Connection) -> list[str]:
+    """The meetings the server may have something of."""
+    return [row[0] for row in db.execute("SELECT uid FROM sends WHERE target IS NOT NULL")]
+
+
+def move(db: sqlite3.Connection, old: str, take_back_first: bool) -> int:
+    """The meetings that went to ``old`` (a server or space other than now). Taken back from
+    there first, and then sent to the new one as new; or left there as they are and sent to
+    the new one as new (also after taking them back was asked for, and the old one doesn't
+    answer any more). One that is private, deleted, taken back by hand or has a redaction to
+    go keeps its old place either way: taking that back is never dropped. Returns how many
+    will go to the new one."""
+    moved = 0
+    rows = db.execute(
+        "SELECT s.uid, s.wanted, s.taken, m.private, "
+        "EXISTS (SELECT 1 FROM outbox o WHERE o.uid = s.uid AND o.what = 'redact') "
+        "AS redacting FROM sends s LEFT JOIN meetings m ON m.uid = s.uid WHERE s.target = ?",
+        (old,),
+    ).fetchall()
+    for uid, wanted, taken, private, redacting in rows:
+        if private is None or private or taken or not wanted or redacting:
+            continue  # gone, private, taken back, not to be sent, or to be redacted there
+        if take_back_first:
+            db.execute(_RECALL, (uid,))  # its message waits for it, then goes to the new one
+        else:
+            # A recall of a meeting that is neither private, deleted nor taken back by hand is
+            # one this asked for: it is left there instead.
+            db.execute("DELETE FROM outbox WHERE uid = ? AND what = 'recall'", (uid,))
+            db.execute(
+                "UPDATE sends SET target = NULL, sent_hash = NULL, lines_hash = NULL WHERE uid = ?",
+                (uid,),
+            )
+        db.execute("UPDATE sends SET rev = rev + 1 WHERE uid = ?", (uid,))
+        _going(db, uid)
+        moved += 1
+    return moved
+
+
+def send_older(db: sqlite3.Connection, uids: list[str]) -> None:
+    """Meetings from before sending was turned on, sent now as Send now does."""
+    for uid in uids:
+        db.execute("UPDATE sends SET wanted = 1, taken = 0, rev = rev + 1 WHERE uid = ?", (uid,))
+        _going(db, uid)

@@ -12,6 +12,7 @@ import {
   Plug,
   Power,
   RefreshCw,
+  Send,
   ShieldCheck,
   Sparkles,
   Speaker,
@@ -25,6 +26,7 @@ import { toast } from "sonner";
 import { PromptList } from "@/components/PromptLibrary";
 import { SETTINGS_CHANGED } from "@/components/Recording";
 import { KeysButton } from "@/components/Shortcuts";
+import { ZachCore } from "@/components/ZachCore";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -1122,6 +1124,10 @@ export function SettingsView() {
               </span>
             </p>
           </div>
+        </Section>
+
+        <Section icon={<Send className="size-3.5" />} title="ZachCore">
+          <ZachCore />
         </Section>
 
         <Section icon={<KeyRound className="size-3.5" />} title="API keys">
