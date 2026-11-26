@@ -55,6 +55,7 @@ from . import (
     local_summary,
     mentions,
     ollama,
+    outbox,
     paths,
     pipeline,
     privacy,
@@ -67,6 +68,7 @@ from . import (
     tickets,
     topics,
     watchfolder,
+    zachcore,
 )
 from . import vocabulary as words
 from .store import Store
@@ -134,6 +136,39 @@ Writes = Literal["claude", "local"]  # Claude, or the model on this PC
 class SummaryBody(BaseModel):
     template: str | None = None  # a kind of meeting, or "auto" (Automatic) to have one picked
     by: Writes | None = None  # who writes it, the usual one if not given
+
+
+class ZachCoreParts(BaseModel):
+    summaries: bool | None = None
+    tasks: bool | None = None
+    facts: bool | None = None
+    transcripts: bool | None = None
+
+
+class ZachCoreChange(BaseModel):
+    on: bool | None = None
+    address: str | None = None
+    space: str | None = None
+    key: str | None = None  # kept in Credential Manager for its address; never given back
+    parts: ZachCoreParts | None = None
+    never: list[str] | None = None  # clients none of whose meetings go
+    # What of the meetings that went to the server or space before: "take_back" from there and
+    # then send them to the new one (the usual), or "leave" them there and send them too.
+    before: Literal["take_back", "leave"] | None = None
+
+
+class ZachCoreTest(BaseModel):
+    address: str
+    space: str = "work"
+    key: str | None = None  # the one saved for the address, when not given
+
+
+class OlderBody(BaseModel):
+    since: str | None = None  # YYYY-MM-DD: recorded from that day; all when not given
+
+
+class TakeBackBody(BaseModel):
+    client: str | None = None  # only that client's meetings; all of them when not given
 
 
 class RecipeBody(BaseModel):
@@ -1176,6 +1211,8 @@ def create_app(token: str) -> FastAPI:
                 if run.meeting_id == meeting_id and run.what != "summary"
             ],
             "notes": [dict(row) for row in store.notes(meeting_id)],
+            # Whether ZachCore may have it, since when, and what of it waits (sender.py).
+            "zachcore": sender.meeting_status(store, meeting_id),
             "insights": insights.meeting_insights(store, meeting_id),
             "talk_time": [
                 dict(row) for row in store.talk_time(meeting_id, brief.unlisted(store, meeting_id))
@@ -1193,6 +1230,200 @@ def create_app(token: str) -> FastAPI:
                 if found["ticket"] != meeting["ticket"]
             ],
         }
+
+    # ZachCore ---------------------------------------------------------------------------
+
+    def wake_sender() -> None:
+        app.state.sender.wake.set()
+
+    def zachcore_clients(store: Store, uids: list[str]) -> dict[str, str | None]:
+        """The client of each of these meetings, by uid."""
+        found = {}
+        for uid in uids:
+            meeting = store.db.execute("SELECT * FROM meetings WHERE uid = ?", (uid,)).fetchone()
+            found[uid] = clients.of_meeting(store, meeting)["client"] if meeting else None
+        return found
+
+    def of_client(store: Store, uids: list[str], client: str) -> list[str]:
+        wanted = client.casefold()
+        return [
+            uid
+            for uid, name in zachcore_clients(store, uids).items()
+            if (name or "").casefold() == wanted
+        ]
+
+    def older(store: Store, since: str | None) -> list[str]:
+        """Meetings recorded before sending was turned on that may go now: processed, not
+        private, not taken back by hand, of no client none of whose meetings go."""
+        if since is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", since):
+            raise HTTPException(status_code=400, detail="since is a day, like 2026-11-01")
+        rows = store.db.execute(
+            "SELECT m.* FROM meetings m JOIN sends s ON s.uid = m.uid "
+            "WHERE s.wanted = 0 AND s.taken = 0 "
+            "AND m.status NOT IN ('recording', 'recorded', 'processing') "
+            "AND (? IS NULL OR substr(m.started_at, 1, 10) >= ?)",
+            (since, since),
+        ).fetchall()
+        return [row["uid"] for row in rows if not zachcore.kept_from_zachcore(store, row)]
+
+    @app.get("/api/zachcore", dependencies=auth)
+    def zachcore_status(store: Store = Depends(db)):
+        return sender.status(store)
+
+    @app.put("/api/zachcore", dependencies=auth)
+    def zachcore_change(body: ZachCoreChange, store: Store = Depends(db)):
+        """Where meetings go, with which key, and what goes. A server or space other than the
+        one meetings went to before asks once what of them (409 until ``before`` says)."""
+        was = sender.place(store)
+        address, space = (was.address, was.space) if was else (None, sender.WORK)
+        try:
+            address = sender.checked_address(body.address) if body.address is not None else address
+            space = sender.checked_space(body.space) if body.space is not None else space
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        key = None
+        if body.key is not None:
+            key = body.key.strip()
+            if not key or len(key) > 1000 or any(char.isspace() for char in key):
+                raise HTTPException(status_code=400, detail="That isn't a key: paste it whole")
+            if not address:
+                raise HTTPException(status_code=400, detail="Set the server's address first")
+        now = sender.Place(address, space) if address else None
+        moved = was is not None and now is not None and was.target != now.target
+        if moved and (left := before_move(store, was, now)) and body.before is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{left['count']} meeting(s) went to {left['space']} at {left['address']}: "
+                "say whether to take them back from there first",
+            )
+        if body.on and not (now and (key or apikeys.zachcore(now.address))):
+            raise HTTPException(status_code=400, detail="Set the address and the key first")
+        never = None
+        if body.never is not None:
+            try:
+                typed = [clients.checked(name) for name in body.never]
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            never = list({name.casefold(): name for name in typed if name}.values())
+        added = [
+            name
+            for name in never or []
+            if name.casefold() not in {old.casefold() for old in zachcore.never(store)}
+        ]
+        if key:  # Credential Manager, never the library
+            apikeys.store_zachcore(now.address, key)
+        with store.transaction():
+            if now:
+                store.set_setting(sender.ADDRESS, now.address)
+                store.set_setting(sender.SPACE, now.space)
+            if body.parts:
+                for part in zachcore.PARTS:
+                    if (on := getattr(body.parts, part)) is not None:
+                        store.set_setting(zachcore.setting(part), "1" if on else "0")
+                if body.parts.transcripts is not None:
+                    store.set_setting(outbox.TRANSCRIPTS, "1" if body.parts.transcripts else "0")
+            if never is not None:
+                store.set_setting(zachcore.NEVER, json.dumps(never))
+            if body.on is not None:
+                store.set_setting(outbox.ON, "1" if body.on else "0")
+            if moved and body.before:
+                outbox.move(store.db, was.target, body.before == "take_back")
+            if moved or key:  # what was refused before may be taken now
+                store.delete_setting(sender.STOPPED)
+        wake_sender()
+        sent = outbox.there(store.db)
+        return {
+            **sender.status(store),
+            # For each client none of whose meetings go now: how many ZachCore has, to ask
+            # whether to take them back.
+            "never_there": {name: len(of_client(store, sent, name)) for name in added},
+        }
+
+    def before_move(store: Store, was, now) -> dict | None:
+        """The meetings ZachCore has at the place they went to, when it isn't ``now``."""
+        if was is None or now is None or was.target == now.target:
+            return None
+        count = store.db.execute(
+            "SELECT COUNT(*) FROM sends WHERE target = ?", (was.target,)
+        ).fetchone()[0]
+        if not count:
+            return None
+        return {"place": was.target, "address": was.address, "space": was.space, "count": count}
+
+    @app.get("/api/zachcore/before", dependencies=auth)
+    def zachcore_before(address: str, space: str = "work", store: Store = Depends(db)):
+        """Asked before another server or space is saved: what of the meetings already there."""
+        try:
+            now = sender.Place(sender.checked_address(address), sender.checked_space(space))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"before": before_move(store, sender.place(store), now)}
+
+    @app.post("/api/zachcore/test", dependencies=auth)
+    def zachcore_test(body: ZachCoreTest):
+        """Whether a server takes a key for a space (the one saved for it, unless typed)."""
+        try:
+            where = sender.Place(
+                sender.checked_address(body.address), sender.checked_space(body.space)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        key = (body.key or "").strip() or apikeys.zachcore(where.address)
+        if not key:
+            raise HTTPException(status_code=400, detail="Paste the key first")
+        return sender.check(where, key)
+
+    @app.get("/api/zachcore/older", dependencies=auth)
+    def zachcore_older(since: str | None = None, store: Store = Depends(db)):
+        return {"count": len(older(store, since))}
+
+    @app.post("/api/zachcore/older", dependencies=auth)
+    def zachcore_send_older(body: OlderBody, store: Store = Depends(db)):
+        if store.setting(outbox.ON) != "1":
+            raise HTTPException(status_code=400, detail="Turn sending to ZachCore on first")
+        uids = older(store, body.since)
+        with store.transaction():
+            outbox.send_older(store.db, uids)
+        wake_sender()
+        return {"count": len(uids)}
+
+    @app.post("/api/zachcore/take-back", dependencies=auth)
+    def zachcore_take_back(body: TakeBackBody, store: Store = Depends(db)):
+        """Everything taken back (or one client's): what the server has goes back out, and
+        nothing of those meetings goes again until Send now."""
+        uids = outbox.there(store.db) + [
+            row["uid"]
+            for row in store.db.execute(
+                "SELECT DISTINCT uid FROM outbox WHERE what IN ('send', 'transcript')"
+            )
+        ]
+        uids = list(dict.fromkeys(uids))
+        if body.client is not None:
+            uids = of_client(store, uids, body.client)
+        with store.transaction():
+            there = sum(outbox.take_back(store.db, uid) for uid in uids)
+        wake_sender()
+        return {"count": there}
+
+    @app.post("/api/meetings/{meeting_id}/zachcore/send", dependencies=auth)
+    def zachcore_send_now(meeting_id: int, store: Store = Depends(db)):
+        meeting = meeting_or_404(store, meeting_id)
+        if store.setting(outbox.ON) != "1":
+            raise HTTPException(status_code=400, detail="Turn sending to ZachCore on first")
+        if kept := zachcore.kept_from_zachcore(store, meeting):
+            raise HTTPException(status_code=400, detail=f"{kept}: it doesn't go to ZachCore")
+        with store.transaction():
+            outbox.send_now(store.db, meeting_id)
+        wake_sender()
+        return sender.meeting_status(store, meeting_id)
+
+    @app.post("/api/meetings/{meeting_id}/zachcore/take-back", dependencies=auth)
+    def zachcore_take_back_one(meeting_id: int, store: Store = Depends(db)):
+        meeting = meeting_or_404(store, meeting_id)
+        with store.transaction():
+            outbox.take_back(store.db, meeting["uid"])
+        wake_sender()
+        return sender.meeting_status(store, meeting_id)
 
     def ticket_candidates(store: Store, meeting_id: int) -> list[dict]:
         try:

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { ShortcutAction } from "@/lib/shortcuts";
+import type { MeetingZachCore } from "@/lib/zachcore";
 
 /** Connection to the local Python engine (127.0.0.1 only, token-protected). */
 export type EngineInfo = { port: number; token: string };
@@ -186,6 +187,9 @@ export type MeetingDetail = {
   mentions: Mention[];
   /** Ticket numbers found in it, best first, other than its own. */
   ticket_suggestions: TicketFound[];
+  /** Whether ZachCore may have it, since when, and what of it waits (none: a library from
+   * before ZachCap sent anything). */
+  zachcore?: MeetingZachCore | null;
   /** The topics said in it, most said first. */
   topics?: TopicFound[];
   /** What the model on this PC is writing for it now, and the documents and answers it wrote

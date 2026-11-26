@@ -78,6 +78,7 @@ def meeting(store: Store, clock: Clock, uid: str = "meeting-1") -> int:
     store.db.execute("DELETE FROM outbox WHERE uid NOT LIKE 'meeting-%'")
     store.db.execute("UPDATE sends SET wanted = 0 WHERE uid NOT LIKE 'meeting-%'")
     store.db.commit()
+    clock.now = max(clock.now, time.time())  # however long making it took
     return m
 
 
@@ -85,6 +86,19 @@ def ready(store: Store, m: int) -> None:
     """Every voice named: its transcript may go."""
     store.db.execute("UPDATE meetings SET status = 'ready' WHERE id = ?", (m,))
     store.db.commit()
+
+
+def due(send: sender.Sender) -> float:
+    """When the last row waiting in the outbox is due: the half minute after a change runs
+    on the library's clock, which went on while a test worked (more of it on a slow PC)."""
+    store = Store(send.path)
+    try:
+        found = store.db.execute(
+            "SELECT MAX(MAX(quiet_until, retry_at)) FROM outbox WHERE state <> 'stopped'"
+        ).fetchone()[0]
+    finally:
+        store.close()
+    return float(found or 0)
 
 
 def drain(send: sender.Sender, clock: Clock, steps: int = 40) -> int:
@@ -95,7 +109,7 @@ def drain(send: sender.Sender, clock: Clock, steps: int = 40) -> int:
         if send.step():
             went += 1
             continue
-        clock.now = max(clock.now + 31, send.held_until)
+        clock.now = max(clock.now + 31, send.held_until, due(send) + 1)
         if not send.step():
             return went
         went += 1
@@ -742,6 +756,115 @@ def test_taking_back_refused_waits_too_until_put_right(store, fake, send, clock)
     store.delete_setting(sender.STOPPED)
     drain(send, clock)
     assert fake.messages["meeting-1"]["result"] == "private" and waiting(store) == []
+
+
+def test_a_client_set_to_never_after_it_went_sends_nothing_more(store, fake, send, clock):
+    store.set_setting(outbox.TRANSCRIPTS, "1")
+    m = meeting(store, clock)
+    ready(store, m)
+    drain(send, clock)
+    asked = len(fake.requests)  # its message and its transcript
+    store.set_setting(zachcore.NEVER, '["contoso"]')
+    store.update_meeting(m, title="Changed after")
+    store.edit_segment(store.transcript(m)[0]["id"], "Other words")
+    drain(send, clock)
+    assert len(fake.requests) == asked and waiting(store) == []  # it stays as it was there
+
+
+def test_send_now_goes_at_once_and_take_back_takes_it_out(store, fake, send, clock):
+    m = meeting(store, clock)
+    store.db.execute("UPDATE sends SET wanted = 0 WHERE uid = 'meeting-1'")  # from before
+    store.db.execute("DELETE FROM outbox")
+    store.db.commit()
+    with store.transaction():
+        outbox.send_now(store.db, m)
+    assert send.step() and len(fake.stored) == 1  # at once, no half minute
+    with store.transaction():
+        outbox.take_back(store.db, "meeting-1")
+    drain(send, clock)
+    assert fake.messages["meeting-1"]["result"] == "private"
+    store.update_meeting(m, title="Changed while taken back")
+    assert drain(send, clock) == 0  # taken back: nothing goes until Send now
+    with store.transaction():
+        outbox.send_now(store.db, m)
+    drain(send, clock)
+    assert body(fake)["title"] == "Changed while taken back" and len(fake.stored) == 2
+    store.update_meeting(m, title="And it goes on going")  # no longer taken back
+    drain(send, clock)
+    assert body(fake)["title"] == "And it goes on going"
+
+
+def test_send_now_never_takes_a_private_meeting(store, fake, send, clock):
+    m = meeting(store, clock)
+    store.update_meeting(m, private=1)
+    with pytest.raises(ValueError), store.transaction():
+        outbox.send_now(store.db, m)
+    assert waiting(store) == [] and drain(send, clock) == 0
+
+
+@pytest.mark.parametrize("first", [True, False])
+def test_another_server_gets_the_meetings_as_new(store, fake, send, clock, keys, first):
+    """Taken back from the old one first (the usual), or left there."""
+    m = meeting(store, clock)
+    drain(send, clock)
+    old = sender.place(store).target
+    other = Fake()
+    keys[other.address] = other.key
+    try:
+        store.set_setting(sender.ADDRESS, other.address)
+        with store.transaction():
+            assert outbox.move(store.db, old, first) == 1
+        drain(send, clock)
+        assert [uid for uid, _ in other.stored] == ["meeting-1"]
+        assert fake.messages["meeting-1"]["result"] == ("private" if first else "stored")
+        store.update_meeting(m, private=1)
+        drain(send, clock)
+        assert other.messages["meeting-1"]["result"] == "private"  # taken back where it is now
+    finally:
+        other.close()
+
+
+def test_a_redaction_for_the_old_server_goes_there_whatever_is_chosen(
+    store, fake, send, clock, keys
+):
+    m = meeting(store, clock)
+    drain(send, clock)
+    old = sender.place(store).target
+    redact.redact(store, m, 250.0, 300.0, with_audio=False)
+    other = Fake()
+    keys[other.address] = other.key
+    try:
+        store.set_setting(sender.ADDRESS, other.address)
+        with store.transaction():
+            assert outbox.move(store.db, old, False) == 0  # it stays where it is, to be redacted
+        drain(send, clock)
+        assert "in/redact" in paths(fake) and other.requests == []
+    finally:
+        other.close()
+
+
+def test_a_server_that_doesnt_answer_any_more_can_be_left(store, fake, send, clock, keys):
+    """Taking back from a test server that is gone holds them up; leaving them there doesn't."""
+    meeting(store, clock)
+    drain(send, clock)
+    old = sender.place(store).target
+    fake.down = True
+    other = Fake()
+    keys[other.address] = other.key
+    try:
+        store.set_setting(sender.ADDRESS, other.address)
+        with store.transaction():
+            outbox.move(store.db, old, True)
+        clock.on(31)
+        assert send.step() and not send.step()  # the old one doesn't answer: it waits
+        assert other.stored == [] and waiting(store) == ["recall", "send"]
+        with store.transaction():
+            assert outbox.move(store.db, old, False) == 1  # left there after all
+        send.held_until = 0
+        drain(send, clock)
+        assert [uid for uid, _ in other.stored] == ["meeting-1"]
+    finally:
+        other.close()
 
 
 def test_an_outbox_from_before_it_sent_gets_its_columns(tmp_path):
