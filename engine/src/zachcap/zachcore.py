@@ -13,6 +13,12 @@ left out (brief.py), voices too short to tell (minor) and lines with no voice ar
 Three switches say what goes besides the title, the time, the client, the ticket, the people
 and their talk: summaries (the overview, your notes, decisions, questions and topics), tasks
 (with the ones that went), and facts. The fourth, transcripts, is the sender's.
+
+What a message says replaces what ZachCore has of it, even when it is empty; what it leaves out
+stays there as it is. So a switch that is on sends its lists, empty too (a new summary without
+decisions takes the old ones off), and one that is off leaves them out: turning a switch off
+takes nothing out of ZachCore. That is what taking back is for. A meeting without a client or a
+ticket sends it as null, which takes off one it had.
 """
 
 from __future__ import annotations
@@ -92,12 +98,14 @@ def message(store: Store, meeting_id: int, said: Collection[str] = PARTS) -> dic
             key=lambda item: (item["said_at"] is None, item["said_at"] or 0, item["task"]),
         )
         body["tasks"] = [_task(item, owner(item)) for item in items]
-        body["gone"] = [
+        gone = [
             row["uid"]
             for row in store.db.execute(
                 "SELECT uid FROM items_gone WHERE meeting_uid = ? ORDER BY uid", (meeting["uid"],)
             )
         ]
+        if gone:  # what to do, not what there is: nothing to say when nothing went
+            body["gone"] = gone
     if "facts" in said:
         body["facts"] = _facts(content, client, voice_of, me, named)
 
@@ -107,12 +115,10 @@ def message(store: Store, meeting_id: int, said: Collection[str] = PARTS) -> dic
         head["seconds"] = round(meeting["duration"])
     if meeting["source_app"]:
         head["app"] = meeting["source_app"]
-    if client:
-        head[CLIENT] = client
-    if meeting["ticket"]:
-        head["ticket"] = meeting["ticket"]
+    head[CLIENT] = client or None  # None takes off one it had
+    head["ticket"] = meeting["ticket"] or None
     head.update(_talk(store, meeting_id, voices, named))
-    return {**head, **{key: value for key, value in body.items() if value}}
+    return {**head, **body}
 
 
 def _voices(store: Store, meeting_id: int) -> dict[int, sqlite3.Row]:
@@ -169,8 +175,7 @@ def _talk(store: Store, meeting_id: int, voices: dict, named: set[int]) -> dict:
         if total:
             person["share"] = round(long / total, 2)
     talk: dict = {"share": round(mine / total, 2)} if total else {}
-    if listed:
-        talk["people"] = listed
+    talk["people"] = listed  # nobody now, too: who was there before isn't, any more
     return talk
 
 

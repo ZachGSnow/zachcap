@@ -281,12 +281,32 @@ def test_the_switches_say_what_goes_with_the_meeting(store: Store, said, keys):
     assert set(zachcore.message(store, meeting, said)) == head | keys
 
 
-def test_without_its_client_or_ticket_neither_goes(store: Store):
+def test_without_its_client_or_ticket_both_go_as_null_to_take_them_off(store: Store):
     meeting = call(store)
     assert zachcore.message(store, meeting)["client"] == "Contoso"
     store.update_meeting(meeting, client=None, client_source="user", ticket=None)
     sent = zachcore.message(store, meeting)
-    assert "client" not in sent and "ticket" not in sent
+    assert sent["client"] is None and sent["ticket"] is None
+
+
+def test_a_switch_on_sends_its_lists_even_empty_and_one_off_leaves_them_out(store: Store):
+    """Sent, a list replaces what ZachCore has, empty too; left out, it stays as it is there."""
+    meeting = call(store)
+    sent = zachcore.message(store, meeting)  # all on, and nothing summarized yet
+    for key in ("decisions", "questions", "topics", "tasks", "facts"):
+        assert sent[key] == [], key
+    assert "gone" not in sent  # nothing went: nothing to do
+    store.delete_note(store.notes(meeting)[0]["id"])
+    store.delete_note(store.notes(meeting)[0]["id"])
+    assert zachcore.message(store, meeting)["overview"] == ""  # no notes left, no summary
+    for part, keys in (("summaries", ("overview", "decisions")), ("tasks", ("tasks",))):
+        others = [other for other in zachcore.PARTS if other != part]
+        assert not set(keys) & set(zachcore.message(store, meeting, others)), part
+    store.db.execute(
+        "UPDATE meeting_speakers SET status = 'left_out' WHERE meeting_id = ?", (meeting,)
+    )
+    store.db.commit()
+    assert zachcore.message(store, meeting)["people"] == []  # nobody listed now: none there
 
 
 def test_a_client_set_on_the_meeting_wins(store: Store):
