@@ -6,6 +6,9 @@ in parts of about ten minutes, cut at pauses, each with what was decided and lef
 it. What it noted in each is put together here, and a last call writes the overview. What it
 answers is held to the meeting: an owner or a speaker is someone who spoke in it, a time is one
 of its lines', and a due date was said in it.
+
+It writes no facts, no quotes and no seconds of its decisions and questions, which a summary by
+Claude has (summarize.kept_from): what such a summary sends to ZachCore has none of them.
 """
 
 from __future__ import annotations

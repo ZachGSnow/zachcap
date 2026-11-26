@@ -483,7 +483,7 @@ def rows(path: Path, skip: tuple[str, ...] = ()) -> dict[str, list]:
 
 
 NEW = ("sends", "outbox", "items_gone", "changes")  # ("changes" only counts)
-ADDED = ("uid", "voice_id")  # columns added to tables a library had
+ADDED = ("uid", "voice_id", "quote")  # columns added to tables a library had
 
 
 def test_a_library_made_by_0_5_0_keeps_everything_and_sends_nothing(old: Path):

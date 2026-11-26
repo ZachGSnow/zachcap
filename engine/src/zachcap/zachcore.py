@@ -29,8 +29,9 @@ import math
 import re
 import sqlite3
 from collections.abc import Collection
+from datetime import date
 
-from . import brief, clients, privacy
+from . import brief, clients, due, privacy
 from .store import IN_SHARED, UNKNOWN, Store
 
 ME = "p-me"  # ZachCore's ref for whoever sends: you
@@ -98,7 +99,8 @@ def message(store: Store, meeting_id: int, said: Collection[str] = PARTS) -> dic
             (item for item in store.action_items(meeting_id=meeting_id) if item["uid"]),
             key=lambda item: (item["said_at"] is None, item["said_at"] or 0, item["task"]),
         )
-        body["tasks"] = [_task(item, owner(item)) for item in items]
+        said_on = date.fromisoformat(meeting["started_at"][:10])
+        body["tasks"] = [_task(item, owner(item), said_on) for item in items]
         gone = [
             row["uid"]
             for row in store.db.execute(
@@ -196,20 +198,18 @@ def _talk(store: Store, meeting_id: int, voices: dict, named: set[int]) -> dict:
     return talk
 
 
-def _task(item: sqlite3.Row, owner: str) -> dict:
+def _task(item: sqlite3.Row, owner: str, said_on: date) -> dict:
+    """An action item as a task: due on the day its words name (counted from the day of the
+    meeting, and none when they don't name one), with the words it was agreed in."""
     task = {"ref": item["uid"], "title": item["task"], "owner": owner}
-    if day := _day(item["due"]):
-        task["due"] = day
+    if day := due.day(item["due"], said_on):
+        task["due"] = day.isoformat()
     task["done"] = item["status"] == "done"
     if item["said_at"] is not None:
         task["sec"] = _number(item["said_at"])
+    if item["quote"]:
+        task["quote"] = item["quote"]
     return task
-
-
-def _day(due: str | None) -> str | None:
-    """A due date ZachCore can file: only one that is already a day."""
-    due = (due or "").strip()
-    return due if re.fullmatch(r"\d{4}-\d\d-\d\d", due) else None
 
 
 def _facts(content: dict, client: str | None, voice_of, me: set[str], named: set[int]) -> list:

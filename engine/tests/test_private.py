@@ -270,6 +270,7 @@ SUMMARY = {
     "who_said_what": [],
     "open_questions": [],
     "topics": [],
+    "facts": [],
 }
 
 
