@@ -255,6 +255,7 @@ class ImportBody(BaseModel):
 
 class SettingsBody(BaseModel):
     summary_model: str | None = None
+    summary_language: str | None = None  # one of summarize.SUMMARY_LANGUAGES, or "meeting"
     writer: Writes | None = None  # who writes summaries and documents
     local_model: str | None = None  # the model on this PC, by Ollama's name; "" for none
     language: str | None = None
@@ -2461,7 +2462,15 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/settings", dependencies=auth)
     def get_settings(store: Store = Depends(db)):
-        from .summarize import MODELS, PRICES, meeting_template, summary_model
+        from .summarize import (
+            MEETINGS_OWN,
+            MODELS,
+            PRICES,
+            SUMMARY_LANGUAGE,
+            SUMMARY_LANGUAGES,
+            meeting_template,
+            summary_model,
+        )
 
         export_folder, export_refused = folder_setting(store, "export_folder")
         watch_folder, watch_refused = folder_setting(store, watchfolder.SETTING)
@@ -2470,6 +2479,8 @@ def create_app(token: str) -> FastAPI:
             headers=NO_STORE,
             content={
                 "summary_model": summary_model(store),
+                "summary_language": store.setting(SUMMARY_LANGUAGE) or MEETINGS_OWN,
+                "summary_languages": list(SUMMARY_LANGUAGES),
                 "writer": store.setting(local_summary.WRITER, "claude"),
                 "local_model": store.setting(local_summary.MODEL, ""),
                 "summary_models": [
@@ -2634,6 +2645,12 @@ def create_app(token: str) -> FastAPI:
             store.set_setting(
                 mentions.ALSO_ANSWER_TO, ", ".join(mentions.aliases(body.also_answer_to))
             )
+        if body.summary_language is not None:
+            from .summarize import MEETINGS_OWN, SUMMARY_LANGUAGE, SUMMARY_LANGUAGES
+
+            if body.summary_language not in (MEETINGS_OWN, *SUMMARY_LANGUAGES):
+                raise HTTPException(status_code=400, detail="Unknown language for summaries")
+            store.set_setting(SUMMARY_LANGUAGE, body.summary_language)
         if body.summary_model is not None:
             if body.summary_model not in MODELS:
                 raise HTTPException(status_code=400, detail="Unknown summary model")

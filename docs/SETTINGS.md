@@ -11,6 +11,7 @@ Everything is set in the app under **Settings**.
 | Language | Whisper's language, or automatic detection | English |
 | Words to know | Terms to spell right, one per line; `Term: misheard, misheard` adds corrections. Add from a file offers the names and terms found in a text file to tick | empty |
 | Claude model | Opus 5.5, Sonnet 5.5 or Fable 5.1 | Opus 5.5 |
+| Write summaries in | The language of summaries and documents, by Claude or on this PC: the one the meeting was held in, or one you pick | The meeting's language |
 | Model on this PC | One of the models Ollama has on this PC, to write summaries and documents without sending anything | None |
 | Written by | Who writes summaries and documents unless you pick the other on a meeting's page: Claude, or the model on this PC (private meetings are always left to that one) | Claude |
 | Faster speaker separation | Looks for who's speaking half as often: a third to a half less time separating speakers on a PC without an NVIDIA GPU; turn edges a little less exact | Off |

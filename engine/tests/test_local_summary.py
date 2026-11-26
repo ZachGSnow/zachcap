@@ -1874,3 +1874,26 @@ def test_a_name_known_only_from_private_meetings_isnt_written_from(store, model)
     store.update_meeting(shared, private=1)
     local_summary.summary(store, shared, "small:4b")
     assert "Speaker 3 (Priya Shah?): I can look at it." in model.calls[-1].user
+
+
+def test_the_model_on_this_pc_writes_in_the_language_asked_for(store, model):
+    meeting = add_meeting(store, SHORT)
+    store.set_setting(summarize.SUMMARY_LANGUAGE, "German")
+    local_summary.summary(store, meeting, "small:4b")
+    [call] = model.calls
+    assert "Write in German, whatever language the meeting was held in." in call.system
+
+
+def test_the_language_for_summaries_is_a_setting(store):
+    client = TestClient(engine_api.create_app("test-token"), base_url=LOCAL)
+    said = client.get("/api/settings", headers=AUTH).json()
+    assert said["summary_language"] == "meeting" and "Spanish" in said["summary_languages"]
+    assert (
+        client.put("/api/settings", headers=AUTH, json={"summary_language": "Spanish"}).status_code
+        == 200
+    )
+    assert client.get("/api/settings", headers=AUTH).json()["summary_language"] == "Spanish"
+    assert (
+        client.put("/api/settings", headers=AUTH, json={"summary_language": "Elvish"}).status_code
+        == 400
+    )

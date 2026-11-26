@@ -7,6 +7,7 @@ What's new in each version of ZachCap, newest first. It's in the app as well, un
 ### New
 
 - **Text only, if you like.** Keep recordings has a new choice, Until it's processed: once a meeting is processed and every voice in it has a name, its audio and snapshot pictures are deleted and the text stays. It can't be played or processed again after.
+- **Summaries in the language you want.** Settings > Summaries > Write summaries in: the language the meeting was held in (the default, now said to Claude and the model on this PC, which chose before) or one you pick, for summaries and documents. Due words are worked out into days only in English.
 
 ### Improved
 
