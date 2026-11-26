@@ -92,12 +92,12 @@ def message(store: Store, meeting_id: int, said: Collection[str] = PARTS) -> dic
         return voice or voices.get(store.voice_named(meeting_id, name))
 
     def owner(item: sqlite3.Row) -> str:
-        voice = voice_of(item["voice_id"], item["owner"])
+        voice = voice_of(item["voice_id"], item["owner_written"])
         if voice is not None:
             named.add(voice["id"])
             who = _who(voice)
             return who["ref"] if isinstance(who, dict) else who
-        name = " ".join(item["owner"].split())
+        name = " ".join(item["owner_written"].split())
         if not name or name.casefold() == "unassigned":
             return NOBODY
         return ME if _folded(name) in me else name
