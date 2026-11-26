@@ -23,10 +23,12 @@ What each answer means (ZachCore's docs/sources.md):
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import math
 import re
+import socket
 import ssl
 import threading
 import time
@@ -47,7 +49,10 @@ PAUSED = "zachcore_paused_until"  # seconds since 1970: paused in ZachCore (423)
 FULL = "zachcore_full_until"  # ... out of writing for today (503)
 WORK = "work"
 PART = 2000  # lines in one part of a transcript, at most
-TIMEOUT = 60  # seconds for one request
+TIMEOUT = 60  # seconds for one read of a request
+DEADLINE = 300  # seconds for a whole request: one sending a byte a minute is cut off
+MOST_REV = 2**53  # the highest revision ZachCore (JavaScript) keeps exactly
+REFUSED = "ZachCore refused the key or the space"
 MOST_ANSWER = 1_000_000  # bytes of an answer read, at most
 FIRST_WAIT, LONGEST_WAIT = 30, 3600  # after no answer, then twice as long each time
 PAUSED_WAIT = 15 * 60
@@ -142,7 +147,10 @@ def request(where: Place, key: str, path: str, body: dict | None = None) -> Answ
         data = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         data = data.encode("utf-8")
         headers["Content-Type"] = "application/json"
+    timer = threading.Timer(DEADLINE, _cut, (conn,))
+    timer.daemon = True
     try:
+        timer.start()
         conn.request(
             "GET" if body is None else "POST",
             f"{parts.path}/v1/s/{where.space}/{path}",
@@ -158,16 +166,48 @@ def request(where: Place, key: str, path: str, body: dict | None = None) -> Answ
     except (OSError, http.client.HTTPException):
         return Answer(None)
     finally:
+        timer.cancel()
         conn.close()
-    try:
-        said = json.loads(raw) if raw else None
-    except ValueError:
-        said = None
+    said = _parsed(raw)
     try:
         seconds = float(wait) if wait is not None else None
     except ValueError:
         seconds = None
     return Answer(status, said, seconds if seconds is not None and math.isfinite(seconds) else None)
+
+
+def _cut(conn: http.client.HTTPConnection) -> None:
+    """A request past its deadline: its socket is shut, so the read waiting on it ends."""
+    sock = conn.sock
+    if sock is not None:
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
+
+
+def _parsed(raw: bytes):
+    """An answer's JSON. None when there is none, or it isn't plain JSON: NaN and Infinity
+    aren't, and a nesting too deep to read is nothing ZachCore says."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw, parse_constant=_not_json)
+    except (ValueError, RecursionError):
+        return None
+
+
+def _not_json(name: str):
+    raise ValueError(f"{name} isn't JSON")
+
+
+def _backoff(tries: int) -> float:
+    """How long after ``tries`` failures in a row: half a minute, twice as long each time,
+    up to an hour."""
+    return min(FIRST_WAIT * 2 ** min(tries, 20), LONGEST_WAIT)
+
+
+def unrefuse(db) -> None:
+    """A new key, address or space: what was refused may be taken now, so it goes at once."""
+    db.execute("UPDATE outbox SET retry_at = 0 WHERE reason LIKE ?", (f"{REFUSED}%",))
 
 
 class Sender:
@@ -184,8 +224,24 @@ class Sender:
         self.clock = clock
         self.send = send
         self.wake = threading.Event()
-        self.failures = 0  # requests in a row without an answer
-        self.held_until = 0.0  # after one: nothing goes before this
+        # Per server address (None: anywhere, after a fault outside any one request): how
+        # many requests in a row had no answer, and when the next may go. A server that is
+        # gone holds back only what goes there.
+        self.held: dict[str | None, tuple[int, float]] = {}
+
+    @property
+    def held_until(self) -> float:
+        """When the last hold ends."""
+        return max((until for _, until in self.held.values()), default=0.0)
+
+    @held_until.setter
+    def held_until(self, until: float) -> None:
+        self.held = {
+            where: (failures, min(was, until)) for where, (failures, was) in self.held.items()
+        }
+
+    def _held(self, where: Place, now: float) -> bool:
+        return any(now < self.held.get(at, (0, 0.0))[1] for at in (None, where.address))
 
     def run_forever(self, stop: threading.Event | None = None) -> None:
         stop = stop or threading.Event()
@@ -193,7 +249,7 @@ class Sender:
             try:
                 went = self.step()
             except Exception:  # what it was is not kept: it could say what was sent
-                self._no_answer(self.clock())
+                self._no_answer(self.clock(), None)
                 went = False
             if not went:
                 self.wake.wait(IDLE)
@@ -209,7 +265,7 @@ class Sender:
 
     def _step(self, store: Store) -> bool:
         now = self.clock()
-        if now < self.held_until or now < _seconds(store.setting(FULL)):
+        if now < self.held.get(None, (0, 0.0))[1] or now < _seconds(store.setting(FULL)):
             return False
         here = place(store)
         halted = (stopped(store) or {}).get("place")
@@ -243,11 +299,11 @@ class Sender:
                         _done(store, row, row["version"])
                     return True
                 where = Place.of(row["target"])
-                if where.target != halted and (key := key_of(where)):
-                    self._take_back(store, row, where, key, now)
+                if where.target != halted and not self._held(where, now) and (key := key_of(where)):
+                    self._guarded(store, row, now, self._take_back, store, row, where, key, now)
                     return True
                 continue
-            if not on or here is None or here.target == halted or paused:
+            if not on or here is None or here.target == halted or paused or self._held(here, now):
                 continue
             if row["uid"] in taking or row["target"] not in (None, here.target):
                 continue  # taking back goes first; sent to another server, asked about there
@@ -262,12 +318,21 @@ class Sender:
             if row["status"] in BUSY or not (key := key_of(here)):
                 continue
             if row["what"] == "send":
-                self._message(store, row, here, key, said, now)
+                self._guarded(store, row, now, self._message, store, row, here, key, said, now)
                 return True
             if lines and (row["status"] == "ready" or now - _started(row["started_at"]) > NAMES):
-                self._transcript(store, row, here, key, now)
+                self._guarded(store, row, now, self._transcript, store, row, here, key, now)
                 return True
         return False
+
+    def _guarded(self, store: Store, row, now: float, go: Callable[..., None], *args) -> None:
+        """One row's request. Should something go wrong in it (an answer that can't be read,
+        a fault of ours), that row waits, longer each time, and the rows after it go."""
+        try:
+            go(*args)
+        except Exception:  # what it was is not kept: it could say what was sent
+            with _writing(store):
+                _later(store, row, "Something went wrong sending it", now + _backoff(row["tries"]))
 
     # Messages ---------------------------------------------------------------------------
 
@@ -299,7 +364,7 @@ class Sender:
             else:
                 answer, digest = Answer(200), None  # the server has a newer one of these
         if answer.status == 200:
-            self._answered(store, row, rev, "sent_hash", digest, version)
+            self._answered(store, row, here, rev, "sent_hash", digest, version)
             return
         if answer.status in NOT_KEPT:
             _put_back(store, row, here, before)
@@ -336,7 +401,7 @@ class Sender:
                     _put_back(store, row, here, before)
                 self._failed(store, row, here, answer, now)
                 return
-        self._answered(store, row, rev, "lines_hash", digest, version)
+        self._answered(store, row, here, rev, "lines_hash", digest, version)
 
     # Taking back ------------------------------------------------------------------------
 
@@ -369,7 +434,7 @@ class Sender:
         if answer.status != 200:
             self._failed(store, row, where, answer, now)
             return
-        self.failures = 0
+        self.held.pop(where.address, None)
         with _writing(store):
             store.db.execute("DELETE FROM outbox WHERE id = ?", (row["id"],))
             if row["what"] == "recall":
@@ -399,15 +464,24 @@ class Sender:
             for item in answer.body
             if isinstance(item, dict) and item.get("ref") == row["uid"]
         ]
-        found = [rev for rev in revs if isinstance(rev, int | float) and not isinstance(rev, bool)]
-        return int(max(found)) if found else None
+        # A plain integer ZachCore could have been sent: no bool, float, NaN or giant, which
+        # would make the next revision fail or never fit.
+        found = [rev for rev in revs if type(rev) is int and 0 < rev <= MOST_REV]
+        return max(found) if found else None
 
     def _answered(
-        self, store: Store, row, rev: int, column: str, digest: str | None, version: int
+        self,
+        store: Store,
+        row,
+        where: Place,
+        rev: int,
+        column: str,
+        digest: str | None,
+        version: int,
     ) -> None:
         """Taken: the server has what it said (``digest``; None: something newer), which was
         the meeting at its revision ``version``."""
-        self.failures = 0
+        self.held.pop(where.address, None)
         with _writing(store):
             store.db.execute(
                 f"UPDATE sends SET {column} = ?, sent_at = ? WHERE uid = ? AND sent_rev = ?",
@@ -420,7 +494,7 @@ class Sender:
         status, at = answer.status, now
         if status in (401, 403, 404):
             store.set_setting(STOPPED, json.dumps({"place": where.target, "status": status}))
-            why = f"ZachCore refused the key or the space ({status})"
+            why, at = f"{REFUSED} ({status})", now + LONGEST_WAIT  # or a new key (unrefuse)
         elif status == 423 and row["what"] not in TAKE_BACK:
             store.set_setting(PAUSED, str(int(now + PAUSED_WAIT)))
             why = "Paused in ZachCore"
@@ -436,16 +510,17 @@ class Sender:
                 )
             return
         else:
-            at = now + self._no_answer(now)
+            at = now + self._no_answer(now, where.address)
             why = "ZachCore didn't answer" if status is None else f"ZachCore answered {status}"
         with _writing(store):
             _later(store, row, why, at)
 
-    def _no_answer(self, now: float) -> float:
-        """Nothing goes for a while: longer each time in a row, up to an hour."""
-        self.failures += 1
-        wait = min(FIRST_WAIT * 2 ** min(self.failures - 1, 20), LONGEST_WAIT)
-        self.held_until = now + wait
+    def _no_answer(self, now: float, address: str | None) -> float:
+        """Nothing goes to that server (None: anywhere) for a while: longer each time in a row,
+        up to an hour."""
+        failures = self.held.get(address, (0, 0.0))[0] + 1
+        wait = _backoff(failures - 1)
+        self.held[address] = (failures, now + wait)
         return wait
 
 

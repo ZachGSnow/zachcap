@@ -13,6 +13,7 @@ What's new in each version of ZachCap, newest first. It's in the app as well, un
 ### Fixed
 
 - **A summary written on this PC of a meeting that isn't private** no longer reads a voice as someone known only from private meetings ("Speaker 3 (Dana?)"), as Claude's summaries never did: what it writes can go to Claude and ZachCore.
+- **A ZachCore server that is gone, refuses or answers wrongly** holds back only what goes to it: a take-back waiting for an old server no longer stops meetings going to the new one, two servers that refuse the key wait instead of being asked again and again, and an answer that can't be read, or one that never ends, no longer stops sending.
 - **What leaves the PC** is said right in About and the README now that meetings can go to ZachCore: a summary written on this PC goes there too while sending is on.
 - **An action item follows its voice.** Once you name the voice that promised it, or ZachCap recognizes it, the item shows that person, as ZachCore does, and one your own voice promised counts as yours. It kept the name the summary wrote, like Speaker 2, until the next summary.
 - **A ZachCore server whose certificate isn't trusted** is said so by Test the connection, with the reason (self-signed, expired, another name), instead of "No answer from that address".

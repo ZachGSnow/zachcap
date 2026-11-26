@@ -1331,6 +1331,7 @@ def create_app(token: str) -> FastAPI:
                 outbox.move(store.db, was.target, body.before == "take_back")
             if moved or key:  # what was refused before may be taken now
                 store.delete_setting(sender.STOPPED)
+                sender.unrefuse(store.db)
         wake_sender()
         sent = outbox.there(store.db)
         return {
@@ -1369,7 +1370,10 @@ def create_app(token: str) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        key = (body.key or "").strip() or apikeys.zachcore(where.address)
+        typed = (body.key or "").strip()
+        if len(typed) > 1000 or any(char.isspace() for char in typed):
+            raise HTTPException(status_code=400, detail="That isn't a key: paste it whole")
+        key = typed or apikeys.zachcore(where.address)
         if not key:
             raise HTTPException(status_code=400, detail="Paste the key first")
         return sender.check(where, key)
