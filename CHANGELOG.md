@@ -2,7 +2,9 @@
 
 What's new in each version of ZachCap, newest first. It's in the app as well, under **About**. The releases themselves are on [GitHub](https://github.com/ZachGSnow/zachcap/releases).
 
-## Unreleased
+## 0.7.0 - 2026-11-26
+
+Help during the call, and summaries your way.
 
 ### New
 

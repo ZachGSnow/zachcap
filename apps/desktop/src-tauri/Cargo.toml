@@ -1,6 +1,6 @@
 [package]
 name = "zachcap"
-version = "0.6.0"
+version = "0.7.0"
 description = "ZachCap: a local meeting recorder that knows who's talking"
 authors = ["Zach Snow"]
 license = "MIT"
