@@ -78,6 +78,7 @@ def meeting(store: Store, clock: Clock, uid: str = "meeting-1") -> int:
     store.db.execute("DELETE FROM outbox WHERE uid NOT LIKE 'meeting-%'")
     store.db.execute("UPDATE sends SET wanted = 0 WHERE uid NOT LIKE 'meeting-%'")
     store.db.commit()
+    clock.now = max(clock.now, time.time())  # however long making it took
     return m
 
 
@@ -85,6 +86,19 @@ def ready(store: Store, m: int) -> None:
     """Every voice named: its transcript may go."""
     store.db.execute("UPDATE meetings SET status = 'ready' WHERE id = ?", (m,))
     store.db.commit()
+
+
+def due(send: sender.Sender) -> float:
+    """When the last row waiting in the outbox is due: the half minute after a change runs
+    on the library's clock, which went on while a test worked (more of it on a slow PC)."""
+    store = Store(send.path)
+    try:
+        found = store.db.execute(
+            "SELECT MAX(MAX(quiet_until, retry_at)) FROM outbox WHERE state <> 'stopped'"
+        ).fetchone()[0]
+    finally:
+        store.close()
+    return float(found or 0)
 
 
 def drain(send: sender.Sender, clock: Clock, steps: int = 40) -> int:
@@ -95,7 +109,7 @@ def drain(send: sender.Sender, clock: Clock, steps: int = 40) -> int:
         if send.step():
             went += 1
             continue
-        clock.now = max(clock.now + 31, send.held_until)
+        clock.now = max(clock.now + 31, send.held_until, due(send) + 1)
         if not send.step():
             return went
         went += 1
