@@ -22,7 +22,8 @@ followTheme();
 
 // The shell opens a second window over the call while recording: the live panel. It has no
 // toasts of its own; the main window and the shell's notifications say what happens.
-const livePanel = isTauri() && getCurrentWindow().label === "live";
+// In a browser in development, ?live shows the panel, to look at it.
+const livePanel = (isTauri() && getCurrentWindow().label === "live") || (import.meta.env.DEV && location.search === "?live");
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

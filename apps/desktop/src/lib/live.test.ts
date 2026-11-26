@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { LiveLine, LiveState } from "./engine";
-import { EMPTY_VIEW, LINES_SHOWN, atEnd, dot, elapsedNow, livePath, mergeLines, notices, speaker } from "./live";
+import { EMPTY_VIEW, LINES_SHOWN, atEnd, catchUpBy, dot, elapsedNow, livePath, mergeLines, notices, speaker } from "./live";
 
 function line(id: number, track: LiveLine["track"] = "system"): LiveLine {
   return { id, track, start: id * 5, end: id * 5 + 2, text: `line ${id}` };
@@ -135,5 +135,12 @@ describe("what the live panel says", () => {
     expect(notices(state({ paused: true }), null).map((n) => n.key)).toEqual(["paused"]);
     expect(notices(state({ recording: false, on: false }), null).map((n) => n.key)).toEqual(["ended"]);
     expect(notices(state({ on: false, waiting: true }), null).map((n) => n.key)).toEqual(["off"]);
+  });
+});
+
+describe("catchUpBy", () => {
+  it("says who wrote what Catch me up said", () => {
+    expect(catchUpBy({ by: "claude", model: "claude-haiku-5-5" })).toBe("By Claude Haiku");
+    expect(catchUpBy({ by: "local", model: "qwen3.5:4b" })).toBe("By qwen3.5:4b on this PC");
   });
 });

@@ -60,6 +60,14 @@ export function atEnd(box: { scrollTop: number; scrollHeight: number; clientHeig
   return box.scrollHeight - box.scrollTop - box.clientHeight <= slack;
 }
 
+/** What Catch me up said of the call so far (the engine's /api/live/catch-up). */
+export type CatchUp = { text: string; by: "claude" | "local"; model: string; cost_usd: number };
+
+/** Who wrote a catch-up, as the panel says under it. */
+export function catchUpBy(said: Pick<CatchUp, "by" | "model">): string {
+  return said.by === "claude" ? "By Claude Haiku" : `By ${said.model} on this PC`;
+}
+
 export type LiveNotice = { key: string; tone: "error" | "warning" | "info"; text: string };
 
 /** What the panel says above the lines, most important first: the engine out of reach, what
