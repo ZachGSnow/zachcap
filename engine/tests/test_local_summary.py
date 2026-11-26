@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from zachcap import api as engine_api
-from zachcap import clients, local_summary, ollama, pipeline, prompts, summarize
+from zachcap import clients, local_summary, ollama, pipeline, prompts, summarize, zachcore
 from zachcap.api import create_app
 from zachcap.local_summary import Line
 from zachcap.store import Store
@@ -228,6 +228,7 @@ def test_answers_are_held_to_the_meeting(store, model):
         ("Sam", "Meet", None, "action", "00:03"),  # nor a time
     ]
     assert kept["decisions"] == ["It's on Friday."] and kept["open_questions"] == []
+    assert kept["decisions_said_at"] == [None]  # as a plain sentence: no time came with it
     points = ["One.", "Two.", "Three.", "Four."]
     assert kept["who_said_what"] == [{"speaker": "Dana", "points": points}]
     assert (kept["overview"], kept["title"]) == ("It is on Friday.", "")
@@ -237,8 +238,8 @@ def test_answers_are_held_to_the_meeting(store, model):
         {"topics": ["The cutover"]},
         {"action_items": 3},
         {"who_said_what": "Dana"},
-        {"decisions": {"text": "Keep it."}},
-        {"open_questions": [{"text": "Who?"}]},
+        {"decisions": [5, 6]},
+        {"open_questions": [["Who?"]]},
     ):
         with pytest.raises(ollama.Failed, match="didn't answer as asked"):
             local_summary.held(odd, part, ["Sam"], local_summary.WHOLE)
@@ -254,6 +255,8 @@ DANA = {"speaker": "Dana", "points": ["One."]}
         ("decisions", "Keep it.", ["Keep it."]),
         ("decisions", [{"a": 1}, "Keep it.", ["Keep that."], 5, None], ["Keep it."]),
         ("open_questions", "Who?", ["Who?"]),
+        ("decisions", {"text": "Keep it."}, ["Keep it."]),
+        ("open_questions", [{"text": "Who?"}, {"said_at": "00:03"}, {"text": 5}], ["Who?"]),
         ("topics", MAIL, [MAIL]),
         ("topics", ["Phones", {**MAIL, "start": {}}], [MAIL]),
         ("who_said_what", [{**DANA, "points": "One."}, {**DANA, "points": 3}, 7], [DANA]),
@@ -1037,6 +1040,20 @@ def busy(parts: int) -> dict:
         "open_questions": [f"Open {n}: who covers the phones of site {n}?" for n in range(parts)],
         "topics": [{"title": f"Topic {n} of the move", "start": f"{n}:00"} for n in range(14)],
         "template": "incident",
+        # As a summary by Claude has them since 0.6.0: seconds beside the decisions and
+        # questions, and facts.
+        "decisions_said_at": [60.0 * n for n in range(parts * 2)],
+        "open_questions_said_at": [30.0 * n if n % 3 else None for n in range(parts)],
+        "facts": [
+            {
+                "about": ("Dana", "Priya")[n % 2],
+                "name": f"Mailboxes of site {n}",
+                "value": f"{100 + n} mailboxes",
+                "said_at": float(n),
+                "quote": f"site {n} has {100 + n} mailboxes",
+            }
+            for n in range(parts * 3)
+        ],
     }
 
 
@@ -1057,6 +1074,10 @@ def test_a_summary_that_is_too_long_is_shortened(parts, most):
     left = [len(short[field]) / len(whole[field]) for field in order]
     assert left == sorted(left) and sum(0 < share < 1 for share in left) <= 1
     # What stays of it is from all of the meeting.
+    # A decision or question keeps the second it was said.
+    for field in local_summary.SAID_AT:
+        seconds = dict(zip(whole[field], whole[f"{field}_said_at"], strict=True))
+        assert short[f"{field}_said_at"] == [seconds[said] for said in short[field]]
     for field in local_summary.LEAST_NEEDED:
         at = [whole[field].index(entry) for entry in short[field]]
         steps = {later - earlier for earlier, later in zip(at, at[1:], strict=False)}
@@ -1375,6 +1396,8 @@ def test_a_time_on_its_own_is_no_decision():
     assert kept == {
         "decisions": ["The cutover is on Friday at 8:00.", "8:00 stays.", "Start at 8:00"],
         "open_questions": ["Who calls?"],
+        "decisions_said_at": [None, None, None],
+        "open_questions_said_at": [None],
     }
 
 
@@ -1763,3 +1786,68 @@ def test_clients_still_make_it_a_customer_call(store, model):
     assert clients.of_meeting(store, store.meeting(meeting))["client"] == "Contoso"
     local_summary.summary(store, meeting, "small:4b", "auto")
     assert store.meeting(meeting)["template"] == "customer" and len(model.calls) == 1
+
+
+def test_decisions_and_questions_keep_the_second_they_were_said():
+    part = [Line(s, s + 3, who, text) for s, who, text in SHORT]
+    answer = {
+        "decisions": [
+            {"text": "It's on  Friday.", "said_at": "00:58"},
+            {"text": "it's on friday.", "said_at": "00:02"},  # said again: the first is kept
+            {"text": "Keep the relay.", "said_at": None},
+        ],
+        "open_questions": [{"text": "Who covers the phones?", "said_at": "00:04"}],
+    }
+    kept = local_summary.held(answer, part, ["Dana"], local_summary.SAID_AT)
+    assert kept == {
+        "decisions": ["It's on Friday.", "Keep the relay."],
+        "decisions_said_at": [61.0, None],  # held to the nearest line; none without a time
+        "open_questions": ["Who covers the phones?"],
+        "open_questions_said_at": [3.0],
+    }
+
+
+def test_what_holds_has_the_second_it_was_said_last():
+    answers = [
+        {
+            "decisions": ["The relay moves at nine.", "Keep the old relay."],
+            "decisions_said_at": [10.0, 20.0],
+            "open_questions": ["Who calls the site?"],
+            "open_questions_said_at": [30.0],
+            "settled": [],
+            "changed": [],
+        },
+        {
+            "decisions": ["Two new phones.", "Keep the old relay."],
+            "decisions_said_at": [700.0, 710.0],
+            "open_questions": [],
+            "open_questions_said_at": [],
+            "settled": ["D1"],
+            "changed": [],
+        },
+    ]
+    assert local_summary._still(answers, "D") == ["Keep the old relay.", "Two new phones."]
+    assert local_summary._still_at(answers, "D") == [710.0, 700.0]
+    assert local_summary._still_at(answers, "Q") == [30.0]
+    for answer in answers:  # parts noted before seconds were asked for have none
+        del answer["decisions_said_at"], answer["open_questions_said_at"]
+    assert local_summary._still_at(answers, "D") == [None, None]
+
+
+def test_a_summary_on_this_pc_sends_its_seconds_to_zachcore(store, model):
+    meeting = add_meeting(store, SHORT)
+    model.answer = lambda call: {
+        **ANSWER,
+        "decisions": [{"text": "The cutover is on Friday evening.", "said_at": "00:03"}],
+        "open_questions": [{"text": "Who covers the phones?", "said_at": "01:01"}],
+    }
+    content = local_summary.summary(store, meeting, "small:4b")
+
+    [call] = model.calls
+    shape = call.shape["properties"]["decisions"]["items"]["properties"]
+    assert shape["said_at"]["pattern"] == "^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?$"
+    assert (content["decisions_said_at"], content["open_questions_said_at"]) == ([3.0], [61.0])
+    assert store.summary(meeting)["content"]["decisions_said_at"] == [3.0]
+    sent = zachcore.message(store, meeting)
+    assert [d["sec"] for d in sent["decisions"]] == [3]
+    assert [q["sec"] for q in sent["questions"]] == [61]
