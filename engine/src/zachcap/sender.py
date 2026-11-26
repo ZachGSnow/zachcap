@@ -282,7 +282,9 @@ class Sender:
 
         taking = {
             row["uid"]
-            for row in store.db.execute("SELECT uid FROM outbox WHERE what IN ('recall', 'redact')")
+            for row in store.db.execute(
+                "SELECT uid FROM outbox WHERE what IN ('recall', 'redact') AND state <> 'left'"
+            )
         }
         rows = store.db.execute(
             "SELECT o.*, s.target, s.rev AS version, m.id AS meeting, m.private, m.status, "
@@ -294,14 +296,18 @@ class Sender:
         ).fetchall()
         for row in rows:
             if row["what"] in TAKE_BACK:
-                if row["target"] is None:  # taken back whole since: nothing of it is there
+                places = _places(store, row)
+                if not places:  # taken back whole since: nothing of it is there
                     with _writing(store):
                         _done(store, row, row["version"])
                     return True
-                where = Place.of(row["target"])
-                if where.target != halted and not self._held(where, now) and (key := key_of(where)):
-                    self._guarded(store, row, now, self._take_back, store, row, where, key, now)
-                    return True
+                for target in places:  # where it is now first, then where it was left
+                    where = Place.of(target)
+                    if where.target == halted or self._held(where, now):
+                        continue
+                    if key := key_of(where):
+                        self._guarded(store, row, now, self._take_back, store, row, where, key, now)
+                        return True
                 continue
             if not on or here is None or here.target == halted or paused or self._held(here, now):
                 continue
@@ -412,7 +418,9 @@ class Sender:
             rev = rev or _next_rev(sent, now)
             store.db.execute("UPDATE sends SET sent_rev = ? WHERE uid = ?", (rev, row["uid"]))
             store.db.execute(
-                "UPDATE outbox SET rev = ?, state = 'sending' WHERE id = ?", (rev, row["id"])
+                "UPDATE outbox SET rev = ?, state = CASE state WHEN 'left' THEN 'left' "
+                "ELSE 'sending' END WHERE id = ?",
+                (rev, row["id"]),
             )
         body: dict = {"ref": row["uid"], "rev": rev}
         if row["what"] == "redact":
@@ -435,8 +443,15 @@ class Sender:
             self._failed(store, row, where, answer, now)
             return
         self.held.pop(where.address, None)
+        here = row["state"] != "left" and where.target == row["target"]
         with _writing(store):
-            store.db.execute("DELETE FROM outbox WHERE id = ?", (row["id"],))
+            if not here:  # one of the places it was left on
+                store.db.execute(
+                    "DELETE FROM left_at WHERE uid = ? AND target = ?", (row["uid"], where.target)
+                )
+                _after(store, row, done_here=row["state"] == "left" or row["target"] is None)
+                return
+            _after(store, row, done_here=True)
             if row["what"] == "recall":
                 store.db.execute(
                     "UPDATE sends SET target = NULL, sent_hash = NULL, lines_hash = NULL "
@@ -627,10 +642,38 @@ def _done(store: Store, row, version: int) -> None:
         )
 
 
+def _places(store: Store, row) -> list[str]:
+    """Where a take-back goes: where the meeting is now (until it is done there), then each
+    place it was left on."""
+    here = [row["target"]] if row["target"] and row["state"] != "left" else []
+    left = store.db.execute(
+        "SELECT target FROM left_at WHERE uid = ? ORDER BY target", (row["uid"],)
+    ).fetchall()
+    return here + [target for (target,) in left if target not in here]
+
+
+def _after(store: Store, row, done_here: bool) -> None:
+    """A take-back that went to one of its places: gone once it went to all of them; while
+    only old places are left, "left", so the meeting's own requests aren't held back by
+    a server that is gone."""
+    left = store.db.execute("SELECT 1 FROM left_at WHERE uid = ?", (row["uid"],)).fetchone()
+    if done_here and not left:
+        store.db.execute("DELETE FROM outbox WHERE id = ?", (row["id"],))
+        if row["target"] is None or row["state"] == "left":
+            _forget_if_gone(store, row["uid"])
+    else:
+        state = "left" if done_here else "waiting"
+        store.db.execute(
+            "UPDATE outbox SET state = ?, tries = 0, reason = NULL, retry_at = 0 WHERE id = ?",
+            (state, row["id"]),
+        )
+
+
 def _later(store: Store, row, why: str | None, at: float, fresh: bool = False) -> None:
     """A row that goes again at ``at`` (``fresh``: with a new revision)."""
     store.db.execute(
-        "UPDATE outbox SET state = 'waiting', tries = tries + 1, reason = ?, retry_at = ?"
+        "UPDATE outbox SET state = CASE state WHEN 'left' THEN 'left' ELSE 'waiting' END, "
+        "tries = tries + 1, reason = ?, retry_at = ?"
         + (", rev = NULL, hash = NULL" if fresh else "")
         + " WHERE id = ?",
         (why, int(at), row["id"]),
@@ -657,6 +700,7 @@ def _forget_if_gone(store: Store, uid: str) -> None:
     if not store.db.execute("SELECT 1 FROM outbox WHERE uid = ?", (uid,)).fetchone():
         store.db.execute("DELETE FROM sends WHERE uid = ?", (uid,))
         store.db.execute("DELETE FROM items_gone WHERE meeting_uid = ?", (uid,))
+        store.db.execute("DELETE FROM left_at WHERE uid = ?", (uid,))
 
 
 def _seconds(value: str | None) -> float:
