@@ -432,7 +432,7 @@ export function MeetingView({
   };
 
   // A file the user picks in the save dialog (or a download, outside the desktop app).
-  const exportAs = (format: "md" | "txt" | "srt") =>
+  const exportAs = (format: "md" | "txt" | "srt" | "vtt") =>
     attempt("Couldn't export the meeting", async () => {
       const { name } = await api<{ name: string }>(`/api/meetings/${id}/export-name?format=${format}`);
       if (!isTauri()) {
@@ -711,6 +711,10 @@ export function MeetingView({
             <DropdownMenuItem onSelect={() => void exportAs("srt")}>
               <Captions className="size-4" />
               Export subtitles (.srt)
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void exportAs("vtt")}>
+              <Captions className="size-4" />
+              Export subtitles (.vtt)
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onSelect={() => setConfirmDelete(true)}>
