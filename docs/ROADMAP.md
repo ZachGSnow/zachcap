@@ -19,7 +19,7 @@ What is open. What has shipped is in the [changelog](../CHANGELOG.md).
 
 ## Not planned
 
-Meeting bots, calendar access, cloud accounts or sync, virtual audio drivers, mobile apps, macOS or Linux.
+Meeting bots, calendar access, accounts in a cloud of ZachCap's, syncing ZachCap between PCs, virtual audio drivers, mobile apps, macOS or Linux. Sending meetings to a ZachCore server of your own is in: see [FEATURES.md](FEATURES.md).
 
 ## Upkeep
 

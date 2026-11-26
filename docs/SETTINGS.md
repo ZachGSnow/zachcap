@@ -32,5 +32,6 @@ Everything is set in the app under **Settings**.
 | Watch folder | Recordings saved in this folder import themselves within a minute; turning it on asks about the ones already there | off |
 | Ticket numbers look like | Patterns for your ticket numbers: `#` a digit, `?` a letter, anything else itself, several separated by commas (`#######, INC-####`) | off |
 | Topics | Words and phrases to track, one topic per line: `Name: word, phrase` | empty |
+| ZachCore | Sends meetings to your own ZachCore server. Change... sets its address (https, or http to this PC), the key ZachCore made for ZachCap (kept in Credential Manager for that address), the space (Work or Home), what goes (summaries, tasks, facts, transcripts; the title, time, client, ticket, people and talk shares go with any of them) and clients none of whose meetings go; Test the connection checks the key. Meetings recorded from then on go; Send older meetings sends the ones before, and Take everything back takes them all back | Off; summaries, tasks and facts on, transcripts off |
 
 For development, `ZACHCAP_HOME` sets the data folder (default `%LOCALAPPDATA%\ZachCap`) and `ZACHCAP_ENGINE_DIR` where the desktop app finds the engine.

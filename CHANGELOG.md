@@ -2,6 +2,19 @@
 
 What's new in each version of ZachCap, newest first. It's in the app as well, under **About**. The releases themselves are on [GitHub](https://github.com/ZachGSnow/zachcap/releases).
 
+## Unreleased
+
+Your meetings in ZachCore.
+
+### New
+
+- **Send meetings to ZachCore.** Off until you turn it on in Settings, with your own ZachCore server's address and key. Each meeting recorded from then on becomes a note there: its summary and your notes, its tasks, who was there and how much they talked, and lasting facts about the people and the client, which wait there for your yes; the transcript too, if you want. A voice named later, a second summary or a ticked task corrects it there, and a meeting made private, deleted or redacted is taken back, also while sending is off. A meeting's menu has Send now and Take back, and Settings says how many wait and why. Audio, voice samples, snapshots, files and dictation never go.
+- **Summaries say where.** Each decision and open question remembers the moment it was said, each action item the words it was agreed in, and a summary by Claude notes lasting facts about the people there and the client, each checked against the line it came from.
+
+### Improved
+
+- **A reworded action item stays ticked off.** When a new summary words an item you ticked off differently, it stays done instead of coming back open beside the old one.
+
 ## 0.5.0 - 2026-11-24
 
 Tidier meetings, and a better way in.
