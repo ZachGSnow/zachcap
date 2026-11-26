@@ -122,6 +122,7 @@ class Answer:
     status: int | None  # None: none came
     body: object = None
     retry_after: float | None = None
+    untrusted: str | None = None  # none came: the server's certificate didn't verify (why)
 
 
 def request(where: Place, key: str, path: str, body: dict | None = None) -> Answer:
@@ -151,6 +152,9 @@ def request(where: Place, key: str, path: str, body: dict | None = None) -> Answ
         response = conn.getresponse()
         raw = response.read(MOST_ANSWER)
         status, wait = response.status, response.getheader("Retry-After")
+    except ssl.SSLCertVerificationError as error:
+        # Never sent: certificate and name are checked against Windows' trusted roots.
+        return Answer(None, untrusted=error.verify_message or "not trusted")
     except (OSError, http.client.HTTPException):
         return Answer(None)
     finally:
@@ -728,6 +732,8 @@ def check(where: Place, key: str) -> dict:
         None: "No answer from that address",
     }
     status = answer.status
+    if answer.untrusted:
+        words[None] = f"That address's certificate isn't trusted on this PC ({answer.untrusted})"
     return {
         "ok": False,
         "status": status,
