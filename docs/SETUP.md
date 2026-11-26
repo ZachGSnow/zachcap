@@ -50,7 +50,7 @@ Only text is sent, never audio, and only when you ask for something. The model i
 2. In a terminal: `ollama pull qwen3.5:4b` (3.3 GB). It did best of the small models tried.
 3. In ZachCap: **Settings > Summaries > Model on this PC**.
 
-It writes slower and misses more than Claude does, but nothing leaves the PC. Private meetings are always left to it.
+It writes slower and misses more than Claude does, but writing sends nothing anywhere. Private meetings are always left to it.
 
 ## 5. Before your first call
 

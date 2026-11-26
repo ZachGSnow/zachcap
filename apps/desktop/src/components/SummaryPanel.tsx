@@ -507,7 +507,7 @@ export function SummaryPanel({
         <p className="mt-4 font-medium">Summarize this meeting</p>
         <p className="mt-1 max-w-sm text-sm text-muted-foreground">
           {writer === "local"
-            ? `${writerNames.local} reads the named transcript and pulls out decisions, action items, commitments and who said what. Nothing is sent; it takes a few minutes.`
+            ? `${writerNames.local} reads the named transcript and pulls out decisions, action items, commitments and who said what. Writing it sends nothing; it takes a few minutes.`
             : "Claude reads the named transcript (text only, never audio) and pulls out decisions, action items, commitments and who said what."}{" "}
           Pick the kind of meeting to set the focus.
         </p>
