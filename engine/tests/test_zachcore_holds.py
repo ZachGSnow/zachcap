@@ -5,6 +5,7 @@ read, a revision out of reason, or one byte a minute; two refusing servers made 
 loop with no wait."""
 
 import socket
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 from test_zachcore_sender import Clock, due, meeting, paths
 from zachcore_fake import Fake
 
-from zachcap import apikeys, outbox, sender, zachcore
+from zachcap import apikeys, outbox, redact, sender, zachcore
 from zachcap.api import create_app
 from zachcap.store import Store
 
@@ -239,3 +240,77 @@ def test_a_typed_key_with_a_line_break_isnt_tried(tmp_path, monkeypatch):
         )
         assert said.status_code == 400 and typed not in said.text
     assert tried == []
+
+
+# Meetings left on a server ZachCap moved away from ("Leave them there"): what is taken back of
+# them later is taken back from there too. Zach's rule: made private, deleted or redacted after
+# it was sent, a meeting is taken back, and that is never dropped.
+
+
+def left_there(store: Store, other: Fake, send, clock) -> int:
+    """A meeting sent to the first server, then left there when meetings went to ``other``,
+    and sent there too."""
+    m = meeting(store, clock)
+    steps(send, clock, 62)
+    old = sender.place(store).target
+    store.set_setting(sender.ADDRESS, other.address)
+    with store.transaction():
+        assert outbox.move(store.db, old, False) == 1
+    steps(send, clock, 62)
+    assert [uid for uid, _ in other.stored] == ["meeting-1"]
+    return m
+
+
+def test_made_private_it_is_taken_back_from_where_it_was_left_too(store, fake, other, send, clock):
+    m = left_there(store, other, send, clock)
+    assert fake.messages["meeting-1"]["result"] == "stored"  # left there, as asked
+    store.update_meeting(m, private=1)
+    steps(send, clock, 62)
+    assert other.messages["meeting-1"]["result"] == "private"
+    assert fake.messages["meeting-1"]["result"] == "private"
+    assert store.db.execute("SELECT COUNT(*) FROM left_at").fetchone()[0] == 0
+
+
+def test_deleted_it_is_forgotten_only_once_every_place_has_taken_it_back(
+    store, fake, other, send, clock
+):
+    m = left_there(store, other, send, clock)
+    fake.down = True  # the old server doesn't answer for a while
+    store.delete_meeting(m)
+    steps(send, clock, 120)
+    assert "in/recall" in paths(other)
+    row = store.db.execute("SELECT state FROM outbox WHERE uid = 'meeting-1'").fetchone()
+    assert row["state"] == "left"  # done where it is now, waiting for the old one
+    assert store.db.execute("SELECT 1 FROM sends WHERE uid = 'meeting-1'").fetchone()
+    fake.down = False
+    steps(send, clock, sender.LONGEST_WAIT + 62)
+    assert fake.messages["meeting-1"]["result"] == "private"  # recalled
+    assert store.db.execute("SELECT 1 FROM sends WHERE uid = 'meeting-1'").fetchone() is None
+    assert store.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0
+
+
+def test_redacted_the_clean_meeting_goes_while_the_old_server_waits(
+    store, fake, other, send, clock
+):
+    m = left_there(store, other, send, clock)
+    fake.down = True
+    redact.redact(store, m, 250.0, 300.0, with_audio=False)
+    steps(send, clock, 120)
+    assert paths(other)[-2:] == ["in/redact", "in"]  # redacted, and the clean meeting again
+    assert "in/redact" not in paths(fake)
+    fake.down = False
+    steps(send, clock, sender.LONGEST_WAIT + 62)
+    assert "in/redact" in paths(fake)
+    assert store.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0
+
+
+def test_a_library_from_before_gets_the_places(tmp_path: Path):
+    store = Store(tmp_path / "old.db")
+    store.close()
+    db = sqlite3.connect(tmp_path / "old.db")
+    db.execute("DROP TABLE left_at")
+    db.commit()
+    db.close()
+    store = Store(tmp_path / "old.db")
+    assert store.db.execute("SELECT name FROM sqlite_master WHERE name = 'left_at'").fetchone()
+    store.close()

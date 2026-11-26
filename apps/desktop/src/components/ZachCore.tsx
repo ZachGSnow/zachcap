@@ -309,7 +309,7 @@ function Setup({ status, firstTime, onDone }: { status: ZachCoreStatus; firstTim
             </DialogHeader>
             <p className="text-xs text-muted-foreground">
               Taken back from there first, {host(before.address)} keeps only their time and title. Left there, it keeps them as they
-              are. Private, deleted and redacted ones are taken back from there either way.
+              are. One made private, deleted or redacted, now or later, is taken back from there either way.
             </p>
             <DialogFooter>
               <Button variant="outline" disabled={saving} onClick={() => void save("leave", firstTime ? true : undefined)}>

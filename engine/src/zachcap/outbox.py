@@ -231,6 +231,7 @@ def migrate(db: sqlite3.Connection) -> None:
     nothing of it, and the next start does it. Meetings already there aren't wanted."""
     if _has_uid(db):
         _add_sent(db)
+        _add_left(db)
         return
     db.execute("BEGIN IMMEDIATE")
     try:
@@ -239,9 +240,34 @@ def migrate(db: sqlite3.Connection) -> None:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN uid TEXT")
                 db.execute(f"UPDATE {table} SET uid = {UID}")
                 db.execute(f"CREATE UNIQUE INDEX {table}_by_uid ON {table}(uid)")
-            for statement in _statements(TABLES + TRIGGERS):
+            for statement in _statements(TABLES + LEFT + TRIGGERS):
                 db.execute(statement)
             db.execute("INSERT INTO sends (uid) SELECT uid FROM meetings")
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
+
+# The servers or spaces a meeting was left on when meetings went elsewhere ("Leave them
+# there"): what is taken back of it later is taken back from there too.
+LEFT = """
+CREATE TABLE IF NOT EXISTS left_at (
+    uid         TEXT NOT NULL,                   -- the meeting's
+    target      TEXT NOT NULL,                   -- where it was left
+    PRIMARY KEY (uid, target)
+);
+"""
+
+
+def _add_left(db: sqlite3.Connection) -> None:
+    """The places meetings were left on, in a library from before they were kept."""
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'left_at'").fetchone():
+        return
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in _statements(LEFT):
+            db.execute(statement)
         db.commit()
     except BaseException:
         db.rollback()
@@ -398,6 +424,11 @@ def move(db: sqlite3.Connection, old: str, take_back_first: bool) -> int:
         if take_back_first:
             db.execute(_RECALL, (uid,))  # its message waits for it, then goes to the new one
         else:  # a recall this asked for before is dropped: nothing is where it was now
+            # It stays there as it is, and is taken back from there too should it be made
+            # private, deleted or redacted later. A recall of it waiting is this move's own
+            # (taking them back first was asked for before): not wanted any more.
+            db.execute("DELETE FROM outbox WHERE uid = ? AND what = 'recall'", (uid,))
+            db.execute("INSERT OR IGNORE INTO left_at (uid, target) VALUES (?, ?)", (uid, old))
             db.execute(
                 "UPDATE sends SET target = NULL, sent_hash = NULL, lines_hash = NULL WHERE uid = ?",
                 (uid,),

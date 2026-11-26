@@ -482,7 +482,7 @@ def rows(path: Path, skip: tuple[str, ...] = ()) -> dict[str, list]:
     return found
 
 
-NEW = ("sends", "outbox", "items_gone", "changes")  # ("changes" only counts)
+NEW = ("sends", "outbox", "items_gone", "left_at", "changes")  # ("changes" only counts)
 ADDED = ("uid", "voice_id", "quote")  # columns added to tables a library had
 
 
