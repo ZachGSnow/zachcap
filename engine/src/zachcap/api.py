@@ -61,6 +61,7 @@ from . import (
     prompts,
     redact,
     related,
+    sender,
     shortcuts,
     terms,
     tickets,
@@ -864,6 +865,8 @@ def create_app(token: str) -> FastAPI:
     app.state.worker_gpu = worker.gpu  # shared with the live transcript (tests look)
     # The watch folder's looks (a thread started by serve()); Settings reads what it found.
     app.state.folder_watch = watchfolder.FolderWatch(worker.submit)
+    # What goes to ZachCore, from the outbox (a thread started by serve()); off until turned on.
+    app.state.sender = sender.Sender()
 
     def authorized(request: Request) -> None:
         """The gate has checked the token already; every route checks it again, so none can
@@ -2520,6 +2523,10 @@ def serve(port: int, token: str) -> None:
     threading.Thread(target=app.state.look_for_gpu, name="zachcap-gpu-check", daemon=True).start()
     threading.Thread(target=app.state.process_left, name="zachcap-left", daemon=True).start()
     threading.Thread(target=app.state.leave_out_brief, name="zachcap-brief", daemon=True).start()
+    # Meetings to ZachCore, when that is on; taking back what was sent, even when it's off.
+    threading.Thread(
+        target=app.state.sender.run_forever, name="zachcap-sender", daemon=True
+    ).start()
     # Audio a decode left in the temp folder when the PC went off, or an older ZachCap stopped.
     threading.Thread(target=decode_child.tidy, name="zachcap-tidy", daemon=True).start()
     sock = listen_on(port)

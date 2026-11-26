@@ -59,7 +59,11 @@ CREATE TABLE IF NOT EXISTS outbox (
     tries       INTEGER NOT NULL DEFAULT 0,
     reason      TEXT,                            -- why it waits or stopped; never a word of it
     quiet_until INTEGER NOT NULL DEFAULT 0,      -- seconds since 1970
-    retry_at    INTEGER NOT NULL DEFAULT 0
+    retry_at    INTEGER NOT NULL DEFAULT 0,
+    rev         INTEGER,                         -- the revision its request went with
+    hash        TEXT,                            -- of what that request said
+    lines_before TEXT,                           -- a redaction's: the transcript's hash before
+    lines_after TEXT                             -- ... and after it
 );
 CREATE UNIQUE INDEX IF NOT EXISTS outbox_one ON outbox(uid, what) WHERE what <> 'redact';
 -- Action items of a meeting that may be on the server, gone since. Never what they said: only
@@ -219,10 +223,14 @@ TRIGGERS = (
 )
 
 
+SENT = ("rev INTEGER", "hash TEXT", "lines_before TEXT", "lines_after TEXT")  # added later
+
+
 def migrate(db: sqlite3.Connection) -> None:
     """Adds all of this to a library that doesn't have it, in one transaction: cut off, there's
     nothing of it, and the next start does it. Meetings already there aren't wanted."""
     if _has_uid(db):
+        _add_sent(db)
         return
     db.execute("BEGIN IMMEDIATE")
     try:
@@ -244,6 +252,26 @@ def _has_uid(db: sqlite3.Connection) -> bool:
     return any(row[1] == "uid" for row in db.execute("PRAGMA table_info(meetings)"))
 
 
+def _add_sent(db: sqlite3.Connection) -> None:
+    """The columns of a request the outbox has had since it first sent, in a library whose
+    outbox is older."""
+    if _has_sent(db):
+        return
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        if not _has_sent(db):  # another process may have added them meanwhile
+            for column in SENT:
+                db.execute(f"ALTER TABLE outbox ADD COLUMN {column}")
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
+
+def _has_sent(db: sqlite3.Connection) -> bool:
+    return any(row[1] == "rev" for row in db.execute("PRAGMA table_info(outbox)"))
+
+
 def _statements(script: str) -> list[str]:
     """A script's statements one by one: executescript would end the transaction first."""
     found, text = [], ""
@@ -256,26 +284,35 @@ def _statements(script: str) -> list[str]:
     return found
 
 
-def redacting(db: sqlite3.Connection, meeting_id: int, start: float, end: float) -> None:
+def redacting(db: sqlite3.Connection, meeting_id: int, start: float, end: float) -> int | None:
     """Before start..end (seconds) leaves a meeting, in the same transaction: the server is to
     take it out as well, if it may have any of it. A line that begins before the stretch and
     reaches into it loses its words here, and the server finds lines by when they begin, so it
-    is asked from there on."""
+    is asked from there on. Returns the row, if there is one."""
     sent = db.execute(
         "SELECT s.uid FROM sends s JOIN meetings m ON m.uid = s.uid "
         "WHERE m.id = ? AND s.target IS NOT NULL",
         (meeting_id,),
     ).fetchone()
     if sent is None:
-        return
+        return None
     first = db.execute(
         "SELECT MIN(start) FROM segments WHERE meeting_id = ? AND start < ? AND end > ?",
         (meeting_id, end, start),
     ).fetchone()[0]
-    db.execute(
+    return db.execute(
         f"INSERT INTO outbox (uid, what, from_sec, to_sec, quiet_until) "
         f"VALUES (?, 'redact', ?, ?, {NOW})",
         (sent[0], min(start, first) if first is not None else start, end),
+    ).lastrowid
+
+
+def lines_around(db: sqlite3.Connection, row: int, before: str, after: str) -> None:
+    """A redaction's transcript, as hashed before and after it: the server takes out only the
+    stretch, so when it had the lines as they were, it has them as they are now once the
+    redaction went, and they aren't sent again."""
+    db.execute(
+        "UPDATE outbox SET lines_before = ?, lines_after = ? WHERE id = ?", (before, after, row)
     )
 
 
