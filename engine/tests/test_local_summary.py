@@ -1751,7 +1751,17 @@ def test_a_meeting_deleted_while_it_is_written_is_left_alone(api, store, model):
     asked = summarize_(api, meeting, by="local")
     assert held.entered.wait(10)
     assert api.delete(f"/api/meetings/{meeting}", headers=AUTH).is_success
-    assert over(api, asked)["state"] == "stopped" and store.summary(meeting) is None
+    run = f"/api/writing/{started(asked)}"
+
+    def ended() -> bool:
+        answer = api.get(run, headers=AUTH)
+        return answer.status_code == 404 or answer.json()["state"] != "writing"
+
+    until(ended)
+    # Stopped; or, when it stopped before the meeting's words went, forgotten with them.
+    answer = api.get(run, headers=AUTH)
+    assert answer.status_code == 404 or answer.json()["state"] == "stopped"
+    assert store.summary(meeting) is None
 
 
 def test_a_model_that_fails_says_why(api, store, model, monkeypatch):
