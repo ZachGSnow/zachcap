@@ -1,0 +1,155 @@
+{
+  "ref": "meeting-1",
+  "title": "Contoso cutover sync",
+  "started": "2026-11-25T13:00",
+  "seconds": 900,
+  "app": "Teams",
+  "client": "Contoso",
+  "ticket": "T-20931",
+  "share": 0.34,
+  "people": [
+    {
+      "ref": "person-maya-chen",
+      "name": "Maya Chen",
+      "org": "Contoso",
+      "sure": true,
+      "share": 0.28
+    },
+    {
+      "ref": "person-erin-moss",
+      "name": "Erin Moss",
+      "sure": true,
+      "share": 0.17
+    },
+    {
+      "ref": "person-tom-avery",
+      "name": "Tom Avery",
+      "org": "Contoso",
+      "sure": false,
+      "share": 0.11
+    },
+    {
+      "ref": "v5",
+      "name": "Speaker 4",
+      "sure": false,
+      "share": 0.07
+    }
+  ],
+  "overview": "The cutover stays on Friday at 8. Dana books the room; the rollback steps go out first.\n\n## My notes\n- 07:30 Ask about the rollback\n  and the change window\n- 10:20 Bookmarked moment",
+  "decisions": [
+    {
+      "ref": "d1",
+      "text": "Cut over on Friday at 8",
+      "sec": 296
+    },
+    {
+      "ref": "d2",
+      "text": "Keep the old server for a week",
+      "sec": 602
+    }
+  ],
+  "questions": [
+    {
+      "ref": "q1",
+      "text": "Who tells the help desk?",
+      "sec": 512
+    }
+  ],
+  "topics": [
+    {
+      "ref": "t1",
+      "text": "Cutover",
+      "sec": 10
+    },
+    {
+      "ref": "t2",
+      "text": "Rollback",
+      "sec": 400
+    }
+  ],
+  "tasks": [
+    {
+      "ref": "task-3",
+      "title": "Check the firewall rules",
+      "owner": "person-erin-moss",
+      "done": false,
+      "sec": 300
+    },
+    {
+      "ref": "task-1",
+      "title": "Send Dana the rollback steps",
+      "owner": "p-me",
+      "done": false,
+      "sec": 450
+    },
+    {
+      "ref": "task-6",
+      "title": "Tell the help desk",
+      "owner": "nobody",
+      "done": false,
+      "sec": 512
+    },
+    {
+      "ref": "task-2",
+      "title": "Book the server room",
+      "owner": "person-maya-chen",
+      "due": "2026-11-27",
+      "done": true,
+      "sec": 620
+    },
+    {
+      "ref": "task-7",
+      "title": "Order the new cables",
+      "owner": "Priya",
+      "done": false,
+      "sec": 680
+    },
+    {
+      "ref": "task-4",
+      "title": "Share the floor plan",
+      "owner": "person-tom-avery",
+      "done": false,
+      "sec": 750
+    },
+    {
+      "ref": "task-5",
+      "title": "Ask the landlord about access",
+      "owner": "v5",
+      "done": false,
+      "sec": 820
+    },
+    {
+      "ref": "task-8",
+      "title": "Call back about the badge",
+      "owner": "Unknown",
+      "done": false,
+      "sec": 865
+    }
+  ],
+  "facts": [
+    {
+      "ref": "f92a19452be8d6e52",
+      "about": "client",
+      "name": "Size",
+      "value": "About 120 people",
+      "sec": 260,
+      "quote": "we are about 120 people"
+    },
+    {
+      "ref": "f59b5775361367c1b",
+      "about": "person-erin-moss",
+      "name": "Role",
+      "value": "Network engineer",
+      "sec": 300,
+      "quote": "I look after the network"
+    },
+    {
+      "ref": "f7557a9a621c9782b",
+      "about": "person-maya-chen",
+      "name": "title",
+      "value": "IT director",
+      "sec": 640,
+      "quote": "I run IT there now"
+    }
+  ]
+}

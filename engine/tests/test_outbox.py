@@ -476,13 +476,14 @@ def rows(path: Path, skip: tuple[str, ...] = ()) -> dict[str, list]:
     for name in names:
         if name.startswith(("segments_fts", "sqlite_", *skip)):
             continue
-        columns = [r[1] for r in db.execute(f"PRAGMA table_info({name})") if r[1] != "uid"]
+        columns = [r[1] for r in db.execute(f"PRAGMA table_info({name})") if r[1] not in ADDED]
         found[name] = db.execute(f"SELECT {', '.join(columns)} FROM {name}").fetchall()
     db.close()
     return found
 
 
 NEW = ("sends", "outbox", "items_gone", "changes")  # ("changes" only counts)
+ADDED = ("uid", "voice_id")  # columns added to tables a library had
 
 
 def test_a_library_made_by_0_5_0_keeps_everything_and_sends_nothing(old: Path):

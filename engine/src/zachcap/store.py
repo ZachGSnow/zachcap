@@ -286,6 +286,21 @@ class Store:
             self.db.execute("ALTER TABLE segments ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
             self.db.commit()
         outbox.migrate(self.db)
+        # The voice an action item's owner is, so it follows when the voice is named or named
+        # again. Gone with the voice (a meeting processed again): then its owner's name counts.
+        if not self._has_column("action_items", "voice_id"):
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                # Under the write lock: another process may have added it meanwhile.
+                if not self._has_column("action_items", "voice_id"):
+                    self.db.execute(
+                        "ALTER TABLE action_items ADD COLUMN voice_id INTEGER "
+                        "REFERENCES meeting_speakers(id) ON DELETE SET NULL"
+                    )
+                self.db.commit()
+            except BaseException:
+                self.db.rollback()
+                raise
         if self.version() < VERSION:
             self.db.execute(f"PRAGMA user_version = {VERSION}")
             self.db.commit()
@@ -297,6 +312,9 @@ class Store:
 
     def version(self) -> int:
         return self.db.execute("PRAGMA user_version").fetchone()[0]
+
+    def _has_column(self, table: str, column: str) -> bool:
+        return any(row["name"] == column for row in self.db.execute(f"PRAGMA table_info({table})"))
 
     def close(self) -> None:
         self.db.close()
@@ -605,6 +623,45 @@ class Store:
         )
         self._commit()
 
+    def voice_named(self, meeting_id: int, name: str | None) -> int | None:
+        """The voice of a meeting that a name from its summary (an action item's owner) is: by
+        its label ("Speaker 2"), the name Claude saw it as ("Dana Lee", "Speaker 2 (Dana?)",
+        you), or else by the name or first name of whom it is or is suggested to be. None for
+        Unassigned, a voice left out, somebody who didn't speak, or a name two people have."""
+        wanted = _folded(name or "")
+        if not wanted:
+            return None
+        voices = self.db.execute(
+            "SELECT ms.id, ms.label, ms.status, ms.speech_seconds, ms.person_id, p.name, "
+            f"p.is_me, {IN_SHARED} AS shared FROM meeting_speakers ms "
+            "LEFT JOIN people p ON p.id = ms.person_id "
+            "WHERE ms.meeting_id = ? AND ms.status != 'left_out'",
+            (meeting_id,),
+        ).fetchall()
+        shown_as, named_as = [], []
+        for voice in voices:
+            named = voice["name"] is not None and voice["status"] in ("auto", "confirmed")
+            suggested = voice["name"] is not None and voice["status"] == "suggested"
+            suggested = suggested and bool(voice["shared"])  # else Claude saw only the label
+            shown = {_folded(voice["label"])}
+            if named:
+                shown.add(_folded(voice["name"]))
+                if voice["is_me"]:
+                    shown |= {"you", "me"}
+            if suggested:
+                shown.add(_folded(f"{voice['label']} ({voice['name']}?)"))
+            full = _folded(voice["name"] or "")
+            if wanted in shown or _unsure(wanted) in shown:
+                shown_as.append(voice)
+            elif (named or suggested) and wanted in (full, *full.split()[:1]):
+                named_as.append(voice)
+        for found in (shown_as, named_as):
+            if found:
+                if len({voice["person_id"] or -voice["id"] for voice in found}) > 1:
+                    return None  # two people
+                return max(found, key=lambda voice: voice["speech_seconds"] or 0)["id"]
+        return None
+
     def add_segments(self, meeting_id: int, rows: list[tuple]) -> None:
         """rows: (meeting_speaker_id, track, start, end, text, confidence)"""
         self.db.executemany(
@@ -785,17 +842,18 @@ class Store:
                     "done" if done else "open",
                     match["done_at"] if done else None,
                     uid,
+                    self.voice_named(meeting_id, item["owner"]),
                 )
             )
         rows += [
             (meeting_id, d["owner"], d["task"], d["due"], d["said_at"], d["kind"], "done",
-             d["done_at"], d["uid"])
+             d["done_at"], d["uid"], d["voice_id"])
             for d in left if d["status"] == "done"
         ]  # fmt: skip
         self.db.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
         self.db.executemany(
             "INSERT INTO action_items (meeting_id, owner, task, due, said_at, kind, status, "
-            "done_at, uid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "done_at, uid, voice_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         self._commit()
@@ -1268,6 +1326,15 @@ class Store:
 
 def _normalized(text: str) -> str:
     return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+
+def _folded(name: str) -> str:
+    return " ".join(name.casefold().split())
+
+
+def _unsure(name: str) -> str:
+    """A name without the suggestion after it ("speaker 2 (dana?)" is "speaker 2")."""
+    return re.sub(r"\s*\([^()]*\?\)$", "", name)
 
 
 SAME = 0.8  # two wordings this alike are the same task
