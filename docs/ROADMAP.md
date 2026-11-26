@@ -6,7 +6,7 @@ What is open. What has shipped is in the [changelog](../CHANGELOG.md).
 
 | What | Where it stands |
 |---|---|
-| Help during the call | "Catch me up" on what was said so far, a question about the call while it goes on, and a first summary the moment it ends, from the live transcript. Granola, Fireflies, Notion and Teams have it. The live transcript is on by default only with an NVIDIA GPU |
+| Help during the call | Catch me up is in. To come: a question about the call while it goes on (the panel never takes the keyboard, so it would be the main window's), and a first summary the moment it ends, from the live transcript. The live transcript is on by default only with an NVIDIA GPU |
 | Calls that switch language | Whisper is told one language, or detects one for each track. faster-whisper can tell it for each stretch |
 | A signed installer | Needs a code-signing certificate. Until then SmartScreen warns, and Smart App Control has to be off |
 | Tests on more hardware | A live Teams call on a PC with an NVIDIA GPU, a headset plugged in mid-call, a laptop without built-in echo cancellation, Windows 10. PyTorch 2.13 comes after a run on an NVIDIA GPU |

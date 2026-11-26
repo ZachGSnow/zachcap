@@ -634,12 +634,17 @@ class Live:
 
     def text(self, me: str = "You", them: str = "Call") -> str:
         """The live transcript so far as plain lines ("[mm:ss] You: ..."), for the notes."""
-        out = []
-        for line in self.lines():
-            minutes, seconds = divmod(int(line["start"]), 60)
-            who = me if line["track"] == "mic" else them
-            out.append(f"[{minutes:02d}:{seconds:02d}] {who}: {line['text']}")
-        return "\n".join(out)
+        return as_text(self.lines(), me, them)
+
+
+def as_text(lines: list[dict], me: str = "You", them: str = "Call") -> str:
+    """Live lines (Live.lines) as plain lines, "[mm:ss] You: ...", the call's as ``them``."""
+    out = []
+    for line in lines:
+        minutes, seconds = divmod(int(line["start"]), 60)
+        who = me if line["track"] == "mic" else them
+        out.append(f"[{minutes:02d}:{seconds:02d}] {who}: {line['text']}")
+    return "\n".join(out)
 
 
 def _both_yours(before: Piece, piece: Piece) -> bool:

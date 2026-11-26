@@ -41,6 +41,7 @@ from . import (
     audio,
     autorecord,
     brief,
+    catchup,
     clients,
     decode_child,
     diarize,
@@ -2194,6 +2195,20 @@ def create_app(token: str) -> FastAPI:
         if meeting_id is None:
             raise HTTPException(status_code=409, detail="Not recording")
         return {"meeting_id": meeting_id}
+
+    @app.post("/api/live/catch-up", dependencies=auth)
+    def live_catch_up(store: Store = Depends(db)):
+        """What the recording running now (or the one that just ended) has said so far,
+        short, for the live panel: from its live transcript, which is in memory only."""
+        now = live_state["now"]
+        if now is None:
+            raise HTTPException(status_code=409, detail="No call has a live transcript")
+        try:
+            return catchup.catch_up(store, now.meeting_id, now.live.lines(), now.me)
+        except RuntimeError as exc:  # what to do, private, Ollama: said as it is
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # network, auth, rate limits: show the reason
+            raise HTTPException(status_code=502, detail=f"Claude request failed: {exc}") from exc
 
     @app.get("/api/live", dependencies=auth)
     def live_lines(run: str | None = None, after: int = 0):

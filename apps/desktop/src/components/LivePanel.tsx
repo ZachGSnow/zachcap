@@ -1,12 +1,24 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ArrowDown, Info, TriangleAlert, X } from "lucide-react";
+import { ArrowDown, Info, Loader2, Sparkles, TriangleAlert, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { api, connect, type LiveState } from "@/lib/engine";
 import { reason } from "@/lib/feedback";
 import { clock } from "@/lib/format";
-import { EMPTY_VIEW, atEnd, dot, elapsedNow, livePath, mergeLines, notices, speaker, type LiveView } from "@/lib/live";
+import {
+  EMPTY_VIEW,
+  atEnd,
+  catchUpBy,
+  dot,
+  elapsedNow,
+  livePath,
+  mergeLines,
+  notices,
+  speaker,
+  type CatchUp,
+  type LiveView,
+} from "@/lib/live";
 import { cn } from "@/lib/utils";
 
 /** How often the panel asks for new lines. */
@@ -44,6 +56,22 @@ export function LivePanel() {
   const [saidAt, setSaidAt] = useState(() => Date.now());
   const [unreachable, setUnreachable] = useState<string | null>(null);
   const viewNow = useRef(view);
+  // What Catch me up said, or why it couldn't; kept until closed or asked again.
+  const [caughtUp, setCaughtUp] = useState<CatchUp | null>(null);
+  const [catchError, setCatchError] = useState<string | null>(null);
+  const [catching, setCatching] = useState(false);
+  const catchMeUp = async () => {
+    setCatching(true);
+    setCatchError(null);
+    try {
+      setCaughtUp(await api<CatchUp>("/api/live/catch-up", { method: "POST" }));
+    } catch (error) {
+      setCaughtUp(null);
+      setCatchError(reason(error));
+    } finally {
+      setCatching(false);
+    }
+  };
 
   // Asked once a second, one request at a time, from where the panel has read to. Where the
   // engine is is asked each time too: a restarted engine has a port and a token of its own.
@@ -110,9 +138,19 @@ export function LivePanel() {
         <span className="text-sm font-medium">Live transcript</span>
         <Clock elapsed={state?.elapsed ?? null} saidAt={saidAt} unreachable={unreachable} />
         <Button
-          size="icon-xs"
+          size="xs"
           variant="ghost"
           className="ml-auto"
+          disabled={catching || view.lines.length === 0}
+          title="What the call has said so far, in a few lines"
+          onClick={() => void catchMeUp()}
+        >
+          {catching ? <Loader2 className="animate-spin" /> : <Sparkles />}
+          Catch me up
+        </Button>
+        <Button
+          size="icon-xs"
+          variant="ghost"
           title="Close for this recording (the Captions button in the recording bar brings it back)"
           aria-label="Close the live panel"
           onClick={() =>
@@ -142,6 +180,27 @@ export function LivePanel() {
           <span className="min-w-0">{notice.text}</span>
         </p>
       ))}
+      {(caughtUp || catchError) && (
+        <div className="max-h-[45%] shrink-0 overflow-y-auto border-b bg-muted/40 px-3 py-2">
+          <div className="flex items-start gap-2">
+            <p className={cn("min-w-0 flex-1 text-sm leading-snug whitespace-pre-wrap", catchError && "text-destructive")}>
+              {catchError ?? caughtUp?.text}
+            </p>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Close what Catch me up said"
+              onClick={() => {
+                setCaughtUp(null);
+                setCatchError(null);
+              }}
+            >
+              <X />
+            </Button>
+          </div>
+          {caughtUp && !catchError && <p className="mt-1 text-xs text-muted-foreground">{catchUpBy(caughtUp)}</p>}
+        </div>
+      )}
       <div className="relative min-h-0 flex-1">
         <div ref={list} onScroll={scrolled} className="h-full overflow-y-auto px-3 py-2" aria-live="polite">
           {view.lines.length === 0 ? (
