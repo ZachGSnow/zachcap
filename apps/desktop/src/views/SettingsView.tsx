@@ -284,6 +284,7 @@ const KEEP_AUDIO = [
   { value: "30", label: "30 days" },
   { value: "90", label: "90 days" },
   { value: "365", label: "1 year" },
+  { value: "-1", label: "Until it's processed" },
 ];
 
 const LEAVE_OUT_BRIEF = [
@@ -1260,7 +1261,7 @@ export function SettingsView() {
           />
           <Row
             label="Keep recordings"
-            help="After this, a meeting's audio and its snapshot pictures are deleted; its transcript, summary, notes, the text read in its snapshots and the voices it taught stay. It can't be played or reprocessed after."
+            help="After this, a meeting's audio and its snapshot pictures are deleted; its transcript, summary, notes, the text read in its snapshots and the voices it taught stay. It can't be played or reprocessed after. Until it's processed: as soon as a meeting is processed and every voice in it has a name, only the text stays."
           >
             <Select
               label="Keep recordings"

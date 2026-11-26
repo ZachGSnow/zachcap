@@ -4,6 +4,10 @@ What's new in each version of ZachCap, newest first. It's in the app as well, un
 
 ## Unreleased
 
+### New
+
+- **Text only, if you like.** Keep recordings has a new choice, Until it's processed: once a meeting is processed and every voice in it has a name, its audio and snapshot pictures are deleted and the text stays. It can't be played or processed again after.
+
 ### Improved
 
 - **Meetings get their summary's title.** A recording still called what ZachCap named it when it began, like "Teams call Nov 26 09:00", takes the title its summary gives it, from Claude or the model on this PC. A title you gave it never changes.

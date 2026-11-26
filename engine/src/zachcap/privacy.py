@@ -68,6 +68,9 @@ def may_send(store: Store, meeting_ids: Iterable[int], since: float) -> bool:
     )
 
 
+UNTIL_PROCESSED = -1  # "keep audio": until processed, every voice named (text only)
+
+
 def _luhn(digits: str) -> bool:
     total = 0
     for index, char in enumerate(reversed(digits)):
@@ -98,18 +101,34 @@ def outgoing(store: Store, text: str) -> str:
     return mask(text) if store.setting("mask_before_claude") == "1" else text
 
 
+def transcript_only(store: Store) -> bool:
+    """Recordings are kept only until each meeting is processed and every voice in it has a
+    name ("keep audio" UNTIL_PROCESSED): then only the text stays."""
+    return _keep_days(store) == UNTIL_PROCESSED
+
+
+def _keep_days(store: Store) -> int:
+    try:
+        return int(store.setting("keep_audio_days", "0") or 0)
+    except ValueError:
+        return 0
+
+
 def remove_old_audio(store: Store, now: datetime | None = None) -> list[int]:
     """Delete the recordings of meetings older than the "keep audio" setting, and their
-    snapshot pictures. The transcript, summary, notes (a snapshot's text included) and
-    voiceprints stay. Only folders ZachCap itself created are touched, and never a meeting
-    being recorded or processed. Returns the meetings cleaned."""
-    days = int(store.setting("keep_audio_days", "0") or 0)
-    if days <= 0:
+    snapshot pictures; with UNTIL_PROCESSED, of every meeting that is processed and has a
+    name for each voice (one that still needs names keeps them: naming plays a voice).
+    The transcript, summary, notes (a snapshot's text included) and voiceprints stay. Only
+    folders ZachCap itself created are touched, and never a meeting being recorded or
+    processed. Returns the meetings cleaned."""
+    days = _keep_days(store)
+    if days == 0:
         return []
-    cutoff = (now or datetime.now().astimezone()) - timedelta(days=days)
+    cutoff = (now or datetime.now().astimezone()) - timedelta(days=max(days, 0))
+    statuses = ("ready",) if days == UNTIL_PROCESSED else ("ready", "needs_names", "failed")
     root = paths.meetings_dir().resolve()
     cleaned = []
-    for meeting in store.meetings_with_status("ready", "needs_names", "failed"):
+    for meeting in store.meetings_with_status(*statuses):
         if meeting["audio_removed_at"]:
             continue
         started = datetime.fromisoformat(meeting["started_at"])
