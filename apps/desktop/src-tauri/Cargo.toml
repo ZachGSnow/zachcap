@@ -31,7 +31,7 @@ tauri-plugin-single-instance = "2"
 # Dictation's keys are read with a keyboard hook (src/dictation_keys.rs); the uv that sets the
 # engine up ends with ZachCap through a job (src/lib.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_System_JobObjects",
