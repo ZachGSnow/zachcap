@@ -62,6 +62,11 @@ def _saved_patterns(store) -> list[re.Pattern]:
         return []
 
 
+def any_in(store, text: str) -> bool:
+    """Whether a text has a ticket number by the patterns in Settings."""
+    return bool(_found(text, _saved_patterns(store)))
+
+
 def normalized(ticket: str) -> str:
     return ticket.strip().upper()
 

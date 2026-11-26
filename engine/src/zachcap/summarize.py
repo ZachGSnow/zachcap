@@ -12,7 +12,7 @@ from typing import Literal, NamedTuple
 import anthropic
 from pydantic import BaseModel, Field
 
-from . import apikeys, autokind, clients, privacy, prompts, vocabulary
+from . import apikeys, autokind, clients, privacy, prompts, tickets, titles, vocabulary
 from .prompts import DEFAULT_TEMPLATE, RECIPES, TEMPLATES  # noqa: F401 (re-exported)
 from .store import Store
 
@@ -654,13 +654,29 @@ def keep(
     tokens: tuple[int, int],
     cost: float,
 ) -> None:
-    """Keeps a summary with its meeting: its kind, what it says, and its action items."""
+    """Keeps a summary with its meeting: its kind, what it says, and its action items; and
+    its title, when the meeting is still called what ZachCap named it."""
     store.update_meeting(meeting_id, template=kind.kept, template_source=kind.source)
     store.save_summary(meeting_id, model, content, *tokens, cost)
     store.replace_action_items(
         meeting_id,
         [{**item, "said_at": to_seconds(item["said_at"])} for item in content["action_items"]],
     )
+    titled(store, meeting_id, content.get("title"))
+
+
+def titled(store: Store, meeting_id: int, title) -> None:
+    """A meeting still called what ZachCap named it when it began ("Teams call Nov 26 09:00")
+    takes its summary's title. One you gave it is never changed. A title with a ticket number
+    in it isn't taken: a title is something you wrote, so its ticket number would fill in the
+    meeting's ticket, while one only heard is offered."""
+    meeting = store.meeting(meeting_id)
+    new = titles.tidy(title)
+    if meeting is None or not new or not titles.is_made_up(meeting["title"]):
+        return
+    if tickets.any_in(store, new):
+        return
+    store.update_meeting(meeting_id, title=new)
 
 
 def summarize(store: Store, meeting_id: int, template: str | None = None) -> dict:

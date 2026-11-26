@@ -66,6 +66,7 @@ from . import (
     shortcuts,
     terms,
     tickets,
+    titles,
     topics,
     watchfolder,
     zachcore,
@@ -711,7 +712,7 @@ def create_app(token: str) -> FastAPI:
             if dictator.holding:  # started mid-dictation: that's left out too
                 recorder.mute_mic(True)
             # The meeting exists from the first second, so a crash can't lose it.
-            title = title or f"Meeting {datetime.now():%b %d %H:%M}"
+            title = title or titles.made_up("Meeting")
             started = recorder.started_at or datetime.now().astimezone()
             try:
                 with store.transaction():
@@ -875,7 +876,7 @@ def create_app(token: str) -> FastAPI:
             private = after in discarded_private
             if before is not None:
                 private = privacy.is_private(store, before)
-            title = f"{app_name} call {datetime.now():%b %d %H:%M}"
+            title = titles.made_up(f"{app_name} call")
             return begin_recording(store, title, private)
         except HTTPException as exc:
             if exc.status_code == 409:  # a sound check, or a recording starting: next look
