@@ -2,7 +2,10 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from zachcap import privacy
+from zachcap.api import create_app
 from zachcap.store import Store
 
 
@@ -83,3 +86,58 @@ def test_keeping_recordings_also_removes_snapshot_pictures_but_not_their_text(
     assert not (folder / "snapshots").exists()
     assert store.note(note)["text"] == "Error 0x80070005"
     store.close()
+
+
+def test_text_only_keeps_the_audio_until_every_voice_has_a_name(tmp_path: Path, monkeypatch):
+    """Keep recordings "until it's processed": a meeting's audio and pictures go once it is
+    processed and every voice in it has a name, however new it is."""
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    store = Store()
+    now = datetime(2026, 11, 23, 9, 0).astimezone()
+
+    def meeting(name: str, status: str) -> int:
+        folder = tmp_path / "meetings" / name
+        (folder / "snapshots").mkdir(parents=True)
+        (folder / "mic-000.flac").write_bytes(b"audio")
+        (folder / "snapshots" / "note-1.png").write_bytes(b"picture")
+        meeting_id = store.create_meeting(name, now.isoformat(timespec="seconds"), folder)
+        store.update_meeting(meeting_id, status=status)
+        return meeting_id
+
+    named = meeting("named", "ready")
+    unnamed = meeting("unnamed", "needs_names")  # naming a voice plays it
+    busy = meeting("busy", "processing")
+    failed = meeting("failed", "failed")  # may be processed again
+    assert not privacy.transcript_only(store)
+    store.set_setting("keep_audio_days", str(privacy.UNTIL_PROCESSED))
+    assert privacy.transcript_only(store)
+
+    assert privacy.remove_old_audio(store, now) == [named]
+    assert not list(Path(store.meeting(named)["folder"]).glob("*.flac"))
+    assert not (Path(store.meeting(named)["folder"]) / "snapshots").exists()
+    for kept in (unnamed, busy, failed):
+        assert list(Path(store.meeting(kept)["folder"]).glob("*.flac"))
+    store.update_meeting(unnamed, status="ready")  # every voice named now
+    assert privacy.remove_old_audio(store, now) == [unnamed]
+    store.close()
+
+
+def test_a_keep_audio_setting_that_isnt_a_number_keeps_everything(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    store = Store()
+    store.set_setting("keep_audio_days", "soon")
+    assert privacy.remove_old_audio(store) == [] and not privacy.transcript_only(store)
+    store.close()
+
+
+def test_the_settings_take_text_only(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ZACHCAP_HOME", str(tmp_path))
+    client = TestClient(create_app("test-token"), base_url="http://127.0.0.1")
+    auth = {"Authorization": "Bearer test-token"}
+    assert (
+        client.put("/api/settings", headers=auth, json={"keep_audio_days": -1}).status_code == 200
+    )
+    assert client.get("/api/settings", headers=auth).json()["keep_audio_days"] == -1
+    assert (
+        client.put("/api/settings", headers=auth, json={"keep_audio_days": -2}).status_code == 400
+    )

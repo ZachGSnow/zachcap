@@ -282,7 +282,7 @@ class SettingsBody(BaseModel):
     watch_existing: bool = False  # with watch_folder: import the files already there too
 
 
-KEEP_AUDIO_CHOICES = (0, 7, 30, 90, 365)
+KEEP_AUDIO_CHOICES = (privacy.UNTIL_PROCESSED, 0, 7, 30, 90, 365)
 WRITTEN_KEPT = 100  # documents and answers by the model on this PC, for the page
 NO_STORE = {"Cache-Control": "no-store"}
 
@@ -573,16 +573,19 @@ def create_app(token: str) -> FastAPI:
         return usable if usable is not None else store.setting(live.GPU_SETTING) == "1"
 
     def remove_old_audio() -> None:
-        """The "keep recordings" setting, applied at startup and every few hours after."""
+        """The "keep recordings" setting, applied at startup and every few hours after; every
+        few minutes when it is "until it's processed", so the audio goes soon after."""
         while True:
             store = Store()
+            soon = False
             try:
                 privacy.remove_old_audio(store)
+                soon = privacy.transcript_only(store)
             except Exception:
                 traceback.print_exc()
             finally:
                 store.close()
-            time.sleep(6 * 3600)
+            time.sleep(5 * 60 if soon else 6 * 3600)
 
     threading.Thread(target=remove_old_audio, name="zachcap-retention", daemon=True).start()
 
@@ -2568,7 +2571,8 @@ def create_app(token: str) -> FastAPI:
         if body.keep_audio_days is not None:
             if body.keep_audio_days not in KEEP_AUDIO_CHOICES:
                 raise HTTPException(
-                    status_code=400, detail="Keep audio for 0, 7, 30, 90 or 365 days"
+                    status_code=400,
+                    detail="Keep audio until processed (-1), or for 0, 7, 30, 90 or 365 days",
                 )
             store.set_setting("keep_audio_days", str(body.keep_audio_days))
             privacy.remove_old_audio(store)
